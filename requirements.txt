@@ -10,4 +10,6 @@ pytictoc==1.5.3
 opencv-python==4.10.0.84
 ollama==0.5.1
 psutil>=5.9.0
+reportlab>=4.0.0
+PyMuPDF>=1.23.0
 

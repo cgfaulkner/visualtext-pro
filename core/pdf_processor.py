@@ -21,6 +21,7 @@ sys.path.insert(0, str(project_root / "core"))
 # Import core processing modules
 from pdf_context_extractor import extract_pdf_context
 from pdf_alt_injector import inject_alt_text, create_alt_text_mapping
+from pdf_accessibility_recreator import PDFAccessibilityRecreator
 
 # Import shared modules
 from config_manager import ConfigManager
@@ -59,8 +60,12 @@ class PDFAccessibilityProcessor:
         self.decorative_size_threshold = self.processing_config.get('decorative_size_threshold', 50)
         self.skip_decorative = self.processing_config.get('skip_decorative_images', True)
         
+        # Recreation workflow setting
+        self.use_recreation_workflow = self.processing_config.get('use_recreation_workflow', False)
+        
         logger.debug(f"Decorative size threshold: {self.decorative_size_threshold}px")
         logger.debug(f"Skip decorative images: {self.skip_decorative}")
+        logger.debug(f"Use recreation workflow: {self.use_recreation_workflow}")
     
     def process_pdf(self, pdf_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -184,30 +189,47 @@ class PDFAccessibilityProcessor:
             result['generation_time'] = time.time() - generation_start
             logger.info(f"ALT text generation completed in {result['generation_time']:.2f}s")
             
-            # Step 3: Inject ALT text back into PDF
+            # Step 3: Inject ALT text into PDF
             if alt_text_mapping:
-                logger.info("Step 3: Injecting ALT text into PDF...")
+                logger.info("Step 3: Adding ALT text to PDF...")
                 injection_start = time.time()
                 
-                injection_success = inject_alt_text(
-                    str(pdf_path), 
-                    context_data, 
-                    alt_text_mapping, 
-                    str(output_path)
-                )
+                if self.use_recreation_workflow:
+                    # Use ReportLab recreation workflow for better accessibility
+                    logger.info("Using ReportLab recreation workflow for accessibility")
+                    recreator = PDFAccessibilityRecreator()
+                    recreation_result = recreator.recreate_accessible_pdf(
+                        str(pdf_path),
+                        alt_text_mapping,
+                        str(output_path)
+                    )
+                    
+                    injection_success = recreation_result['success']
+                    if not injection_success:
+                        result['errors'].extend(recreation_result['errors'])
+                else:
+                    # Use original PyMuPDF injection method
+                    logger.info("Using PyMuPDF injection method")
+                    injection_success = inject_alt_text(
+                        str(pdf_path), 
+                        context_data, 
+                        alt_text_mapping, 
+                        str(output_path)
+                    )
                 
                 result['injection_time'] = time.time() - injection_start
-                logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
+                logger.info(f"ALT text processing completed in {result['injection_time']:.2f}s")
                 
                 if injection_success:
                     result['success'] = True
-                    logger.info(f"✅ PDF processing completed successfully!")
+                    workflow_type = "recreation" if self.use_recreation_workflow else "injection"
+                    logger.info(f"✅ PDF processing completed successfully using {workflow_type} workflow!")
                 else:
-                    error_msg = "ALT text injection failed"
+                    error_msg = f"ALT text {'recreation' if self.use_recreation_workflow else 'injection'} failed"
                     logger.error(error_msg)
                     result['errors'].append(error_msg)
             else:
-                logger.info("No ALT text to inject - all images were decorative or failed generation")
+                logger.info("No ALT text to process - all images were decorative or failed generation")
                 result['success'] = True  # Not an error condition
             
         except Exception as e:

@@ -133,3 +133,19 @@ pre_flight:
   test_prompt: "Describe this test image in one sentence."
   fail_fast_on_error: true
   performance_baseline_threshold: 10.0  # seconds
+
+# PDF Processing Configuration
+pdf_processing:
+  # Use ReportLab recreation workflow for better accessibility (recommended)
+  use_recreation_workflow: false  # Set to true to enable ReportLab recreation
+  
+  # Decorative image detection settings
+  skip_decorative_images: true
+  decorative_size_threshold: 50  # Images smaller than this (px) are considered decorative
+  
+  # Recreation workflow specific settings
+  recreation:
+    preserve_fonts: true
+    preserve_layout: true  
+    max_image_width: 400  # Max width for images in recreated PDF (px)
+    accessibility_standard: "PDF/UA"  # Target accessibility standard
