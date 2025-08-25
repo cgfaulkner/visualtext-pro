@@ -179,7 +179,7 @@ def _ensure_structure_tree(doc: fitz.Document) -> bool:
                 catalog_dict = catalog
             
             # Check if structure tree already exists
-            if catalog_dict and "/StructTreeRoot" in catalog_dict:
+            if catalog_dict and "StructTreeRoot" in catalog_dict:
                 logger.debug("Structure tree already exists")
                 return True
         
@@ -234,8 +234,8 @@ def _add_image_structure_element(doc: fitz.Document, page: fitz.Page,
         
         # Try to add to existing structure tree
         catalog = doc.pdf_catalog()
-        if catalog and "/StructTreeRoot" in catalog:
-            struct_root = catalog["/StructTreeRoot"]
+        if catalog and "StructTreeRoot" in catalog:
+            struct_root = catalog["StructTreeRoot"]
             
             # Create or get the document structure element
             if "/K" not in struct_root:
