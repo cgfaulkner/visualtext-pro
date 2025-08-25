@@ -4,20 +4,25 @@ Orchestrates the complete PDF ALT text workflow
 """
 
 import logging
+import os
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+
+# Setup paths for direct execution
+
+# Add parent directory to path for shared and core modules
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "shared"))
+sys.path.insert(0, str(project_root / "core"))
 
 # Import core processing modules
 from pdf_context_extractor import extract_pdf_context
 from pdf_alt_injector import inject_alt_text, create_alt_text_mapping
 
 # Import shared modules
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
-
 from config_manager import ConfigManager
 from unified_alt_generator import FlexibleAltGenerator
 

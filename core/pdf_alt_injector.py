@@ -4,9 +4,15 @@ Injects ALT text into PDF documents using PyMuPDF structure tags
 """
 
 import logging
+import sys
 import fitz  # PyMuPDF
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+# Setup paths for direct execution
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root / "shared"))
+sys.path.insert(0, str(project_root / "core"))
 
 logger = logging.getLogger(__name__)
 
