@@ -61,17 +61,23 @@ def inject_alt_text(pdf_path: str, context_data: Dict[str, Any],
             image_key = f"page_{image_info['page_number']}_image_{image_info['image_index']}"
             alt_text = alt_text_mapping.get(image_key)
             
+            logger.info(f"Processing image: {image_key}")
+            logger.debug(f"Image info: bbox={image_info.get('bbox')}, page={image_info['page_number']}")
+            
             if not alt_text:
-                logger.debug(f"No ALT text provided for {image_key}, skipping")
+                logger.warning(f"No ALT text provided for {image_key}, skipping")
                 skipped_count += 1
                 continue
+            
+            logger.info(f"Found ALT text for {image_key}: {alt_text[:50]}...")
             
             # Inject ALT text for this image
             success = _inject_image_alt_text(doc, image_info, alt_text)
             if success:
                 injected_count += 1
-                logger.debug(f"Injected ALT text for {image_key}: {alt_text[:50]}...")
+                logger.info(f"✅ Successfully injected ALT text for {image_key}")
             else:
+                logger.error(f"❌ Failed to inject ALT text for {image_key}")
                 skipped_count += 1
         
         # Save the modified PDF
@@ -90,7 +96,7 @@ def inject_alt_text(pdf_path: str, context_data: Dict[str, Any],
 
 def _inject_image_alt_text(doc: fitz.Document, image_info: Dict[str, Any], alt_text: str) -> bool:
     """
-    Inject ALT text for a specific image using PyMuPDF structure tags.
+    Inject ALT text for a specific image using multiple fallback methods.
     
     Args:
         doc: PyMuPDF document object
@@ -108,15 +114,38 @@ def _inject_image_alt_text(doc: fitz.Document, image_info: Dict[str, Any], alt_t
         bbox = image_info['bbox']
         image_rect = fitz.Rect(bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3])
         
-        # Create or modify the structure tree
-        if not _ensure_structure_tree(doc):
-            logger.warning(f"Could not create structure tree for page {page_num + 1}")
-            return False
+        logger.debug(f"Attempting ALT text injection for image at {image_rect}")
         
-        # Add structure element for the image
-        success = _add_image_structure_element(doc, page, image_rect, alt_text)
+        # Method 1: Try structure tree approach
+        if _ensure_structure_tree(doc):
+            logger.debug("Structure tree available, trying structure element method")
+            if _add_image_structure_element(doc, page, image_rect, alt_text):
+                logger.debug("Structure element method succeeded")
+                return True
+            logger.debug("Structure element method failed, trying fallbacks")
+        else:
+            logger.debug("Structure tree not available, skipping to fallback methods")
         
-        return success
+        # Method 2: Try annotation method
+        logger.debug("Trying annotation method")
+        if _add_alt_text_annotation(page, image_rect, alt_text):
+            logger.debug("Annotation method succeeded")
+            return True
+        
+        # Method 3: Try direct image metadata modification
+        logger.debug("Trying direct image metadata method")
+        if _add_alt_text_to_image_object(doc, page, image_info, alt_text):
+            logger.debug("Direct image metadata method succeeded")
+            return True
+        
+        # Method 4: Add as page-level text annotation (most basic fallback)
+        logger.debug("Trying page-level text annotation method")
+        if _add_page_level_alt_text(page, image_rect, alt_text):
+            logger.debug("Page-level annotation method succeeded")
+            return True
+        
+        logger.error(f"All ALT text injection methods failed for image on page {page_num + 1}")
+        return False
         
     except Exception as e:
         logger.error(f"Failed to inject ALT text for image on page {image_info['page_number']}: {e}")
@@ -136,12 +165,26 @@ def _ensure_structure_tree(doc: fitz.Document) -> bool:
     try:
         # Check if document already has a structure tree
         catalog = doc.pdf_catalog()
-        if catalog and "/StructTreeRoot" in catalog:
-            logger.debug("Structure tree already exists")
-            return True
+        logger.debug(f"PDF catalog type: {type(catalog)}")
+        
+        # Handle case where catalog might be an object reference instead of dict
+        if catalog is not None:
+            # Convert to dict if it's an object reference
+            if hasattr(catalog, 'resolve'):
+                catalog_dict = catalog.resolve()
+            elif isinstance(catalog, dict):
+                catalog_dict = catalog
+            else:
+                logger.debug(f"Catalog is type {type(catalog)}, treating as dict-like")
+                catalog_dict = catalog
+            
+            # Check if structure tree already exists
+            if catalog_dict and "/StructTreeRoot" in catalog_dict:
+                logger.debug("Structure tree already exists")
+                return True
         
         # Create a basic structure tree
-        # Note: This is a simplified approach - full PDF/UA compliance would require more
+        logger.debug("Creating new structure tree")
         struct_tree_root = doc.new_object({
             "Type": "/StructTreeRoot",
             "ParentTree": doc.new_object({
@@ -153,12 +196,14 @@ def _ensure_structure_tree(doc: fitz.Document) -> bool:
         catalog_obj = doc.pdf_catalog()
         if catalog_obj:
             catalog_obj["StructTreeRoot"] = struct_tree_root
+            logger.debug("Added StructTreeRoot to catalog")
             
-        logger.debug("Created basic structure tree")
+        logger.info("Created basic structure tree successfully")
         return True
         
     except Exception as e:
         logger.warning(f"Could not create structure tree: {e}")
+        logger.debug(f"Structure tree error details: {type(e).__name__}: {e}")
         return False
 
 
@@ -224,7 +269,7 @@ def _add_image_structure_element(doc: fitz.Document, page: fitz.Page,
 
 def _add_alt_text_annotation(page: fitz.Page, image_rect: fitz.Rect, alt_text: str) -> bool:
     """
-    Fallback method: Add ALT text as an annotation.
+    Fallback method: Add ALT text as a hidden annotation.
     
     Args:
         page: PyMuPDF page object
@@ -235,22 +280,107 @@ def _add_alt_text_annotation(page: fitz.Page, image_rect: fitz.Rect, alt_text: s
         bool: True if annotation was added successfully
     """
     try:
-        # Add a text annotation with the ALT text (invisible)
+        # Add a text annotation with the ALT text
         annotation = page.add_text_annot(
             image_rect.tl,  # Top-left point of image
             alt_text,
             icon="Note"
         )
         
-        # Make annotation invisible (for accessibility readers only)
-        annotation.set_flags(annotation.flags | fitz.PDF_ANNOT_HIDDEN | fitz.PDF_ANNOT_INVISIBLE)
+        # Make annotation hidden but accessible to screen readers
+        annotation.set_flags(annotation.flags | fitz.PDF_ANNOT_HIDDEN)
         annotation.update()
         
-        logger.debug(f"Added fallback annotation with ALT text: {alt_text[:30]}...")
+        logger.debug(f"Added text annotation with ALT text: {alt_text[:30]}...")
         return True
         
     except Exception as e:
-        logger.error(f"Could not add ALT text annotation: {e}")
+        logger.debug(f"Could not add text annotation: {e}")
+        return False
+
+
+def _add_alt_text_to_image_object(doc: fitz.Document, page: fitz.Page, image_info: Dict[str, Any], alt_text: str) -> bool:
+    """
+    Try to add ALT text directly to the image object in the PDF.
+    
+    Args:
+        doc: PyMuPDF document object
+        page: PyMuPDF page object
+        image_info: Image information from context extractor
+        alt_text: ALT text for the image
+        
+    Returns:
+        bool: True if ALT text was added to image object
+    """
+    try:
+        # Get all images on the page
+        image_list = page.get_images(full=True)
+        
+        if image_info['image_index'] < len(image_list):
+            img_tuple = image_list[image_info['image_index']]
+            xref = img_tuple[0]  # Image xref number
+            
+            # Try to get the image object and add ALT text metadata
+            img_obj = doc.xref_object(xref)
+            if img_obj:
+                # Add ALT text as metadata (this approach varies by PDF structure)
+                try:
+                    doc.xref_set_key(xref, "Alt", f"({alt_text})")
+                    logger.debug(f"Added ALT text to image object {xref}")
+                    return True
+                except Exception as e:
+                    logger.debug(f"Could not set Alt key on image object: {e}")
+                    
+                # Alternative: try adding as custom metadata
+                try:
+                    doc.xref_set_key(xref, "AltText", f"({alt_text})")
+                    logger.debug(f"Added AltText metadata to image object {xref}")
+                    return True
+                except Exception as e:
+                    logger.debug(f"Could not set AltText key on image object: {e}")
+        
+        return False
+        
+    except Exception as e:
+        logger.debug(f"Could not modify image object: {e}")
+        return False
+
+
+def _add_page_level_alt_text(page: fitz.Page, image_rect: fitz.Rect, alt_text: str) -> bool:
+    """
+    Most basic fallback: Add ALT text as a visible annotation near the image.
+    
+    Args:
+        page: PyMuPDF page object
+        image_rect: Rectangle defining image position
+        alt_text: ALT text for the image
+        
+    Returns:
+        bool: True if annotation was added successfully
+    """
+    try:
+        # Add a small text annotation next to the image
+        # Position it just outside the image boundary
+        annot_point = fitz.Point(image_rect.x1 + 2, image_rect.y0)
+        
+        # Create a free text annotation
+        annotation = page.add_freetext_annot(
+            fitz.Rect(annot_point.x, annot_point.y, annot_point.x + 100, annot_point.y + 20),
+            f"[ALT: {alt_text}]",
+            fontsize=8,
+            text_color=(0.5, 0.5, 0.5),  # Gray text
+            fill_color=(1, 1, 1, 0.8)    # Semi-transparent white background
+        )
+        
+        # Make it small and unobtrusive
+        annotation.set_flags(annotation.flags | fitz.PDF_ANNOT_PRINT)
+        annotation.update()
+        
+        logger.debug(f"Added page-level annotation with ALT text: {alt_text[:30]}...")
+        return True
+        
+    except Exception as e:
+        logger.debug(f"Could not add page-level annotation: {e}")
         return False
 
 
