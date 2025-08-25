@@ -18,14 +18,21 @@ sys.path.insert(0, str(project_root / "core"))
 import fitz  # PyMuPDF for extraction
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Image as RLImage,
+)
 from reportlab.platypus.flowables import Flowable
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch, cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.colors import black, white
+from reportlab.pdfbase import pdfdoc
 import PIL.Image
+import types
 
 logger = logging.getLogger(__name__)
 
@@ -51,27 +58,73 @@ class AccessibleImage(Flowable):
         
     def draw(self):
         """Draw the image with accessibility metadata."""
-        # Draw the actual image
-        self.canv.drawImage(self.image_path, 0, 0, 
-                           width=self.width, height=self.height,
-                           preserveAspectRatio=True)
-        
-        # Add accessibility structure
-        self._add_accessibility_structure()
-    
-    def _add_accessibility_structure(self):
-        """Add PDF accessibility structure for this image."""
+        extra: Dict[str, Any] = {"imgObj": None}
+        self.canv.drawImage(
+            self.image_path,
+            0,
+            0,
+            width=self.width,
+            height=self.height,
+            preserveAspectRatio=True,
+            extraReturn=extra,
+        )
+
+        img_obj = extra.get("imgObj")
+        if img_obj:
+            self._add_accessibility_structure(img_obj)
+
+    def _add_accessibility_structure(self, img_obj: pdfdoc.PDFImageXObject) -> None:
+        """Create `/Figure` structure element and set ALT text."""
         try:
-            # Add structure element for the image
-            # This uses ReportLab's internal methods for PDF structure
-            if hasattr(self.canv, '_doc') and hasattr(self.canv._doc, 'catalog'):
-                # Create figure structure element with ALT text
-                self.canv.acroForm  # Ensure form is initialized for structure
-                # Note: This is a simplified approach - full implementation would
-                # require deeper integration with ReportLab's structure system
-                logger.debug(f"Added accessibility structure for image: {self.alt_text[:30]}...")
-        except Exception as e:
-            logger.debug(f"Could not add accessibility structure: {e}")
+            img_obj.Alt = self.alt_text
+
+            orig_format = pdfdoc.PDFImageXObject.format
+
+            def format_with_alt(obj: pdfdoc.PDFImageXObject, document, _orig=orig_format):
+                stream = pdfdoc.PDFStream(content=obj.streamContent)
+                d = stream.dictionary
+                d["Type"] = pdfdoc.PDFName("XObject")
+                d["Subtype"] = pdfdoc.PDFName("Image")
+                d["Width"] = obj.width
+                d["Height"] = obj.height
+                d["BitsPerComponent"] = obj.bitsPerComponent
+                d["ColorSpace"] = pdfdoc.PDFName(obj.colorSpace)
+                if obj.colorSpace == "DeviceCMYK" and getattr(obj, "_dotrans", 0):
+                    d["Decode"] = pdfdoc.PDFArray([1, 0, 1, 0, 1, 0, 1, 0])
+                elif getattr(obj, "_decode", None):
+                    d["Decode"] = pdfdoc.PDFArray(obj._decode)
+                d["Filter"] = pdfdoc.PDFArray(map(pdfdoc.PDFName, obj._filters))
+                d["Length"] = len(obj.streamContent)
+                if obj.mask:
+                    d["Mask"] = pdfdoc.PDFArray(obj.mask)
+                if getattr(obj, "smask", None):
+                    d["SMask"] = obj.smask
+                if getattr(obj, "Alt", None):
+                    d["Alt"] = pdfdoc.PDFString(obj.Alt)
+                return stream.format(document)
+
+            img_obj.format = types.MethodType(format_with_alt, img_obj)
+
+            catalog = self.canv._doc.Catalog
+            if not hasattr(catalog, "StructTreeRoot"):
+                struct_root = pdfdoc.PDFDictionary()
+                struct_root["Type"] = pdfdoc.PDFName("StructTreeRoot")
+                struct_root["K"] = pdfdoc.PDFArray([])
+                catalog.StructTreeRoot = struct_root
+            else:
+                struct_root = catalog.StructTreeRoot
+
+            figure = pdfdoc.PDFDictionary()
+            figure["Type"] = pdfdoc.PDFName("StructElem")
+            figure["S"] = pdfdoc.PDFName("Figure")
+            figure["Alt"] = pdfdoc.PDFString(self.alt_text)
+            struct_root["K"].sequence.append(figure)
+
+            logger.debug(
+                f"Added accessibility structure for image: {self.alt_text[:30]}..."
+            )
+        except Exception as exc:
+            logger.debug(f"Could not add accessibility structure: {exc}")
 
 
 class PDFAccessibilityRecreator:
