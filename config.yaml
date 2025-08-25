@@ -1,0 +1,135 @@
+alt_text_handling:
+  mode: preserve
+  max_workers: 4
+  reuse_for_identical_images: true
+  clean_generated_alt_text: true
+  detect_concepts_from_notes: true
+  concepts_file: concepts.yaml
+  concept_injection_style: prompt_block
+  vague_output_warning: true
+paths:
+  input_folder: Slides to Review
+  output_folder: Reviewed Reports
+  thumbnail_folder: Slide Thumbnails
+  temp_folder: Temp
+  alt_cache: alt_cache.json
+conversion:
+  wmf_to_png: true
+tools:
+  inkscape: inkscape
+prompts:
+  default: Describe this image in one sentence (up to 125 characters). Focus on essential
+    visual content.
+  anatomical: Describe this anatomical image in one sentence (up to 125 characters).
+    Mention key structures and orientations.
+  diagnostic: Describe this diagnostic image in one sentence (up to 125 characters).
+    Note the imaging type and key findings.
+  chart: Describe this chart or graph in one sentence (up to 125 characters). Include
+    axes, trends, or notable values.
+  diagram: Describe this diagram in one sentence (up to 125 characters). Highlight
+    main components and relationships.
+  clinical_photo: Describe this clinical photo in one sentence (up to 125 characters).
+    Focus on the visible condition or procedure.
+  unified_medical: Describe this medical image in one sentence (up to 125 characters).
+    Provide essential educational information.
+decorative_overrides:
+  decorative_rules:
+    contains:
+    - logo
+    - watermark
+    - border
+    - divider
+    - separator
+    - footer
+    - header
+    - bg
+    - line
+    - accent
+    exact:
+    - utsw_logo.png
+    - utsw_logo.jpg
+    - UTSW logo.jpg
+    - UTSW logo.png
+    - utsw.jpg
+    - utsw.png
+    - logo_header.jpg
+    - logo_footer.jpg
+    - curve_line.svg
+  force_decorative:
+  - logo
+  - watermark
+  - border
+  - divider
+  - separator
+  force_decorative_scope: shape_name
+  never_decorative:
+  - anatomy
+  - pathology
+  - xray
+  - mri
+  - ct
+  - microscopy
+  - diagram
+  - chart
+  - graph
+output:
+  thumbnail_max_width: 200
+  include_token_count: true
+  include_generation_time: true
+  truncate_at_tokens: true
+  smart_truncate: true
+  smart_truncate_prompt: 'Summarize the following text in one complete sentence of
+    no more than 20 words:'
+  max_summary_words: 20
+logging:
+  level: INFO
+  show_prompts: false
+  show_responses: false
+  log_to_file: true
+  # Enhanced logging categories
+  log_system_state: true
+  log_configuration: true
+  log_performance: true
+  log_request_details: true
+  log_pre_flight: true
+reinjection:
+  skip_alt_text_if:
+  - ''
+  - undefined
+  - (None)
+  - N/A
+  - Not reviewed
+  - n/a
+ai_providers:
+  fallback_chain:
+  - llava
+  providers:
+    llava:
+      type: llava
+      model: llava
+      endpoint: http://127.0.0.1:11434/api/generate
+      timeout: 120
+      max_tokens: 200
+      temperature: 0.7
+      stream: false
+      retry_attempts: 5
+      include_slide_notes: true
+      include_slide_text: true
+cost_tracking:
+  enabled: true
+  log_token_usage: true
+  estimate_costs: true
+  daily_budget_alert: 10.0
+  monthly_budget_alert: 100.0
+provider_settings:
+  max_fallback_attempts: 3
+  fail_fast: false
+  comparison_mode: false
+  save_provider_performance: true
+pre_flight:
+  enabled: true
+  timeout: 30
+  sample_image_path: null  # Will use built-in test image if null
+  test_prompt: "Describe this test image in one sentence."
+  fail_fast_on_error: true
+  performance_baseline_threshold: 10.0  # seconds
