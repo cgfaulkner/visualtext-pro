@@ -149,3 +149,22 @@ pdf_processing:
     preserve_layout: true  
     max_image_width: 400  # Max width for images in recreated PDF (px)
     accessibility_standard: "PDF/UA"  # Target accessibility standard
+
+# PPTX Processing Configuration (NEW)
+pptx_processing:
+  # Decorative image detection settings (same as PDF)
+  skip_decorative_images: true
+  decorative_size_threshold: 50  # Images smaller than this (px) are considered decorative
+  
+  # Context extraction settings
+  include_slide_notes: true    # Include slide notes in ALT text generation context
+  include_slide_text: true     # Include slide text in ALT text generation context
+  max_context_length: 200      # Maximum length of context text to include
+  
+  # Batch processing settings
+  max_workers: 4               # Number of concurrent slides to process
+  preserve_original: true      # Keep backup of original file
+  
+  # Image extraction settings
+  supported_formats: ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "svg", "wmf", "emf"]
+  convert_wmf_to_png: true     # Convert WMF files to PNG for better AI processing
