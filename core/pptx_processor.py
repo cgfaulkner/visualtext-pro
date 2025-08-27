@@ -495,7 +495,7 @@ class PPTXAccessibilityProcessor:
     def _inject_alt_text_to_pptx(self, presentation: Presentation, 
                                alt_text_mapping: Dict[str, Any], output_path: str) -> bool:
         """
-        Inject ALT text into PPTX presentation.
+        Inject ALT text into PPTX presentation using the dedicated injector.
         
         Args:
             presentation: Presentation object
@@ -506,7 +506,62 @@ class PPTXAccessibilityProcessor:
             bool: True if injection succeeded
         """
         try:
-            logger.info(f"Injecting ALT text for {len(alt_text_mapping)} images")
+            # Import the dedicated ALT text injector
+            from pptx_alt_injector import PPTXAltTextInjector
+            
+            # Create injector instance
+            injector = PPTXAltTextInjector(self.config_manager)
+            
+            # Convert mapping format to match injector expectations
+            simple_mapping = {}
+            for image_key, info in alt_text_mapping.items():
+                simple_mapping[image_key] = info['alt_text']
+            
+            # Save presentation to temp file for injector processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            presentation.save(temp_path)
+            
+            # Use injector to perform robust ALT text injection
+            result = injector.inject_alt_text_from_mapping(temp_path, simple_mapping, output_path)
+            
+            # Clean up temp file
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            
+            # Log injector statistics
+            stats = result['statistics']
+            logger.info(f"ALT text injection via dedicated injector:")
+            logger.info(f"  Successfully injected: {stats['injected_successfully']}")
+            logger.info(f"  Skipped (existing): {stats['skipped_existing']}")
+            logger.info(f"  Failed: {stats['failed_injection']}")
+            
+            return result['success']
+            
+        except Exception as e:
+            logger.error(f"Failed to inject ALT text via dedicated injector: {e}")
+            # Fallback to original simple method
+            return self._inject_alt_text_simple(presentation, alt_text_mapping, output_path)
+    
+    def _inject_alt_text_simple(self, presentation: Presentation, 
+                              alt_text_mapping: Dict[str, Any], output_path: str) -> bool:
+        """
+        Fallback simple ALT text injection method.
+        
+        Args:
+            presentation: Presentation object
+            alt_text_mapping: Mapping of image keys to ALT text and shape info
+            output_path: Path to save modified PPTX
+            
+        Returns:
+            bool: True if injection succeeded
+        """
+        try:
+            logger.info(f"Using fallback injection method for {len(alt_text_mapping)} images")
             
             for image_key, info in alt_text_mapping.items():
                 try:
@@ -532,7 +587,7 @@ class PPTXAccessibilityProcessor:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to inject ALT text into PPTX: {e}")
+            logger.error(f"Fallback ALT text injection failed: {e}")
             return False
     
     def _log_processing_summary(self, result: Dict[str, Any]):
