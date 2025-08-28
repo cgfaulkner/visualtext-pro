@@ -264,7 +264,7 @@ class PPTXAltTextInjector:
     
     def _inject_alt_text_single(self, shape: Picture, alt_text: str, identifier: PPTXImageIdentifier) -> bool:
         """
-        Inject ALT text into a single shape.
+        Inject ALT text into a single shape with comprehensive debug logging.
         
         Args:
             shape: Picture shape to inject ALT text into
@@ -275,45 +275,132 @@ class PPTXAltTextInjector:
             bool: True if injection was successful
         """
         try:
+            logger.debug(f"🔍 Processing injection for {identifier.image_key}")
+            logger.debug(f"   Generated ALT text: '{alt_text}'")
+            
             # Check if we should skip this ALT text
             if self._should_skip_alt_text(alt_text):
-                logger.debug(f"Skipping invalid ALT text for {identifier.image_key}: '{alt_text}'")
+                logger.debug(f"❌ DECISION: Skipping invalid ALT text for {identifier.image_key}: '{alt_text}'")
+                logger.debug(f"   Reason: ALT text matches skip patterns")
                 self.injection_stats['skipped_invalid'] += 1
                 return False
             
-            # Check if image already has ALT text and we should preserve it
+            # Get existing ALT text to make informed decisions
             existing_alt_text = self._get_existing_alt_text(shape)
-            if existing_alt_text and self.mode == 'preserve' and not self._should_skip_alt_text(existing_alt_text):
-                logger.debug(f"Preserving existing ALT text for {identifier.image_key}: '{existing_alt_text}'")
-                self.injection_stats['skipped_existing'] += 1
+            logger.debug(f"   Existing ALT text in shape: '{existing_alt_text}' (empty: {not existing_alt_text})")
+            
+            # Determine if this is truly pre-existing ALT text or if we should inject
+            should_inject, decision_reason = self._should_inject_alt_text(
+                existing_alt_text, alt_text, identifier.image_key
+            )
+            
+            logger.debug(f"🎯 DECISION: {'INJECT' if should_inject else 'SKIP'} for {identifier.image_key}")
+            logger.debug(f"   Reason: {decision_reason}")
+            
+            if not should_inject:
+                if existing_alt_text:
+                    logger.debug(f"✅ Preserving existing ALT text: '{existing_alt_text}'")
+                    self.injection_stats['skipped_existing'] += 1
+                else:
+                    logger.debug(f"❌ Skipping due to decision logic")
+                    self.injection_stats['skipped_invalid'] += 1
                 return True
             
             # Clean ALT text if configured
             if self.clean_generated_alt_text:
-                alt_text = self._clean_alt_text(alt_text)
+                cleaned_alt_text = self._clean_alt_text(alt_text)
+                if cleaned_alt_text != alt_text:
+                    logger.debug(f"   Cleaned ALT text: '{alt_text}' -> '{cleaned_alt_text}'")
+                alt_text = cleaned_alt_text
             
             # Perform injection using multiple fallback methods
+            logger.debug(f"🚀 Injecting ALT text: '{alt_text}'")
             success = self._inject_alt_text_robust(shape, alt_text)
             
             if success:
                 # Validate injection
                 if self._validate_alt_text_injection(shape, alt_text):
-                    logger.debug(f"Successfully injected ALT text for {identifier.image_key}: '{alt_text[:50]}...'")
+                    logger.debug(f"✅ Successfully injected ALT text for {identifier.image_key}: '{alt_text[:50]}...'")
                     self.injection_stats['injected_successfully'] += 1
                     return True
                 else:
-                    logger.warning(f"ALT text injection validation failed for {identifier.image_key}")
+                    logger.warning(f"❌ ALT text injection validation failed for {identifier.image_key}")
+                    logger.warning(f"   Expected: '{alt_text}'")
+                    logger.warning(f"   Actual: '{self._get_existing_alt_text(shape)}'")
                     self.injection_stats['validation_failures'] += 1
                     return False
             else:
-                logger.error(f"All injection methods failed for {identifier.image_key}")
+                logger.error(f"❌ All injection methods failed for {identifier.image_key}")
                 self.injection_stats['failed_injection'] += 1
                 return False
                 
         except Exception as e:
-            logger.error(f"Error injecting ALT text for {identifier.image_key}: {e}")
+            logger.error(f"💥 Error injecting ALT text for {identifier.image_key}: {e}")
             self.injection_stats['failed_injection'] += 1
             return False
+    
+    def _should_inject_alt_text(self, existing_alt_text: str, new_alt_text: str, image_key: str) -> Tuple[bool, str]:
+        """
+        Determine whether to inject new ALT text based on current state and mode.
+        
+        This is the core logic that fixes the preserve/overwrite issue by properly
+        distinguishing between pre-existing ALT text vs freshly generated text.
+        
+        Args:
+            existing_alt_text: Current ALT text in the shape (may be empty)
+            new_alt_text: Newly generated ALT text to potentially inject
+            image_key: Image identifier for logging
+            
+        Returns:
+            Tuple of (should_inject: bool, reason: str)
+        """
+        # If no existing ALT text, always inject the new text
+        if not existing_alt_text or existing_alt_text.strip() == "":
+            return True, "No existing ALT text found - injecting new text"
+        
+        # Check if existing ALT text should be skipped (invalid patterns)
+        if self._should_skip_alt_text(existing_alt_text):
+            return True, f"Existing ALT text is invalid/skippable: '{existing_alt_text}' - replacing with new text"
+        
+        # Mode-based decisions
+        if self.mode == 'overwrite':
+            return True, f"Overwrite mode - replacing existing '{existing_alt_text}' with new text"
+        
+        elif self.mode == 'preserve':
+            # In preserve mode, we need to distinguish between:
+            # 1. Truly pre-existing ALT text (preserve it)
+            # 2. ALT text that was just generated but is now being seen as "existing"
+            
+            # Check if this looks like generated decorative text that should be replaced
+            if existing_alt_text.strip().lower() in ['[decorative image]', 'decorative image', '']:
+                return True, f"Existing text appears to be generated decorative placeholder - replacing"
+            
+            # Check if existing ALT text matches common generation failure patterns
+            failure_patterns = [
+                'error', 'failed', 'cannot', 'unable', 'sorry', 
+                'i cannot', 'i am unable', 'no description',
+                'not available', 'description not available',
+                'image could not be processed'
+            ]
+            
+            existing_lower = existing_alt_text.lower()
+            for pattern in failure_patterns:
+                if pattern in existing_lower:
+                    return True, f"Existing text contains failure pattern '{pattern}' - replacing"
+            
+            # If we have meaningful existing ALT text and we're in preserve mode,
+            # check if the new text is significantly better
+            if len(existing_alt_text.strip()) > 10:  # Meaningful length
+                # For now, preserve existing meaningful ALT text in preserve mode
+                # TODO: Could add AI comparison here to determine if new text is better
+                return False, f"Preserve mode - keeping existing meaningful ALT text: '{existing_alt_text}'"
+            else:
+                # Short existing text might not be meaningful
+                return True, f"Existing ALT text too short ('{existing_alt_text}') - replacing with new text"
+        
+        else:
+            # Unknown mode, default to inject
+            return True, f"Unknown mode '{self.mode}' - defaulting to inject"
     
     def _inject_alt_text_robust(self, shape: Picture, alt_text: str) -> bool:
         """
@@ -334,50 +421,79 @@ class PPTXAltTextInjector:
             ('xml_fallback', self._inject_via_xml_fallback)
         ]
         
+        logger.debug(f"   Attempting {len(injection_methods)} injection methods:")
+        
         for method_name, method_func in injection_methods:
             try:
+                logger.debug(f"     Trying {method_name}...")
                 if method_func(shape, alt_text):
-                    logger.debug(f"ALT text injected successfully via {method_name}")
+                    logger.debug(f"     ✅ ALT text injected successfully via {method_name}")
                     return True
+                else:
+                    logger.debug(f"     ❌ Method {method_name} returned False")
             except Exception as e:
-                logger.debug(f"Injection method {method_name} failed: {e}")
+                logger.debug(f"     💥 Injection method {method_name} failed: {e}")
                 continue
         
+        logger.debug(f"   ❌ All {len(injection_methods)} injection methods failed")
         return False
     
     def _inject_via_modern_property(self, shape: Picture, alt_text: str) -> bool:
         """Inject using modern property-based approach (python-pptx >= 0.6.22)."""
         if hasattr(shape, 'descr'):
+            logger.debug(f"       Using shape.descr property")
             shape.descr = alt_text
             return True
+        else:
+            logger.debug(f"       Shape does not have 'descr' property")
         return False
     
     def _inject_via_xml_cnvpr(self, shape: Picture, alt_text: str) -> bool:
         """Inject via direct XML cNvPr element manipulation."""
-        cNvPr = shape._element._nvXxPr.cNvPr
-        cNvPr.set('descr', alt_text)
-        return True
+        try:
+            cNvPr = shape._element._nvXxPr.cNvPr
+            logger.debug(f"       Setting descr on cNvPr element")
+            cNvPr.set('descr', alt_text)
+            return True
+        except AttributeError as e:
+            logger.debug(f"       cNvPr element access failed: {e}")
+            return False
     
     def _inject_via_xml_element(self, shape: Picture, alt_text: str) -> bool:
         """Inject via XML element attribute (current approach)."""
-        shape._element.set('descr', alt_text)
-        return True
+        try:
+            logger.debug(f"       Setting descr on shape._element")
+            shape._element.set('descr', alt_text)
+            return True
+        except Exception as e:
+            logger.debug(f"       XML element access failed: {e}")
+            return False
     
     def _inject_via_xml_fallback(self, shape: Picture, alt_text: str) -> bool:
         """Fallback XML injection method."""
-        try:
-            # Try to find and set descr attribute on various elements
-            for element in [shape._element, shape._element._nvXxPr, shape._element._nvXxPr.cNvPr]:
+        elements_to_try = [
+            ('shape._element', lambda: shape._element),
+            ('shape._element._nvXxPr', lambda: shape._element._nvXxPr),
+            ('shape._element._nvXxPr.cNvPr', lambda: shape._element._nvXxPr.cNvPr)
+        ]
+        
+        for element_name, element_getter in elements_to_try:
+            try:
+                element = element_getter()
                 if element is not None:
+                    logger.debug(f"       Trying fallback on {element_name}")
                     element.set('descr', alt_text)
                     return True
-        except Exception:
-            pass
+            except Exception as e:
+                logger.debug(f"       Fallback {element_name} failed: {e}")
+                continue
+        
+        logger.debug(f"       All fallback methods exhausted")
         return False
     
     def _get_existing_alt_text(self, shape: Picture) -> str:
         """
-        Get existing ALT text from shape.
+        Get existing ALT text from shape with debug logging.
         
         Args:
             shape: Picture shape
@@ -385,26 +501,35 @@ class PPTXAltTextInjector:
         Returns:
             str: Existing ALT text or empty string
         """
+        # Try modern property first
         try:
-            # Try modern property first
             if hasattr(shape, 'descr'):
-                return shape.descr or ""
-        except Exception:
-            pass
+                alt_text = shape.descr or ""
+                logger.debug(f"   Retrieved ALT text via shape.descr: '{alt_text}'")
+                return alt_text
+            else:
+                logger.debug(f"   Shape does not have 'descr' property")
+        except Exception as e:
+            logger.debug(f"   Failed to get ALT text via shape.descr: {e}")
         
+        # Try XML access
         try:
-            # Try XML access
             cNvPr = shape._element._nvXxPr.cNvPr
-            return cNvPr.get('descr', '')
-        except Exception:
-            pass
+            alt_text = cNvPr.get('descr', '')
+            logger.debug(f"   Retrieved ALT text via XML cNvPr: '{alt_text}'")
+            return alt_text
+        except Exception as e:
+            logger.debug(f"   Failed to get ALT text via XML cNvPr: {e}")
         
+        # Fallback XML access
         try:
-            # Fallback XML access
-            return shape._element.get('descr', '')
-        except Exception:
-            pass
+            alt_text = shape._element.get('descr', '')
+            logger.debug(f"   Retrieved ALT text via XML element: '{alt_text}'")
+            return alt_text
+        except Exception as e:
+            logger.debug(f"   Failed to get ALT text via XML element: {e}")
         
+        logger.debug(f"   No ALT text found via any method")
         return ""
     
     def _validate_alt_text_injection(self, shape: Picture, expected_alt_text: str) -> bool:
@@ -653,15 +778,23 @@ Examples:
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     parser.add_argument('--mode', choices=['preserve', 'overwrite'], 
                        help='ALT text handling mode')
+    parser.add_argument('--debug-decisions', action='store_true',
+                       help='Enable debug logging for injection decisions only')
     
     args = parser.parse_args()
     
     # Set up logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_level = logging.DEBUG if (args.verbose or args.debug_decisions) else logging.INFO
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+    
+    # If debug-decisions is enabled, set up more focused logging
+    if args.debug_decisions and not args.verbose:
+        # Reduce noise from other modules
+        logging.getLogger('pptx').setLevel(logging.WARNING)
+        logging.getLogger('PIL').setLevel(logging.WARNING)
     
     try:
         # Initialize components
