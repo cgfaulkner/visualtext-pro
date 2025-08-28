@@ -181,13 +181,29 @@ class PPTXAltTextInjector:
             # Build image identifier mapping for matching
             image_identifiers = self._build_image_identifier_mapping(presentation)
             
+            # Debug: Show what keys we have vs what we expect
+            logger.debug(f"Mapping keys from generator ({len(alt_text_mapping)}):")
+            for key in sorted(alt_text_mapping.keys()):
+                logger.debug(f"  Expected: {key}")
+            
+            logger.debug(f"Identifier keys from PPTX ({len(image_identifiers)}):")
+            for key in sorted(image_identifiers.keys()):
+                logger.debug(f"  Available: {key}")
+            
             # Inject ALT text for each mapping
+            matched_keys = []
+            unmatched_keys = []
+            
             for image_key, alt_text in alt_text_mapping.items():
                 if image_key in image_identifiers:
                     identifier, shape = image_identifiers[image_key]
                     self._inject_alt_text_single(shape, alt_text, identifier)
+                    matched_keys.append(image_key)
                 else:
                     logger.warning(f"Could not find image for key: {image_key}")
+                    unmatched_keys.append(image_key)
+            
+            logger.info(f"Key matching results: {len(matched_keys)} matched, {len(unmatched_keys)} unmatched")
             
             # Save presentation
             output_path.parent.mkdir(parents=True, exist_ok=True)

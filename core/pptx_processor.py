@@ -66,8 +66,23 @@ class PPTXImageInfo:
         self.left_px = int(self.left / 914400 * 96) if self.left else 0
         self.top_px = int(self.top / 914400 * 96) if self.top else 0
         
-        # Unique identifier
-        self.image_key = f"slide_{slide_idx}_shape_{shape_idx}"
+        # Unique identifier consistent with PPTXAltTextInjector
+        self.image_key = self._create_consistent_image_key(slide_idx, shape_idx, shape)
+    
+    def _create_consistent_image_key(self, slide_idx: int, shape_idx: int, shape: Picture) -> str:
+        """Create image key consistent with PPTXAltTextInjector."""
+        components = [f"slide_{slide_idx}", f"shape_{shape_idx}"]
+        
+        # Add shape name if meaningful (not default Picture names)
+        shape_name = getattr(shape, 'name', '')
+        if shape_name and not shape_name.startswith('Picture'):
+            components.append(f"name_{shape_name}")
+        
+        # Add hash for uniqueness (consistent with injector)
+        if self.image_hash:
+            components.append(f"hash_{self.image_hash[:8]}")
+        
+        return "_".join(components)
 
 
 class PPTXAccessibilityProcessor:
@@ -514,8 +529,12 @@ class PPTXAccessibilityProcessor:
             
             # Convert mapping format to match injector expectations
             simple_mapping = {}
+            logger.debug("Converting ALT text mapping from processor format:")
             for image_key, info in alt_text_mapping.items():
                 simple_mapping[image_key] = info['alt_text']
+                logger.debug(f"  Processor key: {image_key} -> ALT: '{info['alt_text'][:50]}...'")
+            
+            logger.debug(f"Created simple mapping with {len(simple_mapping)} entries for injector")
             
             # Save presentation to temp file for injector processing
             import tempfile
