@@ -129,13 +129,16 @@ class PPTXAccessibilityProcessor:
         logger.debug(f"Include slide notes: {self.include_slide_notes}")
         logger.debug(f"Include slide text: {self.include_slide_text}")
     
-    def process_pptx(self, pptx_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
+    def process_pptx(self, pptx_path: str, output_path: Optional[str] = None, 
+                    force_decorative: bool = False, failed_generation_callback=None) -> Dict[str, Any]:
         """
         Process a PPTX file to add ALT text to images.
         
         Args:
             pptx_path: Path to the input PPTX file
             output_path: Optional path for output file. If None, overwrites original.
+            force_decorative: Force decorative fallback for failed generations
+            failed_generation_callback: Callback function for failed generations
             
         Returns:
             Dictionary with processing statistics
@@ -152,6 +155,7 @@ class PPTXAccessibilityProcessor:
             'total_images': 0,
             'processed_images': 0,
             'decorative_images': 0,
+            'fallback_decorative': 0,
             'failed_images': 0,
             'generation_time': 0.0,
             'injection_time': 0.0,
@@ -231,10 +235,53 @@ class PPTXAccessibilityProcessor:
                         result['processed_images'] += 1
                         logger.info(f"Generated ALT text for {image_info.image_key}: {alt_text[:50]}...")
                     else:
-                        result['failed_images'] += 1
-                        error_msg = f"Failed to generate ALT text for {image_info.image_key}"
-                        logger.warning(error_msg)
-                        result['errors'].append(error_msg)
+                        # Handle failed generation
+                        if force_decorative:
+                            # Apply decorative fallback for 100% coverage
+                            fallback_alt_text = "[Decorative image]"
+                            alt_text_mapping[image_info.image_key] = {
+                                'alt_text': fallback_alt_text,
+                                'shape': image_info.shape,
+                                'slide_idx': image_info.slide_idx,
+                                'shape_idx': image_info.shape_idx
+                            }
+                            result['fallback_decorative'] += 1
+                            logger.info(f"Applied decorative fallback for {image_info.image_key}")
+                            
+                            # Log failed generation for manual review
+                            if failed_generation_callback:
+                                failed_generation_callback(
+                                    image_info.image_key,
+                                    {
+                                        'slide_idx': image_info.slide_idx,
+                                        'shape_idx': image_info.shape_idx,
+                                        'filename': image_info.filename,
+                                        'width_px': image_info.width_px,
+                                        'height_px': image_info.height_px,
+                                        'slide_text': image_info.slide_text
+                                    },
+                                    "ALT text generation failed, applied decorative fallback"
+                                )
+                        else:
+                            result['failed_images'] += 1
+                            error_msg = f"Failed to generate ALT text for {image_info.image_key}"
+                            logger.warning(error_msg)
+                            result['errors'].append(error_msg)
+                            
+                            # Log failed generation for manual review
+                            if failed_generation_callback:
+                                failed_generation_callback(
+                                    image_info.image_key,
+                                    {
+                                        'slide_idx': image_info.slide_idx,
+                                        'shape_idx': image_info.shape_idx,
+                                        'filename': image_info.filename,
+                                        'width_px': image_info.width_px,
+                                        'height_px': image_info.height_px,
+                                        'slide_text': image_info.slide_text
+                                    },
+                                    "ALT text generation failed"
+                                )
                 
                 except Exception as e:
                     result['failed_images'] += 1
@@ -616,13 +663,19 @@ class PPTXAccessibilityProcessor:
         logger.info(f"  Output file: {result['output_file']}")
         logger.info(f"  Total slides: {result['total_slides']}")
         logger.info(f"  Total images found: {result['total_images']}")
-        logger.info(f"  Images processed: {result['processed_images']}")
-        logger.info(f"  Decorative images skipped: {result['decorative_images']}")
+        logger.info(f"  Images processed (descriptive): {result['processed_images']}")
+        logger.info(f"  Decorative images (heuristic): {result['decorative_images']}")
+        logger.info(f"  Decorative images (fallback): {result['fallback_decorative']}")
         logger.info(f"  Failed images: {result['failed_images']}")
         logger.info(f"  Generation time: {result['generation_time']:.2f}s")
         logger.info(f"  Injection time: {result['injection_time']:.2f}s")
         logger.info(f"  Total processing time: {result['total_time']:.2f}s")
         logger.info(f"  Success: {result['success']}")
+        
+        # Calculate and log coverage
+        total_covered = result['processed_images'] + result['decorative_images'] + result['fallback_decorative']
+        coverage_percent = (total_covered / result['total_images'] * 100) if result['total_images'] > 0 else 0
+        logger.info(f"  Image Coverage: {total_covered}/{result['total_images']} ({coverage_percent:.1f}%)")
         
         if result['errors']:
             logger.warning(f"Errors encountered: {len(result['errors'])}")

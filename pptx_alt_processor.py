@@ -21,6 +21,7 @@ import time
 import argparse
 from pathlib import Path
 from typing import Optional
+import json
 
 # Setup paths
 project_root = Path(__file__).parent
@@ -46,13 +47,14 @@ class PPTXAltProcessor:
     Provides an easy-to-use interface for complete PPTX accessibility processing.
     """
     
-    def __init__(self, config_path: Optional[str] = None, verbose: bool = False):
+    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, force_decorative: bool = False):
         """
         Initialize the PPTX ALT text processor.
         
         Args:
             config_path: Optional path to configuration file
             verbose: Enable verbose logging
+            force_decorative: Force decorative fallback for failed generations
         """
         if verbose:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -61,12 +63,16 @@ class PPTXAltProcessor:
         self.config_manager = ConfigManager(config_path)
         self.pptx_processor = PPTXAccessibilityProcessor(self.config_manager)
         self.alt_injector = PPTXAltTextInjector(self.config_manager)
+        self.force_decorative = force_decorative
+        
+        # Setup failed generation logging
+        self.failed_generations = []
         
         logger.info("PPTX ALT Text Processor initialized")
         logger.info(f"Configuration: {self.config_manager.config_path or 'default'}")
     
     def process_single_file(self, input_file: str, output_file: Optional[str] = None,
-                          export_pdf: bool = False) -> dict:
+                          export_pdf: bool = False, generate_coverage_report: bool = True) -> dict:
         """
         Process a single PPTX file with complete ALT text workflow.
         
@@ -93,8 +99,16 @@ class PPTXAltProcessor:
         start_time = time.time()
         
         try:
-            # Use the existing PPTXAccessibilityProcessor which now uses robust injector
-            result = self.pptx_processor.process_pptx(str(input_path), str(output_path))
+            # Clear previous failed generations
+            self.failed_generations = []
+            
+            # Use the existing PPTXAccessibilityProcessor with enhanced validation
+            result = self.pptx_processor.process_pptx(
+                str(input_path), 
+                str(output_path), 
+                force_decorative=self.force_decorative,
+                failed_generation_callback=self._log_failed_generation
+            )
             
             processing_time = time.time() - start_time
             result['processing_time'] = processing_time
@@ -104,11 +118,22 @@ class PPTXAltProcessor:
                 result['processed_images'] = result.get('total_images', 0)
             
             if result['success']:
+                # Generate and log coverage report
+                coverage_report = self._generate_coverage_report(result)
+                result['coverage_report'] = coverage_report
+                
                 logger.info(f"✅ Successfully processed PPTX:")
                 logger.info(f"   Input: {input_path.name}")
                 logger.info(f"   Output: {output_path.name}")
                 logger.info(f"   Images processed: {result['processed_images']}")
                 logger.info(f"   Processing time: {processing_time:.2f}s")
+                
+                # Log coverage statistics
+                self._log_coverage_report(coverage_report)
+                
+                # Generate coverage report file if requested
+                if generate_coverage_report:
+                    self._save_coverage_report_file(coverage_report, input_path, output_path)
                 
                 # Optional PDF export
                 if export_pdf:
@@ -123,6 +148,11 @@ class PPTXAltProcessor:
                 logger.error(f"❌ Processing failed:")
                 for error in result.get('errors', []):
                     logger.error(f"   - {error}")
+            
+            # Log any failed generations for manual review
+            if self.failed_generations:
+                self._log_failed_generations_summary()
+                result['failed_generations'] = self.failed_generations
             
             return result
             
@@ -226,6 +256,15 @@ class PPTXAltProcessor:
         logger.info(f"   Successfully processed: {results['processed_files']}")
         logger.info(f"   Failed: {results['failed_files']}")
         logger.info(f"   Total time: {results['total_processing_time']:.2f}s")
+        
+        # Generate batch coverage report
+        batch_coverage = self._generate_batch_coverage_report(results)
+        results['batch_coverage'] = batch_coverage
+        logger.info("📊 Batch Coverage Summary:")
+        logger.info(f"   Total images processed: {batch_coverage['total_images']}")
+        logger.info(f"   Descriptive ALT text: {batch_coverage['descriptive_images']} ({batch_coverage['descriptive_coverage_percent']:.1f}%)")
+        logger.info(f"   Decorative images: {batch_coverage['decorative_images'] + batch_coverage['fallback_decorative_images']} ({batch_coverage['decorative_coverage_percent']:.1f}%)")
+        logger.info(f"   TOTAL COVERAGE: {batch_coverage['total_coverage_percent']:.1f}%")
         
         return results
     
@@ -473,6 +512,167 @@ class PPTXAltProcessor:
             'error': 'No PDF export method available. Install LibreOffice, or ensure PowerPoint is available.',
             'method': 'none'
         }
+    
+    def _log_failed_generation(self, image_key: str, image_info: dict, error: str):
+        """
+        Log a failed generation attempt for manual review.
+        
+        Args:
+            image_key: Unique identifier for the image
+            image_info: Image information dictionary
+            error: Error message or reason for failure
+        """
+        failed_entry = {
+            'image_key': image_key,
+            'slide_idx': image_info.get('slide_idx', 'unknown'),
+            'shape_idx': image_info.get('shape_idx', 'unknown'),
+            'filename': image_info.get('filename', 'unknown'),
+            'dimensions': f"{image_info.get('width_px', '?')}x{image_info.get('height_px', '?')}",
+            'error': error,
+            'slide_text': image_info.get('slide_text', '')[:100]  # First 100 chars
+        }
+        self.failed_generations.append(failed_entry)
+        
+        logger.warning(f"Failed generation logged: {image_key} - {error}")
+    
+    def _generate_coverage_report(self, result: dict) -> dict:
+        """
+        Generate coverage report showing descriptive vs decorative counts.
+        
+        Args:
+            result: Processing result dictionary
+            
+        Returns:
+            Coverage report dictionary
+        """
+        total_images = result.get('total_images', 0)
+        processed_images = result.get('processed_images', 0)  # Descriptive
+        decorative_images = result.get('decorative_images', 0)
+        failed_images = result.get('failed_images', 0)
+        fallback_decorative = result.get('fallback_decorative', 0)
+        
+        # Calculate coverage percentages
+        descriptive_coverage = (processed_images / total_images * 100) if total_images > 0 else 0
+        decorative_coverage = ((decorative_images + fallback_decorative) / total_images * 100) if total_images > 0 else 0
+        total_coverage = ((processed_images + decorative_images + fallback_decorative) / total_images * 100) if total_images > 0 else 0
+        
+        return {
+            'total_images': total_images,
+            'descriptive_images': processed_images,
+            'decorative_images': decorative_images,
+            'fallback_decorative_images': fallback_decorative,
+            'failed_images': failed_images,
+            'descriptive_coverage_percent': descriptive_coverage,
+            'decorative_coverage_percent': decorative_coverage,
+            'total_coverage_percent': total_coverage,
+            'failed_generations_count': len(self.failed_generations)
+        }
+    
+    def _log_coverage_report(self, coverage_report: dict):
+        """
+        Log the coverage report to console.
+        
+        Args:
+            coverage_report: Coverage report dictionary
+        """
+        logger.info("📊 Image Coverage Report:")
+        logger.info(f"   Total images: {coverage_report['total_images']}")
+        logger.info(f"   Descriptive ALT text: {coverage_report['descriptive_images']} ({coverage_report['descriptive_coverage_percent']:.1f}%)")
+        logger.info(f"   Decorative (heuristic): {coverage_report['decorative_images']}")
+        logger.info(f"   Decorative (fallback): {coverage_report['fallback_decorative_images']}")
+        logger.info(f"   Total decorative: {coverage_report['decorative_images'] + coverage_report['fallback_decorative_images']} ({coverage_report['decorative_coverage_percent']:.1f}%)")
+        logger.info(f"   Failed/Unprocessed: {coverage_report['failed_images']}")
+        logger.info(f"   TOTAL COVERAGE: {coverage_report['total_coverage_percent']:.1f}%")
+        
+        if coverage_report['failed_generations_count'] > 0:
+            logger.warning(f"   Failed generations logged: {coverage_report['failed_generations_count']} (see coverage report file)")
+    
+    def _save_coverage_report_file(self, coverage_report: dict, input_path: Path, output_path: Path):
+        """
+        Save detailed coverage report to JSON file.
+        
+        Args:
+            coverage_report: Coverage report dictionary
+            input_path: Input file path
+            output_path: Output file path
+        """
+        try:
+            # Create detailed report
+            detailed_report = {
+                'input_file': str(input_path),
+                'output_file': str(output_path),
+                'processing_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'coverage_summary': coverage_report,
+                'failed_generations': self.failed_generations
+            }
+            
+            # Save to file
+            report_path = output_path.parent / f"{output_path.stem}_coverage_report.json"
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(detailed_report, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"📋 Coverage report saved: {report_path}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save coverage report: {e}")
+    
+    def _generate_batch_coverage_report(self, batch_results: dict) -> dict:
+        """
+        Generate coverage report for batch processing.
+        
+        Args:
+            batch_results: Batch processing results
+            
+        Returns:
+            Batch coverage report
+        """
+        total_images = 0
+        total_descriptive = 0
+        total_decorative = 0
+        total_fallback_decorative = 0
+        total_failed = 0
+        total_failed_generations = 0
+        
+        for file_result in batch_results.get('files', []):
+            if 'coverage_report' in file_result:
+                report = file_result['coverage_report']
+                total_images += report['total_images']
+                total_descriptive += report['descriptive_images']
+                total_decorative += report['decorative_images']
+                total_fallback_decorative += report['fallback_decorative_images']
+                total_failed += report['failed_images']
+                total_failed_generations += report['failed_generations_count']
+        
+        # Calculate batch percentages
+        descriptive_pct = (total_descriptive / total_images * 100) if total_images > 0 else 0
+        decorative_pct = ((total_decorative + total_fallback_decorative) / total_images * 100) if total_images > 0 else 0
+        total_coverage_pct = ((total_descriptive + total_decorative + total_fallback_decorative) / total_images * 100) if total_images > 0 else 0
+        
+        return {
+            'total_files': batch_results.get('total_files', 0),
+            'total_images': total_images,
+            'descriptive_images': total_descriptive,
+            'decorative_images': total_decorative,
+            'fallback_decorative_images': total_fallback_decorative,
+            'failed_images': total_failed,
+            'descriptive_coverage_percent': descriptive_pct,
+            'decorative_coverage_percent': decorative_pct,
+            'total_coverage_percent': total_coverage_pct,
+            'total_failed_generations': total_failed_generations
+        }
+    
+    def _log_failed_generations_summary(self):
+        """Log summary of failed generations for manual review."""
+        if not self.failed_generations:
+            return
+        
+        logger.warning(f"🚨 {len(self.failed_generations)} failed ALT text generations require manual review:")
+        for failed in self.failed_generations:
+            logger.warning(f"   - {failed['image_key']} (slide {failed['slide_idx']}, {failed['dimensions']}): {failed['error']}")
+            if failed['slide_text']:
+                logger.warning(f"     Context: {failed['slide_text'][:50]}...")
+        
+        logger.warning("   See coverage report file for complete details.")
 
 
 def main():
@@ -536,6 +736,7 @@ Examples:
     # Global options
     parser.add_argument('--config', help='Configuration file path')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
+    parser.add_argument('--force-decorative', action='store_true', help='Force decorative fallback for failed generations (ensures 100%% coverage)')
     
     args = parser.parse_args()
     
@@ -545,7 +746,7 @@ Examples:
     
     try:
         # Initialize processor
-        processor = PPTXAltProcessor(args.config, args.verbose)
+        processor = PPTXAltProcessor(args.config, args.verbose, args.force_decorative)
         
         if args.command == 'process':
             result = processor.process_single_file(
