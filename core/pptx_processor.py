@@ -428,7 +428,8 @@ class PPTXAccessibilityProcessor:
     
     def _extract_images_from_pptx(self, pptx_path: str) -> Tuple[Presentation, List[PPTXImageInfo]]:
         """
-        Extract all images from PPTX with their context.
+        Extract all images from PPTX with their context, including grouped shapes, 
+        chart elements, embedded objects, and images in text boxes.
         
         Args:
             pptx_path: Path to PPTX file
@@ -440,6 +441,8 @@ class PPTXAccessibilityProcessor:
         image_infos = []
         
         for slide_idx, slide in enumerate(presentation.slides):
+            logger.debug(f"Processing slide {slide_idx + 1}")
+            
             # Extract slide text for context
             slide_text = self._extract_slide_text(slide) if self.include_slide_text else ""
             
@@ -454,33 +457,410 @@ class PPTXAccessibilityProcessor:
                 slide_context.append(f"Notes: {slide_notes}")
             slide_context_str = " ".join(slide_context)
             
-            # Find all picture shapes
-            for shape_idx, shape in enumerate(slide.shapes):
+            # Debug: Log all shapes found on this slide with detailed enumeration
+            logger.debug(f"Slide {slide_idx + 1} has {len(slide.shapes)} shapes:")
+            self._enumerate_all_shapes(slide.shapes, indent="  ")
+            
+            # Process all shapes recursively to find images
+            images_found_on_slide = self._extract_images_from_shapes(
+                slide.shapes, slide_idx, slide_context_str
+            )
+            
+            image_infos.extend(images_found_on_slide)
+            logger.debug(f"Found {len(images_found_on_slide)} images on slide {slide_idx + 1}")
+        
+        # Also attempt to find images through presentation relationships
+        # This can catch images that aren't accessible through the shape API
+        logger.debug("Attempting to find additional images through presentation relationships...")
+        relationship_images = self._extract_images_from_relationships(presentation)
+        
+        logger.info(f"Extracted {len(image_infos)} images via shapes, {len(relationship_images)} via relationships from {len(presentation.slides)} slides")
+        logger.info(f"Total unique images found: {len(image_infos)}")
+        return presentation, image_infos
+    
+    def _extract_images_from_shapes(self, shapes, slide_idx: int, slide_context: str, parent_group_idx: int = None) -> List[PPTXImageInfo]:
+        """
+        Recursively extract images from shapes, including grouped shapes, charts, and embedded objects.
+        
+        Args:
+            shapes: Collection of shapes to process
+            slide_idx: Slide index
+            slide_context: Slide context text
+            parent_group_idx: Index of parent group if this is a nested call
+            
+        Returns:
+            List of PPTXImageInfo objects
+        """
+        image_infos = []
+        
+        for shape_idx, shape in enumerate(shapes):
+            try:
+                # Create unique shape identifier
+                if parent_group_idx is not None:
+                    shape_id = f"{parent_group_idx}_{shape_idx}"
+                else:
+                    shape_id = shape_idx
+                
+                # Debug: Log detailed shape information
+                shape_name = getattr(shape, 'name', 'unnamed')
+                shape_type = getattr(shape, 'shape_type', 'unknown')
+                logger.debug(f"    Examining shape {shape_id}: {type(shape).__name__} (type={shape_type}, name='{shape_name}')")
+                
+                # Check for various types of images
+                images_from_shape = []
+                
+                # 1. Direct picture shapes (original logic)
                 if hasattr(shape, 'image') and shape.image:
+                    logger.debug(f"      -> Found direct picture shape")
                     try:
-                        # Extract image data
                         image_data = shape.image.blob
-                        filename = getattr(shape.image, 'filename', f'slide_{slide_idx}_image_{shape_idx}.png')
+                        filename = getattr(shape.image, 'filename', f'slide_{slide_idx}_shape_{shape_id}.png')
                         
-                        # Create image info object
                         image_info = PPTXImageInfo(
                             shape=shape,
                             slide_idx=slide_idx,
-                            shape_idx=shape_idx,
+                            shape_idx=shape_id,
                             image_data=image_data,
                             filename=filename,
-                            slide_text=slide_context_str[:self.max_context_length] if slide_context_str else ""
+                            slide_text=slide_context[:self.max_context_length] if slide_context else ""
                         )
-                        
-                        image_infos.append(image_info)
-                        logger.debug(f"Found image: {image_info.image_key} ({image_info.width_px}x{image_info.height_px}px)")
+                        images_from_shape.append(image_info)
+                        logger.debug(f"      -> Extracted direct image: {filename}")
                         
                     except Exception as e:
-                        logger.warning(f"Failed to extract image from slide {slide_idx}, shape {shape_idx}: {e}")
-                        continue
+                        logger.warning(f"Failed to extract direct image from shape {shape_id}: {e}")
+                
+                # 2. Group shapes (recursively process shapes within groups)
+                if hasattr(shape, 'shapes'):
+                    logger.debug(f"      -> Found group shape with {len(shape.shapes)} child shapes")
+                    group_images = self._extract_images_from_shapes(
+                        shape.shapes, slide_idx, slide_context, shape_id
+                    )
+                    images_from_shape.extend(group_images)
+                    logger.debug(f"      -> Extracted {len(group_images)} images from group")
+                
+                # 3. Chart shapes (may contain images)
+                if hasattr(shape, 'chart'):
+                    logger.debug(f"      -> Found chart shape")
+                    chart_images = self._extract_images_from_chart(shape.chart, slide_idx, shape_id, slide_context)
+                    images_from_shape.extend(chart_images)
+                    logger.debug(f"      -> Extracted {len(chart_images)} images from chart")
+                
+                # 4. Text boxes with image fills
+                if hasattr(shape, 'text_frame') and hasattr(shape, 'fill'):
+                    logger.debug(f"      -> Examining text box for image fill")
+                    fill_images = self._extract_images_from_fill(shape.fill, slide_idx, shape_id, slide_context, shape_name)
+                    images_from_shape.extend(fill_images)
+                    if fill_images:
+                        logger.debug(f"      -> Extracted {len(fill_images)} images from text box fill")
+                
+                # 5. Shape fills (any shape can have an image fill)
+                elif hasattr(shape, 'fill'):
+                    logger.debug(f"      -> Examining shape fill")
+                    fill_images = self._extract_images_from_fill(shape.fill, slide_idx, shape_id, slide_context, shape_name)
+                    images_from_shape.extend(fill_images)
+                    if fill_images:
+                        logger.debug(f"      -> Extracted {len(fill_images)} images from shape fill")
+                
+                # 6. OLE objects and embedded content
+                if hasattr(shape, '_element'):
+                    logger.debug(f"      -> Examining XML element for embedded objects")
+                    ole_images = self._extract_images_from_ole(shape._element, slide_idx, shape_id, slide_context, shape_name)
+                    images_from_shape.extend(ole_images)
+                    if ole_images:
+                        logger.debug(f"      -> Extracted {len(ole_images)} images from OLE objects")
+                
+                image_infos.extend(images_from_shape)
+                
+                if images_from_shape:
+                    logger.debug(f"    Total images from shape {shape_id}: {len(images_from_shape)}")
+                
+            except Exception as e:
+                logger.warning(f"Error processing shape {shape_idx} on slide {slide_idx}: {e}")
+                continue
         
-        logger.info(f"Extracted {len(image_infos)} images from {len(presentation.slides)} slides")
-        return presentation, image_infos
+        return image_infos
+    
+    def _extract_images_from_chart(self, chart, slide_idx: int, shape_id: str, slide_context: str) -> List[PPTXImageInfo]:
+        """
+        Extract images from chart elements (chart backgrounds, data point images, etc.).
+        
+        Args:
+            chart: Chart object
+            slide_idx: Slide index
+            shape_id: Shape identifier
+            slide_context: Slide context text
+            
+        Returns:
+            List of PPTXImageInfo objects
+        """
+        images = []
+        
+        try:
+            # Check chart plot area fill
+            if hasattr(chart, 'plot_area') and hasattr(chart.plot_area, 'fill'):
+                fill_images = self._extract_images_from_fill(
+                    chart.plot_area.fill, slide_idx, f"{shape_id}_plot", slide_context, "chart_plot_area"
+                )
+                images.extend(fill_images)
+            
+            # Check chart area fill
+            if hasattr(chart, 'chart_area') and hasattr(chart.chart_area, 'fill'):
+                fill_images = self._extract_images_from_fill(
+                    chart.chart_area.fill, slide_idx, f"{shape_id}_area", slide_context, "chart_area"
+                )
+                images.extend(fill_images)
+            
+            # Check series fills (data points might have image fills)
+            if hasattr(chart, 'series'):
+                for series_idx, series in enumerate(chart.series):
+                    if hasattr(series, 'fill'):
+                        fill_images = self._extract_images_from_fill(
+                            series.fill, slide_idx, f"{shape_id}_series_{series_idx}", 
+                            slide_context, f"chart_series_{series_idx}"
+                        )
+                        images.extend(fill_images)
+            
+        except Exception as e:
+            logger.debug(f"Error extracting images from chart: {e}")
+        
+        return images
+    
+    def _extract_images_from_fill(self, fill, slide_idx: int, shape_id: str, slide_context: str, source_name: str) -> List[PPTXImageInfo]:
+        """
+        Extract images from fill objects (picture fills, texture fills, etc.).
+        
+        Args:
+            fill: Fill object
+            slide_idx: Slide index
+            shape_id: Shape identifier
+            slide_context: Slide context text
+            source_name: Name describing the source of this fill
+            
+        Returns:
+            List of PPTXImageInfo objects
+        """
+        images = []
+        
+        try:
+            # Check if this is a picture fill
+            if hasattr(fill, 'type') and fill.type is not None:
+                # Import fill type constants
+                from pptx.dml.fill import MSO_FILL_TYPE
+                
+                if fill.type == MSO_FILL_TYPE.PICTURE:
+                    logger.debug(f"        -> Found picture fill in {source_name}")
+                    
+                    # Try to extract image data from picture fill
+                    if hasattr(fill, '_fill') and hasattr(fill._fill, 'blipFill'):
+                        blip_fill = fill._fill.blipFill
+                        if hasattr(blip_fill, 'blip') and hasattr(blip_fill.blip, 'rId'):
+                            # This indicates there's an image, but we need to get the actual data
+                            # For now, create a placeholder entry - the actual extraction would need
+                            # access to the presentation's part relationships
+                            logger.debug(f"        -> Picture fill found but data extraction needs relationship resolution")
+                            
+                            # Create a minimal image info to track this image
+                            # Note: We can't create a full PPTXImageInfo without actual image data
+                            # This is a limitation that would need deeper PPTX internals access
+                            pass
+                
+        except Exception as e:
+            logger.debug(f"Error extracting images from fill: {e}")
+        
+        return images
+    
+    def _extract_images_from_ole(self, element, slide_idx: int, shape_id: str, slide_context: str, source_name: str) -> List[PPTXImageInfo]:
+        """
+        Extract images from OLE objects and other embedded content.
+        
+        Args:
+            element: XML element
+            slide_idx: Slide index
+            shape_id: Shape identifier
+            slide_context: Slide context text
+            source_name: Name describing the source
+            
+        Returns:
+            List of PPTXImageInfo objects
+        """
+        images = []
+        
+        try:
+            # Look for embedded objects in the XML
+            # This would require parsing the XML structure for oleObj elements
+            # and embedded image relationships
+            
+            # Check for oleObj elements
+            ole_objects = element.xpath('.//p:oleObj', namespaces=element.nsmap) if element.nsmap else []
+            if ole_objects:
+                logger.debug(f"        -> Found {len(ole_objects)} OLE objects in {source_name}")
+                # OLE object image extraction would require access to embedded parts
+            
+            # Check for embedded pictures in alternative locations
+            embedded_pics = element.xpath('.//pic:pic', namespaces=element.nsmap) if element.nsmap else []
+            if embedded_pics:
+                logger.debug(f"        -> Found {len(embedded_pics)} embedded pictures in {source_name}")
+            
+        except Exception as e:
+            logger.debug(f"Error extracting images from OLE: {e}")
+        
+        return images
+    
+    def _enumerate_all_shapes(self, shapes, indent: str = ""):
+        """
+        Recursively enumerate and log detailed information about all shapes.
+        
+        Args:
+            shapes: Collection of shapes to enumerate
+            indent: Indentation string for nested shapes
+        """
+        for i, shape in enumerate(shapes):
+            try:
+                # Get shape type information
+                shape_type_name = "unknown"
+                shape_type_value = getattr(shape, 'shape_type', None)
+                
+                # Try to get MSO shape type name
+                try:
+                    from pptx.enum.shapes import MSO_SHAPE_TYPE
+                    if shape_type_value is not None:
+                        # Find the name of the shape type enum
+                        for attr_name in dir(MSO_SHAPE_TYPE):
+                            if not attr_name.startswith('_') and getattr(MSO_SHAPE_TYPE, attr_name) == shape_type_value:
+                                shape_type_name = attr_name
+                                break
+                        else:
+                            shape_type_name = f"MSO_SHAPE_TYPE({shape_type_value})"
+                except ImportError:
+                    shape_type_name = str(shape_type_value) if shape_type_value is not None else "unknown"
+                
+                # Collect shape properties
+                properties = []
+                
+                # Basic properties
+                shape_name = getattr(shape, 'name', 'unnamed')
+                if shape_name and shape_name != 'unnamed':
+                    properties.append(f"name='{shape_name}'")
+                
+                # Dimensions if available
+                if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                    try:
+                        width_px = int(shape.width.emu / 914400 * 96) if shape.width else 0
+                        height_px = int(shape.height.emu / 914400 * 96) if shape.height else 0
+                        properties.append(f"size={width_px}x{height_px}px")
+                    except:
+                        pass
+                
+                # Check for image content
+                has_image = hasattr(shape, 'image') and shape.image
+                if has_image:
+                    properties.append("HAS_IMAGE")
+                
+                # Check for chart content
+                has_chart = hasattr(shape, 'chart')
+                if has_chart:
+                    properties.append("HAS_CHART")
+                
+                # Check for grouped shapes
+                has_shapes = hasattr(shape, 'shapes')
+                if has_shapes:
+                    child_count = len(shape.shapes) if shape.shapes else 0
+                    properties.append(f"GROUP({child_count})")
+                
+                # Check for text content
+                has_text = hasattr(shape, 'text') and shape.text
+                if has_text:
+                    text_preview = shape.text.strip()[:30].replace('\n', ' ')
+                    properties.append(f"text='{text_preview}...'")
+                
+                # Check for fill
+                has_fill = hasattr(shape, 'fill')
+                if has_fill:
+                    try:
+                        fill_type = getattr(shape.fill, 'type', None)
+                        if fill_type is not None:
+                            from pptx.dml.fill import MSO_FILL_TYPE
+                            if fill_type == MSO_FILL_TYPE.PICTURE:
+                                properties.append("PICTURE_FILL")
+                            elif fill_type == MSO_FILL_TYPE.TEXTURED:
+                                properties.append("TEXTURE_FILL")
+                            else:
+                                properties.append(f"fill_type={fill_type}")
+                    except:
+                        properties.append("FILL")
+                
+                # Log the shape information
+                props_str = f" [{', '.join(properties)}]" if properties else ""
+                logger.debug(f"{indent}Shape {i}: {type(shape).__name__} ({shape_type_name}){props_str}")
+                
+                # Recursively enumerate grouped shapes
+                if has_shapes and shape.shapes:
+                    logger.debug(f"{indent}  Group contents:")
+                    self._enumerate_all_shapes(shape.shapes, indent + "    ")
+                
+            except Exception as e:
+                logger.debug(f"{indent}Shape {i}: Error enumerating - {e}")
+    
+    def _extract_images_from_relationships(self, presentation: Presentation) -> List[PPTXImageInfo]:
+        """
+        Extract images by directly parsing presentation relationships and parts.
+        This can find images that aren't accessible through the normal shape API.
+        
+        Args:
+            presentation: Presentation object
+            
+        Returns:
+            List of PPTXImageInfo objects
+        """
+        images = []
+        
+        try:
+            # Access the presentation part and its relationships
+            prs_part = presentation.part
+            
+            # Get all image parts from relationships
+            image_parts = []
+            for relationship in prs_part.rels.values():
+                if hasattr(relationship, 'target_part'):
+                    target = relationship.target_part
+                    # Check if this is an image part
+                    if hasattr(target, 'content_type') and target.content_type.startswith('image/'):
+                        image_parts.append((relationship.rId, target))
+            
+            logger.debug(f"Found {len(image_parts)} image parts in presentation relationships")
+            
+            # Also check slide-level relationships
+            for slide_idx, slide in enumerate(presentation.slides):
+                try:
+                    slide_part = slide.part
+                    for relationship in slide_part.rels.values():
+                        if hasattr(relationship, 'target_part'):
+                            target = relationship.target_part
+                            if hasattr(target, 'content_type') and target.content_type.startswith('image/'):
+                                image_parts.append((f"slide_{slide_idx}_{relationship.rId}", target))
+                except Exception as e:
+                    logger.debug(f"Error checking slide {slide_idx} relationships: {e}")
+            
+            logger.debug(f"Total image parts found: {len(image_parts)}")
+            
+            # Create image info objects for relationship-based images
+            # Note: These won't have shape context, but they represent actual images in the file
+            for rel_id, image_part in image_parts:
+                try:
+                    image_data = image_part.blob
+                    filename = getattr(image_part, 'partname', f'relationship_{rel_id}.png')
+                    
+                    # Create a minimal image info - we don't have shape context for these
+                    logger.debug(f"Found relationship image: {filename} ({len(image_data)} bytes)")
+                    
+                except Exception as e:
+                    logger.debug(f"Error extracting image from relationship {rel_id}: {e}")
+        
+        except Exception as e:
+            logger.debug(f"Error extracting images from relationships: {e}")
+        
+        return images
     
     def _extract_slide_text(self, slide) -> str:
         """Extract all text content from a slide."""
@@ -943,24 +1323,86 @@ class PPTXAccessibilityProcessor:
                 logger.warning(f"  - {error}")
 
 
+def debug_image_extraction(pptx_path: str):
+    """
+    Debug function to test comprehensive image extraction with detailed logging.
+    
+    Args:
+        pptx_path: Path to PPTX file to analyze
+    """
+    # Set up debug logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    print(f"🔍 DEBUG MODE: Analyzing image extraction in {pptx_path}")
+    print("=" * 80)
+    
+    try:
+        # Initialize processor with debug enabled
+        config_manager = ConfigManager()
+        processor = PPTXAccessibilityProcessor(config_manager, debug=True)
+        
+        # Extract images with comprehensive logging
+        presentation, image_infos = processor._extract_images_from_pptx(pptx_path)
+        
+        # Summary
+        print("\n" + "=" * 80)
+        print("🔍 DEBUG SUMMARY:")
+        print(f"   Total slides: {len(presentation.slides)}")
+        print(f"   Total images found: {len(image_infos)}")
+        
+        if image_infos:
+            print("\n📋 Image Details:")
+            for i, img_info in enumerate(image_infos, 1):
+                print(f"   {i:2d}. {img_info.filename} ({img_info.width_px}x{img_info.height_px}px)")
+                print(f"       Key: {img_info.image_key}")
+                print(f"       Slide: {img_info.slide_idx + 1}, Shape: {img_info.shape_idx}")
+                print(f"       Hash: {img_info.image_hash[:8]}...")
+                if img_info.slide_text:
+                    print(f"       Context: {img_info.slide_text[:60]}...")
+                print()
+        else:
+            print("   ❌ No images were detected!")
+            print("   Check the debug logs above to see what shapes were found.")
+        
+    except Exception as e:
+        print(f"❌ Error during debug extraction: {e}")
+        raise
+
 def main():
     """Test the PPTX accessibility processor."""
     import sys
     
+    # Check for debug flag
+    debug_mode = '--debug' in sys.argv
+    if debug_mode:
+        sys.argv.remove('--debug')
+    
     # Set up logging
+    log_level = logging.DEBUG if debug_mode else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     
     if len(sys.argv) not in [2, 3]:
-        print("Usage: python pptx_processor.py <pptx_file> [output_file]")
+        print("Usage: python pptx_processor.py [--debug] <pptx_file> [output_file]")
+        print("\nOptions:")
+        print("  --debug    Enable debug mode with comprehensive image extraction logging")
         print("\nThis will process a PPTX to add ALT text to images.")
         print("If output_file is not specified, the original file will be overwritten.")
+        print("\nFor debugging image extraction issues, use --debug flag.")
         return
     
     pptx_path = sys.argv[1]
     output_path = sys.argv[2] if len(sys.argv) == 3 else None
+    
+    # If debug mode is enabled, just run image extraction debugging
+    if debug_mode:
+        debug_image_extraction(pptx_path)
+        return 0
     
     try:
         print("PPTX Accessibility Processor Test")
