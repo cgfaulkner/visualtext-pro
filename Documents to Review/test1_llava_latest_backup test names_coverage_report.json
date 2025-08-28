@@ -1,7 +1,7 @@
 {
-  "input_file": "/Users/chrisfaulkner/Documents/ProgrammingEnvs/pdf-alt/Documents to Review/test1_llava_latest_backup test names.pptx",
-  "output_file": "/Users/chrisfaulkner/Documents/ProgrammingEnvs/pdf-alt/Documents to Review/test1_llava_latest_backup test names.pptx",
-  "processing_timestamp": "2025-08-28 11:09:59",
+  "input_file": "Documents to Review/test1_llava_latest_backup test names.pptx",
+  "output_file": "Documents to Review/test1_llava_latest_backup test names.pptx",
+  "processing_timestamp": "2025-08-28 11:25:22",
   "coverage_summary": {
     "total_images": 8,
     "descriptive_images": 8,

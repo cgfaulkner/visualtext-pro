@@ -91,7 +91,7 @@ class PPTXAccessibilityProcessor:
     Reuses ConfigManager, FlexibleAltGenerator, medical prompts, and decorative detection.
     """
     
-    def __init__(self, config_manager: Optional[ConfigManager] = None):
+    def __init__(self, config_manager: Optional[ConfigManager] = None, debug: bool = False):
         """
         Initialize the PPTX accessibility processor.
         
@@ -99,6 +99,7 @@ class PPTXAccessibilityProcessor:
             config_manager: Optional ConfigManager instance. If None, creates a new one.
         """
         self.config_manager = config_manager or ConfigManager()
+        self.debug = debug
         
         # Validate decorative configuration
         if not validate_decorative_config(self.config_manager.config):
@@ -130,7 +131,7 @@ class PPTXAccessibilityProcessor:
         logger.debug(f"Include slide text: {self.include_slide_text}")
     
     def process_pptx(self, pptx_path: str, output_path: Optional[str] = None, 
-                    force_decorative: bool = False, failed_generation_callback=None) -> Dict[str, Any]:
+                    force_decorative: bool = False, failed_generation_callback=None, debug: bool = False) -> Dict[str, Any]:
         """
         Process a PPTX file to add ALT text to images.
         
@@ -145,6 +146,7 @@ class PPTXAccessibilityProcessor:
         """
         start_time = time.time()
         pptx_path = Path(pptx_path)
+        debug = debug or self.debug
         
         # Initialize result structure
         result = {
@@ -215,29 +217,51 @@ class PPTXAccessibilityProcessor:
                 image_tracker[image_info.image_hash].append(image_info)
             
             for image_info in image_infos:
+                generation_failure_reason = None
+                
                 try:
                     # Check if we should generate ALT text for this image
                     if not self._should_generate_alt_text(image_info, image_tracker):
-                        logger.debug(f"Skipping decorative image: {image_info.image_key}")
+                        alt_text_mapping[image_info.image_key] = {
+                            'alt_text': '[Decorative image]',
+                            'shape': image_info.shape,
+                            'slide_idx': image_info.slide_idx,
+                            'shape_idx': image_info.shape_idx
+                        }
                         result['decorative_images'] += 1
+                        logger.debug(f"Skipping decorative image: {image_info.image_key}")
                         continue
                     
-                    # Generate ALT text
-                    alt_text = self._generate_alt_text_for_image(image_info)
+                    # Generate ALT text with comprehensive error handling
+                    if debug:
+                        logger.info(f"🔍 DEBUG: Attempting ALT text generation for {image_info.image_key}")
+                        logger.info(f"🔍 DEBUG: Image: {image_info.width_px}x{image_info.height_px}px, file: {image_info.filename}")
+                        logger.info(f"🔍 DEBUG: Slide text: {image_info.slide_text[:100]}...")
                     
-                    if alt_text:
+                    alt_text, failure_reason = self._generate_alt_text_for_image_with_validation(image_info, debug)
+                    
+                    if alt_text and alt_text.strip() and alt_text.strip() != "":
+                        # Successfully generated valid ALT text
                         alt_text_mapping[image_info.image_key] = {
-                            'alt_text': alt_text,
+                            'alt_text': alt_text.strip(),
                             'shape': image_info.shape,
                             'slide_idx': image_info.slide_idx,
                             'shape_idx': image_info.shape_idx
                         }
                         result['processed_images'] += 1
-                        logger.info(f"Generated ALT text for {image_info.image_key}: {alt_text[:50]}...")
+                        if debug:
+                            logger.info(f"✅ DEBUG: Generated ALT text for {image_info.image_key}: {alt_text[:50]}...")
+                        else:
+                            logger.info(f"Generated ALT text for {image_info.image_key}: {alt_text[:50]}...")
                     else:
-                        # Handle failed generation
+                        # Generation failed or returned empty/invalid text
+                        generation_failure_reason = failure_reason or "Empty or invalid ALT text returned"
+                        
+                        if debug:
+                            logger.warning(f"❌ DEBUG: Generation failed for {image_info.image_key}: {generation_failure_reason}")
+                        
+                        # Apply decorative fallback for 100% coverage
                         if force_decorative:
-                            # Apply decorative fallback for 100% coverage
                             fallback_alt_text = "[Decorative image]"
                             alt_text_mapping[image_info.image_key] = {
                                 'alt_text': fallback_alt_text,
@@ -246,7 +270,7 @@ class PPTXAccessibilityProcessor:
                                 'shape_idx': image_info.shape_idx
                             }
                             result['fallback_decorative'] += 1
-                            logger.info(f"Applied decorative fallback for {image_info.image_key}")
+                            logger.info(f"Applied decorative fallback for {image_info.image_key} - Reason: {generation_failure_reason}")
                             
                             # Log failed generation for manual review
                             if failed_generation_callback:
@@ -260,11 +284,11 @@ class PPTXAccessibilityProcessor:
                                         'height_px': image_info.height_px,
                                         'slide_text': image_info.slide_text
                                     },
-                                    "ALT text generation failed, applied decorative fallback"
+                                    f"ALT text generation failed ({generation_failure_reason}), applied decorative fallback"
                                 )
                         else:
                             result['failed_images'] += 1
-                            error_msg = f"Failed to generate ALT text for {image_info.image_key}"
+                            error_msg = f"Failed to generate ALT text for {image_info.image_key}: {generation_failure_reason}"
                             logger.warning(error_msg)
                             result['errors'].append(error_msg)
                             
@@ -280,26 +304,92 @@ class PPTXAccessibilityProcessor:
                                         'height_px': image_info.height_px,
                                         'slide_text': image_info.slide_text
                                     },
-                                    "ALT text generation failed"
+                                    f"ALT text generation failed: {generation_failure_reason}"
                                 )
                 
                 except Exception as e:
-                    result['failed_images'] += 1
-                    error_msg = f"Error processing {image_info.image_key}: {str(e)}"
-                    logger.error(error_msg)
-                    result['errors'].append(error_msg)
-                    continue
+                    generation_failure_reason = f"Exception during generation: {str(e)}"
+                    
+                    if debug:
+                        logger.error(f"💥 DEBUG: Exception processing {image_info.image_key}: {e}", exc_info=True)
+                    
+                    # Apply decorative fallback for exceptions too if force_decorative is enabled
+                    if force_decorative:
+                        fallback_alt_text = "[Decorative image]"
+                        alt_text_mapping[image_info.image_key] = {
+                            'alt_text': fallback_alt_text,
+                            'shape': image_info.shape,
+                            'slide_idx': image_info.slide_idx,
+                            'shape_idx': image_info.shape_idx
+                        }
+                        result['fallback_decorative'] += 1
+                        logger.info(f"Applied decorative fallback for {image_info.image_key} after exception - Reason: {generation_failure_reason}")
+                        
+                        # Log failed generation for manual review
+                        if failed_generation_callback:
+                            failed_generation_callback(
+                                image_info.image_key,
+                                {
+                                    'slide_idx': image_info.slide_idx,
+                                    'shape_idx': image_info.shape_idx,
+                                    'filename': image_info.filename,
+                                    'width_px': image_info.width_px,
+                                    'height_px': image_info.height_px,
+                                    'slide_text': image_info.slide_text
+                                },
+                                f"Exception during generation ({generation_failure_reason}), applied decorative fallback"
+                            )
+                    else:
+                        result['failed_images'] += 1
+                        error_msg = f"Error processing {image_info.image_key}: {str(e)}"
+                        logger.error(error_msg)
+                        result['errors'].append(error_msg)
+                        
+                        # Log failed generation for manual review
+                        if failed_generation_callback:
+                            failed_generation_callback(
+                                image_info.image_key,
+                                {
+                                    'slide_idx': image_info.slide_idx,
+                                    'shape_idx': image_info.shape_idx,
+                                    'filename': image_info.filename,
+                                    'width_px': image_info.width_px,
+                                    'height_px': image_info.height_px,
+                                    'slide_text': image_info.slide_text
+                                },
+                                f"Exception during generation: {str(e)}"
+                            )
             
             result['generation_time'] = time.time() - generation_start
             logger.info(f"ALT text generation completed in {result['generation_time']:.2f}s")
             
-            # Step 3: Inject ALT text into PPTX
+            # Step 3: Validate 100% coverage before injection
+            logger.info("Step 3: Validating ALT text coverage...")
+            validation_result = self._validate_complete_coverage(image_infos, alt_text_mapping, force_decorative, debug)
+            
+            if not validation_result['complete_coverage']:
+                missing_count = validation_result['missing_count']
+                error_msg = f"Incomplete ALT text coverage: {missing_count} images missing ALT text"
+                logger.error(error_msg)
+                result['errors'].append(error_msg)
+                
+                if debug:
+                    logger.error("❌ DEBUG: Images missing ALT text:")
+                    for missing_key in validation_result['missing_images']:
+                        logger.error(f"   - {missing_key}")
+            
+            # Step 4: Inject ALT text into PPTX
             if alt_text_mapping:
-                logger.info("Step 3: Adding ALT text to PPTX...")
+                logger.info("Step 4: Adding ALT text to PPTX...")
                 injection_start = time.time()
                 
+                if debug:
+                    logger.info(f"🔍 DEBUG: Injecting {len(alt_text_mapping)} ALT text mappings")
+                    for key, info in list(alt_text_mapping.items())[:3]:  # Show first 3
+                        logger.info(f"🔍 DEBUG: {key} -> '{info['alt_text'][:30]}...'")
+                
                 injection_success = self._inject_alt_text_to_pptx(
-                    presentation, alt_text_mapping, str(output_path)
+                    presentation, alt_text_mapping, str(output_path), debug
                 )
                 
                 result['injection_time'] = time.time() - injection_start
@@ -308,13 +398,20 @@ class PPTXAccessibilityProcessor:
                 if injection_success:
                     result['success'] = True
                     logger.info("✅ PPTX processing completed successfully!")
+                    
+                    # Final coverage validation
+                    final_coverage = validation_result['total_coverage_percent']
+                    logger.info(f"📊 Final ALT text coverage: {final_coverage:.1f}%")
+                    if final_coverage == 100.0:
+                        logger.info("🎯 100% ALT text coverage achieved!")
                 else:
                     error_msg = "ALT text injection failed"
                     logger.error(error_msg)
                     result['errors'].append(error_msg)
             else:
-                logger.info("No ALT text to inject - all images were decorative or failed generation")
-                result['success'] = True  # Not an error condition
+                logger.warning("No ALT text to inject - this should not happen with proper fallback")
+                result['success'] = False
+                result['errors'].append("No ALT text mappings generated - fallback system failed")
             
         except Exception as e:
             error_msg = f"Unexpected error during PPTX processing: {str(e)}"
@@ -491,6 +588,92 @@ class PPTXAccessibilityProcessor:
             logger.error(f"Failed to generate ALT text for {image_info.image_key}: {e}")
             return None
     
+    def _generate_alt_text_for_image_with_validation(self, image_info: PPTXImageInfo, debug: bool = False) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Generate ALT text with comprehensive validation and detailed failure tracking.
+        
+        Args:
+            image_info: Image information
+            debug: Whether to enable debug logging
+            
+        Returns:
+            Tuple of (alt_text, failure_reason). If alt_text is None/empty, failure_reason explains why.
+        """
+        failure_reason = None
+        
+        try:
+            # Save image to temporary file for ALT text generation
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_file.write(image_info.image_data)
+                temp_image_path = temp_file.name
+            
+            try:
+                # Build context for better ALT text generation
+                context = self._build_generation_context(image_info)
+                
+                # Determine appropriate prompt type based on content
+                prompt_type = self._determine_prompt_type(image_info)
+                
+                if debug:
+                    logger.info(f"🔍 DEBUG: Using prompt type '{prompt_type}' with context: {context[:100]}...")
+                
+                # Generate ALT text using the configured generator
+                alt_text = self.alt_generator.generate_alt_text(
+                    image_path=temp_image_path,
+                    prompt_type=prompt_type,
+                    context=context
+                )
+                
+                # Comprehensive validation of the generated ALT text
+                if alt_text is None:
+                    failure_reason = "Generator returned None"
+                    return None, failure_reason
+                
+                if not isinstance(alt_text, str):
+                    failure_reason = f"Generator returned non-string type: {type(alt_text)}"
+                    return None, failure_reason
+                
+                alt_text_stripped = alt_text.strip()
+                if not alt_text_stripped:
+                    failure_reason = "Generator returned empty or whitespace-only string"
+                    return None, failure_reason
+                
+                if len(alt_text_stripped) < 3:
+                    failure_reason = f"Generator returned very short ALT text: '{alt_text_stripped}'"
+                    return None, failure_reason
+                
+                # Check for common failure patterns
+                failure_patterns = [
+                    'error', 'failed', 'cannot', 'unable', 'sorry', 
+                    'i cannot', 'i am unable', 'no description',
+                    'not available', 'description not available'
+                ]
+                
+                alt_text_lower = alt_text_stripped.lower()
+                for pattern in failure_patterns:
+                    if pattern in alt_text_lower:
+                        failure_reason = f"Generator returned failure message containing '{pattern}'"
+                        return None, failure_reason
+                
+                # ALT text passed all validation checks
+                if debug:
+                    logger.info(f"✅ DEBUG: Generated valid ALT text: '{alt_text_stripped[:50]}...'")
+                
+                return alt_text_stripped, None
+                
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_image_path)
+                except OSError:
+                    pass  # File cleanup failure is not critical
+        
+        except Exception as e:
+            failure_reason = f"Exception during generation: {str(e)}"
+            if debug:
+                logger.error(f"💥 DEBUG: Exception in ALT text generation: {e}", exc_info=True)
+            return None, failure_reason
+    
     def _build_generation_context(self, image_info: PPTXImageInfo) -> Optional[str]:
         """
         Build context string for ALT text generation.
@@ -554,8 +737,85 @@ class PPTXAccessibilityProcessor:
         
         return 'default'
     
+    def _validate_complete_coverage(self, image_infos: List[PPTXImageInfo], alt_text_mapping: Dict[str, Any], 
+                                  force_decorative: bool = False, debug: bool = False) -> Dict[str, Any]:
+        """
+        Validate that every image has ALT text (either real or decorative fallback).
+        
+        Args:
+            image_infos: List of all images found in the PPTX
+            alt_text_mapping: Current ALT text mappings
+            force_decorative: Whether decorative fallback was enabled
+            debug: Whether to enable debug logging
+            
+        Returns:
+            Dictionary with validation results
+        """
+        total_images = len(image_infos)
+        covered_images = len(alt_text_mapping)
+        missing_images = []
+        
+        # Check each image has ALT text
+        for image_info in image_infos:
+            if image_info.image_key not in alt_text_mapping:
+                missing_images.append(image_info.image_key)
+        
+        missing_count = len(missing_images)
+        coverage_percent = (covered_images / total_images * 100) if total_images > 0 else 0
+        complete_coverage = missing_count == 0
+        
+        # Count ALT text types
+        descriptive_count = 0
+        decorative_count = 0
+        
+        for key, info in alt_text_mapping.items():
+            alt_text = info['alt_text']
+            if alt_text == '[Decorative image]':
+                decorative_count += 1
+            else:
+                descriptive_count += 1
+        
+        validation_result = {
+            'complete_coverage': complete_coverage,
+            'total_images': total_images,
+            'covered_images': covered_images,
+            'missing_count': missing_count,
+            'missing_images': missing_images,
+            'descriptive_count': descriptive_count,
+            'decorative_count': decorative_count,
+            'total_coverage_percent': coverage_percent
+        }
+        
+        if debug:
+            logger.info(f"🔍 DEBUG: Coverage validation results:")
+            logger.info(f"   Total images: {total_images}")
+            logger.info(f"   Images with ALT text: {covered_images}")
+            logger.info(f"   Descriptive ALT text: {descriptive_count}")
+            logger.info(f"   Decorative ALT text: {decorative_count}")
+            logger.info(f"   Missing ALT text: {missing_count}")
+            logger.info(f"   Coverage: {coverage_percent:.1f}%")
+            
+            if missing_count > 0:
+                logger.warning(f"❌ DEBUG: {missing_count} images missing ALT text:")
+                for missing_key in missing_images[:5]:  # Show first 5
+                    logger.warning(f"   - {missing_key}")
+                if len(missing_images) > 5:
+                    logger.warning(f"   ... and {len(missing_images) - 5} more")
+        
+        # Log validation summary
+        if complete_coverage:
+            logger.info(f"✅ Complete ALT text coverage achieved: {covered_images}/{total_images} images")
+            logger.info(f"   Descriptive: {descriptive_count}, Decorative: {decorative_count}")
+        else:
+            logger.error(f"❌ Incomplete ALT text coverage: {covered_images}/{total_images} images ({coverage_percent:.1f}%)")
+            logger.error(f"   Missing ALT text for {missing_count} images")
+            if not force_decorative:
+                logger.error("   💡 Consider using --force-decorative to ensure 100% coverage")
+        
+        return validation_result
+    
     def _inject_alt_text_to_pptx(self, presentation: Presentation, 
-                               alt_text_mapping: Dict[str, Any], output_path: str) -> bool:
+                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> bool:
         """
         Inject ALT text into PPTX presentation using the dedicated injector.
         
