@@ -19,6 +19,8 @@ try:
     from pptx import Presentation
     from pptx.shapes.picture import Picture
     from pptx.shapes.base import BaseShape
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    from pptx.oxml.ns import _nsmap
 except ImportError as e:
     raise ImportError(
         "python-pptx is required for PPTX processing. Install with: pip install python-pptx"
@@ -83,6 +85,59 @@ class PPTXImageInfo:
             components.append(f"hash_{self.image_hash[:8]}")
         
         return "_".join(components)
+
+
+class PPTXShapeInfo:
+    """Container for PPTX shape information for decorative detection."""
+    
+    def __init__(self, shape: BaseShape, slide_idx: int, shape_idx: int, slide_text: str = ""):
+        self.shape = shape
+        self.slide_idx = slide_idx
+        self.shape_idx = shape_idx
+        self.slide_text = slide_text
+        
+        # Extract shape properties
+        self.shape_name = getattr(shape, 'name', 'unnamed')
+        self.shape_type = getattr(shape, 'shape_type', None)
+        self.shape_type_name = self._get_shape_type_name()
+        
+        # Dimensions
+        self.width = shape.width.emu if hasattr(shape, 'width') and shape.width else 0
+        self.height = shape.height.emu if hasattr(shape, 'height') and shape.height else 0
+        self.left = shape.left.emu if hasattr(shape, 'left') and shape.left else 0
+        self.top = shape.top.emu if hasattr(shape, 'top') and shape.top else 0
+        
+        # Convert EMU to pixels
+        self.width_px = int(self.width / 914400 * 96) if self.width else 0
+        self.height_px = int(self.height / 914400 * 96) if self.height else 0
+        self.left_px = int(self.left / 914400 * 96) if self.left else 0
+        self.top_px = int(self.top / 914400 * 96) if self.top else 0
+        
+        # Check for text content
+        self.has_text = hasattr(shape, 'text') and bool(shape.text and shape.text.strip())
+        self.text_content = shape.text.strip() if self.has_text else ""
+        
+        # Create unique identifier
+        self.shape_key = f"slide_{slide_idx}_shape_{shape_idx}_{self.shape_name}"
+    
+    def _get_shape_type_name(self) -> str:
+        """Get human-readable shape type name."""
+        if self.shape_type is None:
+            return "unknown"
+        
+        try:
+            # Find the name of the shape type enum
+            for attr_name in dir(MSO_SHAPE_TYPE):
+                if not attr_name.startswith('_') and not callable(getattr(MSO_SHAPE_TYPE, attr_name, None)):
+                    try:
+                        attr_value = getattr(MSO_SHAPE_TYPE, attr_name)
+                        if attr_value == self.shape_type:
+                            return attr_name
+                    except (AttributeError, TypeError):
+                        continue
+            return f"MSO_SHAPE_TYPE({self.shape_type})"
+        except Exception as e:
+            return f"error_getting_type({self.shape_type})"
 
 
 class PPTXAccessibilityProcessor:
@@ -159,8 +214,12 @@ class PPTXAccessibilityProcessor:
             'decorative_images': 0,
             'fallback_decorative': 0,
             'failed_images': 0,
+            'total_shapes': 0,
+            'decorative_shapes_marked': 0,
+            'shapes_with_content': 0,
             'generation_time': 0.0,
             'injection_time': 0.0,
+            'decorative_marking_time': 0.0,
             'total_time': 0.0,
             'errors': []
         }
@@ -396,6 +455,26 @@ class PPTXAccessibilityProcessor:
                 logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
                 
                 if injection_success:
+                    # Step 5: Detect and mark decorative shapes
+                    logger.info("Step 5: Detecting and marking decorative shapes...")
+                    decorative_start = time.time()
+                    
+                    decorative_shapes = self.detect_decorative_shapes(presentation, debug)
+                    result['total_shapes'], result['shapes_with_content'] = self._count_all_shapes(presentation)
+                    
+                    if decorative_shapes:
+                        marked_count = self.set_decorative_flag(decorative_shapes, debug)
+                        result['decorative_shapes_marked'] = marked_count
+                        
+                        if debug:
+                            logger.info(f"🔍 DEBUG: Marked {marked_count} decorative shapes")
+                    else:
+                        logger.info("No decorative shapes detected")
+                        result['decorative_shapes_marked'] = 0
+                    
+                    result['decorative_marking_time'] = time.time() - decorative_start
+                    logger.info(f"Decorative shape processing completed in {result['decorative_marking_time']:.2f}s")
+                    
                     result['success'] = True
                     logger.info("✅ PPTX processing completed successfully!")
                     
@@ -404,6 +483,11 @@ class PPTXAccessibilityProcessor:
                     logger.info(f"📊 Final ALT text coverage: {final_coverage:.1f}%")
                     if final_coverage == 100.0:
                         logger.info("🎯 100% ALT text coverage achieved!")
+                    
+                    # Report decorative shape coverage
+                    if result['total_shapes'] > 0:
+                        shape_coverage = (result['decorative_shapes_marked'] / result['total_shapes']) * 100
+                        logger.info(f"🎨 Decorative shapes marked: {result['decorative_shapes_marked']}/{result['total_shapes']} ({shape_coverage:.1f}%)")
                 else:
                     error_msg = "ALT text injection failed"
                     logger.error(error_msg)
@@ -862,6 +946,451 @@ class PPTXAccessibilityProcessor:
         
         return images
     
+    def detect_decorative_shapes(self, presentation: Presentation, debug: bool = False) -> List[PPTXShapeInfo]:
+        """
+        Detect decorative shapes (basic geometric shapes without meaningful content) in PPTX.
+        
+        Args:
+            presentation: PowerPoint presentation
+            debug: Enable debug logging
+            
+        Returns:
+            List of PPTXShapeInfo objects representing decorative shapes
+        """
+        decorative_shapes = []
+        
+        # Define decorative shape types (basic geometric shapes)
+        # Note: Many geometric shapes appear as AUTO_SHAPE in python-pptx
+        decorative_shape_types = {
+            MSO_SHAPE_TYPE.AUTO_SHAPE,    # Most geometric shapes (rectangles, ovals, etc.)
+            MSO_SHAPE_TYPE.LINE,          # Lines
+            MSO_SHAPE_TYPE.FREEFORM,      # Freeform drawings
+            MSO_SHAPE_TYPE.CALLOUT,       # Callout shapes
+            MSO_SHAPE_TYPE.TEXT_EFFECT    # WordArt/text effects (often decorative)
+        }
+        
+        for slide_idx, slide in enumerate(presentation.slides):
+            if debug:
+                logger.info(f"🔍 DEBUG: Scanning slide {slide_idx + 1} for decorative shapes")
+            
+            # Extract slide text for context
+            slide_text = self._extract_slide_text(slide) if self.include_slide_text else ""
+            
+            # Process all shapes recursively
+            decorative_on_slide = self._detect_decorative_shapes_recursive(
+                slide.shapes, slide_idx, slide_text, decorative_shape_types, debug
+            )
+            
+            decorative_shapes.extend(decorative_on_slide)
+            
+            if debug and decorative_on_slide:
+                logger.info(f"🔍 DEBUG: Found {len(decorative_on_slide)} decorative shapes on slide {slide_idx + 1}")
+        
+        logger.info(f"Detected {len(decorative_shapes)} potentially decorative shapes")
+        return decorative_shapes
+    
+    def _detect_decorative_shapes_recursive(self, shapes, slide_idx: int, slide_text: str, 
+                                          decorative_types: set, debug: bool = False, 
+                                          parent_group_idx: str = None) -> List[PPTXShapeInfo]:
+        """
+        Recursively detect decorative shapes, including those in groups.
+        
+        Args:
+            shapes: Collection of shapes to process
+            slide_idx: Slide index
+            slide_text: Slide text context
+            decorative_types: Set of shape types considered potentially decorative
+            debug: Enable debug logging
+            parent_group_idx: Parent group identifier for nested shapes
+            
+        Returns:
+            List of decorative PPTXShapeInfo objects
+        """
+        decorative_shapes = []
+        
+        for shape_idx, shape in enumerate(shapes):
+            try:
+                # Create hierarchical shape identifier
+                if parent_group_idx is not None:
+                    shape_id = f"{parent_group_idx}_{shape_idx}"
+                else:
+                    shape_id = shape_idx
+                
+                # Skip images (handled separately)
+                if hasattr(shape, 'image') and shape.image:
+                    continue
+                
+                # Skip shapes that are grouped with meaningful content
+                if hasattr(shape, 'shapes'):
+                    # This is a group - recursively check its contents
+                    if debug:
+                        logger.debug(f"    Examining group shape {shape_id} with {len(shape.shapes)} children")
+                    
+                    group_decorative = self._detect_decorative_shapes_recursive(
+                        shape.shapes, slide_idx, slide_text, decorative_types, debug, shape_id
+                    )
+                    
+                    # Only mark the group as decorative if ALL its contents are decorative or empty
+                    if self._is_group_decorative(shape, group_decorative, debug):
+                        shape_info = PPTXShapeInfo(shape, slide_idx, shape_id, slide_text)
+                        decorative_shapes.append(shape_info)
+                        if debug:
+                            logger.debug(f"    Marked group {shape_id} as decorative")
+                    else:
+                        # Add individual decorative shapes from within the group
+                        decorative_shapes.extend(group_decorative)
+                    
+                    continue
+                
+                # Check if this shape type is potentially decorative
+                try:
+                    shape_type = getattr(shape, 'shape_type', None)
+                    if shape_type is None:
+                        if debug:
+                            logger.debug(f"    Shape {shape_id} has no shape_type attribute")
+                        continue
+                    
+                    if shape_type not in decorative_types:
+                        if debug:
+                            logger.debug(f"    Shape {shape_id} type {shape_type} not in decorative types")
+                        continue
+                except Exception as e:
+                    if debug:
+                        logger.debug(f"    Error getting shape type for {shape_id}: {e}")
+                    continue
+                
+                # Create shape info for analysis
+                try:
+                    shape_info = PPTXShapeInfo(shape, slide_idx, shape_id, slide_text)
+                    
+                    if debug:
+                        logger.debug(f"    Analyzing shape {shape_id}: {shape_info.shape_type_name} "
+                                   f"({shape_info.width_px}x{shape_info.height_px}px)")
+                    
+                    # Apply decorative detection heuristics
+                    if self._is_shape_decorative(shape_info, debug):
+                        decorative_shapes.append(shape_info)
+                        if debug:
+                            logger.debug(f"    ✅ Marked shape {shape_id} as decorative")
+                    elif debug:
+                        logger.debug(f"    ❌ Shape {shape_id} has meaningful content")
+                
+                except Exception as e:
+                    logger.warning(f"Error creating shape info for {shape_id}: {e}")
+                    if debug:
+                        logger.debug(f"    Skipping shape {shape_id} due to creation error")
+                    continue
+                
+            except Exception as e:
+                logger.warning(f"Error analyzing shape {shape_idx} on slide {slide_idx}: {e}")
+                continue
+        
+        return decorative_shapes
+    
+    def _is_shape_decorative(self, shape_info: PPTXShapeInfo, debug: bool = False) -> bool:
+        """
+        Determine if a shape is decorative based on heuristics.
+        
+        Args:
+            shape_info: Shape information
+            debug: Enable debug logging
+            
+        Returns:
+            bool: True if shape appears to be decorative
+        """
+        # Rule 1: Shapes with meaningful text content are not decorative
+        if shape_info.has_text and len(shape_info.text_content) > 2:
+            if debug:
+                logger.debug(f"      Rule 1: Has text content: '{shape_info.text_content[:30]}...'")
+            return False
+        
+        # Rule 2: Very small shapes are likely decorative (bullets, dividers, etc.)
+        min_dimension = min(shape_info.width_px, shape_info.height_px)
+        if min_dimension < self.decorative_size_threshold:
+            if debug:
+                logger.debug(f"      Rule 2: Very small shape ({min_dimension}px < {self.decorative_size_threshold}px)")
+            return True
+        
+        # Rule 3: Lines are typically decorative unless they have text
+        if shape_info.shape_type == MSO_SHAPE_TYPE.LINE:
+            if debug:
+                logger.debug(f"      Rule 3: Line shape")
+            return True
+        
+        # Rule 4: Auto shapes without text are often decorative (includes rectangles, ovals, etc.)
+        if shape_info.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE and not shape_info.has_text:
+            # Additional check: if the shape is large, it might be a background element
+            max_dimension = max(shape_info.width_px, shape_info.height_px)
+            if max_dimension > 200:  # Large background elements
+                if debug:
+                    logger.debug(f"      Rule 4a: Large auto shape background element ({max_dimension}px)")
+                return True
+            elif min_dimension < 100:  # Small geometric decorations
+                if debug:
+                    logger.debug(f"      Rule 4b: Small auto shape decoration ({min_dimension}px)")
+                return True
+        
+        # Rule 5: Callouts without text are often decorative
+        if shape_info.shape_type == MSO_SHAPE_TYPE.CALLOUT and not shape_info.has_text:
+            if debug:
+                logger.debug(f"      Rule 5: Callout without text")
+            return True
+        
+        # Rule 6: Text effects are often decorative WordArt
+        if shape_info.shape_type == MSO_SHAPE_TYPE.TEXT_EFFECT:
+            if debug:
+                logger.debug(f"      Rule 6: Text effect/WordArt shape")
+            return True
+        
+        # Rule 7: Freeform shapes are often decorative drawings
+        if shape_info.shape_type == MSO_SHAPE_TYPE.FREEFORM:
+            if debug:
+                logger.debug(f"      Rule 7: Freeform drawing shape")
+            return True
+        
+        # Default: not decorative
+        if debug:
+            logger.debug(f"      No decorative rules matched - shape has content")
+        return False
+    
+    def _is_group_decorative(self, group_shape, group_decorative_shapes: List[PPTXShapeInfo], debug: bool = False) -> bool:
+        """
+        Determine if an entire group should be marked as decorative.
+        
+        Args:
+            group_shape: The group shape object
+            group_decorative_shapes: List of decorative shapes found within the group
+            debug: Enable debug logging
+            
+        Returns:
+            bool: True if the entire group should be marked as decorative
+        """
+        try:
+            total_shapes_in_group = len(group_shape.shapes)
+            decorative_shapes_in_group = len(group_decorative_shapes)
+            
+            if debug:
+                logger.debug(f"      Group analysis: {decorative_shapes_in_group}/{total_shapes_in_group} shapes are decorative")
+            
+            # If all shapes in the group are decorative, mark the whole group as decorative
+            if total_shapes_in_group > 0 and decorative_shapes_in_group == total_shapes_in_group:
+                return True
+            
+            # If the group is mostly decorative (80%+) and small, consider it decorative
+            if total_shapes_in_group > 0:
+                decorative_ratio = decorative_shapes_in_group / total_shapes_in_group
+                if decorative_ratio >= 0.8 and total_shapes_in_group <= 5:
+                    if debug:
+                        logger.debug(f"      Group is {decorative_ratio:.1%} decorative with {total_shapes_in_group} shapes")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error analyzing group decorativeness: {e}")
+            return False
+    
+    def set_decorative_flag(self, decorative_shapes: List[PPTXShapeInfo], debug: bool = False) -> int:
+        """
+        Mark shapes as decorative in the PPTX XML structure using Office 2019+ decorative attribute.
+        
+        Args:
+            decorative_shapes: List of shapes to mark as decorative
+            debug: Enable debug logging
+            
+        Returns:
+            int: Number of shapes successfully marked as decorative
+        """
+        marked_count = 0
+        
+        # Register decorative namespace if not already done
+        try:
+            _nsmap["adec"] = "http://schemas.microsoft.com/office/drawing/2017/decorative"
+        except:
+            pass  # May already be registered
+        
+        for shape_info in decorative_shapes:
+            try:
+                if debug:
+                    logger.debug(f"🔍 DEBUG: Setting decorative flag for {shape_info.shape_key}")
+                
+                success = self._set_shape_decorative_xml(shape_info.shape, debug)
+                
+                if success:
+                    marked_count += 1
+                    if debug:
+                        logger.debug(f"    ✅ Successfully marked {shape_info.shape_key} as decorative")
+                else:
+                    logger.warning(f"Failed to mark shape as decorative: {shape_info.shape_key} "
+                                 f"(type: {shape_info.shape_type_name}, size: {shape_info.width_px}x{shape_info.height_px}px)")
+                    if debug:
+                        logger.debug(f"    ❌ XML marking failed for {shape_info.shape_key}")
+                        # Try to provide more diagnostic info
+                        if hasattr(shape_info.shape, '_element'):
+                            logger.debug(f"    Shape has _element: {shape_info.shape._element}")
+                            logger.debug(f"    Element tag: {getattr(shape_info.shape._element, 'tag', 'no_tag')}")
+                        else:
+                            logger.debug(f"    Shape has no _element attribute")
+                
+            except Exception as e:
+                logger.warning(f"Error setting decorative flag for {shape_info.shape_key}: {e}")
+                continue
+        
+        logger.info(f"Successfully marked {marked_count}/{len(decorative_shapes)} shapes as decorative")
+        return marked_count
+    
+    def _set_shape_decorative_xml(self, shape: BaseShape, debug: bool = False) -> bool:
+        """
+        Set the decorative attribute in the shape's XML structure.
+        
+        Args:
+            shape: Shape to mark as decorative
+            debug: Enable debug logging
+            
+        Returns:
+            bool: True if successfully set
+        """
+        success_methods = []
+        
+        try:
+            # Method 1: Try to set decorative attribute on cNvPr element
+            if hasattr(shape, '_element') and shape._element is not None:
+                element = shape._element
+                
+                # Find the cNvPr (non-visual properties) element with multiple namespace tries
+                cnvpr_elements = []
+                try:
+                    cnvpr_elements = element.xpath('.//p:cNvPr | .//pic:cNvPr | .//a:cNvPr',
+                                                 namespaces={
+                                                     'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+                                                     'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
+                                                     'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'
+                                                 })
+                except Exception as xpath_error:
+                    if debug:
+                        logger.debug(f"      XPath query failed: {xpath_error}")
+                
+                if cnvpr_elements:
+                    for i, cnvpr in enumerate(cnvpr_elements):
+                        try:
+                            # Set the decorative attribute (Office 2019+ feature)
+                            decorative_attr = '{http://schemas.microsoft.com/office/drawing/2017/decorative}decorative'
+                            cnvpr.set(decorative_attr, '1')
+                            success_methods.append(f"cNvPr_element_{i}")
+                            
+                            if debug:
+                                logger.debug(f"      Set decorative='1' on cNvPr element {i}")
+                        except Exception as cnvpr_error:
+                            if debug:
+                                logger.debug(f"      Failed to set decorative on cNvPr {i}: {cnvpr_error}")
+                
+                # Method 2: Try alternative XML approaches
+                try:
+                    # Try setting decorative directly on the shape element
+                    decorative_attr = '{http://schemas.microsoft.com/office/drawing/2017/decorative}decorative'
+                    element.set(decorative_attr, '1')
+                    success_methods.append("shape_element")
+                    
+                    if debug:
+                        logger.debug(f"      Set decorative='1' on shape element")
+                except Exception as element_error:
+                    if debug:
+                        logger.debug(f"      Failed to set decorative on shape element: {element_error}")
+                
+                # Method 3: Fallback - set a custom attribute for tracking
+                try:
+                    # Set a custom attribute that can be used for identification
+                    custom_attr = '{http://schemas.anthropic.com/accessibility/2024}decorative'
+                    element.set(custom_attr, '1')
+                    success_methods.append("custom_fallback")
+                    
+                    if debug:
+                        logger.debug(f"      Set custom decorative attribute as fallback")
+                except Exception as custom_error:
+                    if debug:
+                        logger.debug(f"      Failed to set custom decorative attribute: {custom_error}")
+                
+                # Method 4: Try setting ALT text to empty (accessibility best practice for decorative)
+                if cnvpr_elements:
+                    for i, cnvpr in enumerate(cnvpr_elements):
+                        try:
+                            cnvpr.set('descr', '')  # Empty ALT text for decorative images
+                            success_methods.append(f"empty_alt_text_{i}")
+                            
+                            if debug:
+                                logger.debug(f"      Set empty ALT text on cNvPr element {i} as fallback")
+                        except Exception as alt_error:
+                            if debug:
+                                logger.debug(f"      Failed to set empty ALT text on cNvPr {i}: {alt_error}")
+            
+            # If we had any success, return True
+            if success_methods:
+                if debug:
+                    logger.debug(f"      Decorative marking succeeded via: {', '.join(success_methods)}")
+                return True
+            
+            if debug:
+                logger.debug(f"      No suitable XML element found for decorative marking")
+            return False
+            
+        except Exception as e:
+            if debug:
+                logger.debug(f"      Error in decorative XML marking: {e}")
+            return len(success_methods) > 0  # Return True if we had any success before the error
+    
+    def _count_all_shapes(self, presentation: Presentation) -> Tuple[int, int]:
+        """
+        Count total shapes and shapes with text content for coverage reporting.
+        
+        Args:
+            presentation: PowerPoint presentation
+            
+        Returns:
+            Tuple of (total_shapes, shapes_with_content)
+        """
+        total_shapes = 0
+        shapes_with_content = 0
+        
+        for slide in presentation.slides:
+            shapes_on_slide, content_shapes_on_slide = self._count_shapes_recursive(slide.shapes)
+            total_shapes += shapes_on_slide
+            shapes_with_content += content_shapes_on_slide
+        
+        return total_shapes, shapes_with_content
+    
+    def _count_shapes_recursive(self, shapes) -> Tuple[int, int]:
+        """
+        Recursively count shapes and those with meaningful content.
+        
+        Args:
+            shapes: Collection of shapes to count
+            
+        Returns:
+            Tuple of (total_shapes, shapes_with_content)
+        """
+        total_shapes = 0
+        shapes_with_content = 0
+        
+        for shape in shapes:
+            # Skip images (counted separately)
+            if hasattr(shape, 'image') and shape.image:
+                continue
+            
+            total_shapes += 1
+            
+            # Check if shape has meaningful content
+            has_text = hasattr(shape, 'text') and shape.text and shape.text.strip()
+            if has_text and len(shape.text.strip()) > 2:
+                shapes_with_content += 1
+            
+            # Recursively count grouped shapes
+            if hasattr(shape, 'shapes'):
+                group_total, group_content = self._count_shapes_recursive(shape.shapes)
+                total_shapes += group_total
+                shapes_with_content += group_content
+        
+        return total_shapes, shapes_with_content
+    
     def _extract_slide_text(self, slide) -> str:
         """Extract all text content from a slide."""
         text_parts = []
@@ -1302,13 +1831,25 @@ class PPTXAccessibilityProcessor:
         logger.info(f"  Input file: {result['input_file']}")
         logger.info(f"  Output file: {result['output_file']}")
         logger.info(f"  Total slides: {result['total_slides']}")
+        
+        # Image processing summary
         logger.info(f"  Total images found: {result['total_images']}")
         logger.info(f"  Images processed (descriptive): {result['processed_images']}")
         logger.info(f"  Decorative images (heuristic): {result['decorative_images']}")
         logger.info(f"  Decorative images (fallback): {result['fallback_decorative']}")
         logger.info(f"  Failed images: {result['failed_images']}")
+        
+        # Shape processing summary
+        if 'total_shapes' in result:
+            logger.info(f"  Total shapes found: {result['total_shapes']}")
+            logger.info(f"  Shapes with content: {result.get('shapes_with_content', 0)}")
+            logger.info(f"  Decorative shapes marked: {result.get('decorative_shapes_marked', 0)}")
+        
+        # Timing information
         logger.info(f"  Generation time: {result['generation_time']:.2f}s")
         logger.info(f"  Injection time: {result['injection_time']:.2f}s")
+        if 'decorative_marking_time' in result:
+            logger.info(f"  Decorative marking time: {result['decorative_marking_time']:.2f}s")
         logger.info(f"  Total processing time: {result['total_time']:.2f}s")
         logger.info(f"  Success: {result['success']}")
         
@@ -1316,6 +1857,11 @@ class PPTXAccessibilityProcessor:
         total_covered = result['processed_images'] + result['decorative_images'] + result['fallback_decorative']
         coverage_percent = (total_covered / result['total_images'] * 100) if result['total_images'] > 0 else 0
         logger.info(f"  Image Coverage: {total_covered}/{result['total_images']} ({coverage_percent:.1f}%)")
+        
+        # Shape coverage if available
+        if 'total_shapes' in result and result['total_shapes'] > 0:
+            shape_coverage = (result.get('decorative_shapes_marked', 0) / result['total_shapes']) * 100
+            logger.info(f"  Shape Coverage (decorative): {result.get('decorative_shapes_marked', 0)}/{result['total_shapes']} ({shape_coverage:.1f}%)")
         
         if result['errors']:
             logger.warning(f"Errors encountered: {len(result['errors'])}")
@@ -1429,6 +1975,12 @@ def main():
         print(f"  Processed: {result['processed_images']}")
         print(f"  Decorative (skipped): {result['decorative_images']}")
         print(f"  Failed: {result['failed_images']}")
+        
+        # Show shape information if available
+        if 'total_shapes' in result:
+            print(f"  Total shapes: {result['total_shapes']}")
+            print(f"  Decorative shapes marked: {result.get('decorative_shapes_marked', 0)}")
+        
         print(f"  Total time: {result['total_time']:.2f}s")
         
         if result['errors']:
