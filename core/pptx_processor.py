@@ -92,6 +92,77 @@ class PPTXImageInfo:
         return "_".join(components)
 
 
+class PPTXVisualElement:
+    """Container for PPTX visual element information (images, shapes, charts)."""
+    
+    def __init__(self, shape: BaseShape, slide_idx: int, shape_idx: int, 
+                 slide_text: str = "", element_type: str = "unknown"):
+        self.shape = shape
+        self.slide_idx = slide_idx
+        self.shape_idx = shape_idx
+        self.slide_text = slide_text
+        self.element_type = element_type  # 'image', 'shape', 'chart', etc.
+        
+        # For images, store the image data
+        self.image_data = None
+        self.filename = None
+        self.image_hash = None
+        
+        # Try to extract image data if this is a picture
+        if hasattr(shape, 'image') and shape.image:
+            try:
+                self.image_data = shape.image.blob
+                self.filename = f"image_{slide_idx}_{shape_idx}.{shape.image.ext}"
+                self.image_hash = get_image_hash(self.image_data)
+                self.element_type = "image"
+            except:
+                pass
+        
+        # Extract shape properties
+        self.width = getattr(shape, 'width', None)
+        self.height = getattr(shape, 'height', None) 
+        self.left = getattr(shape, 'left', None)
+        self.top = getattr(shape, 'top', None)
+        
+        # Convert EMU to pixels safely
+        try:
+            self.width_px = int(self.width.emu / 914400 * 96) if self.width else 0
+            self.height_px = int(self.height.emu / 914400 * 96) if self.height else 0
+            self.left_px = int(self.left.emu / 914400 * 96) if self.left else 0
+            self.top_px = int(self.top.emu / 914400 * 96) if self.top else 0
+        except:
+            self.width_px = self.height_px = self.left_px = self.top_px = 0
+        
+        # Generate unique element key
+        self.element_key = f"slide_{slide_idx}_element_{shape_idx}_{self.element_type}"
+        
+        # Extract text content
+        self.has_text = False
+        self.text_content = ""
+        try:
+            if hasattr(shape, 'text_frame') and shape.text_frame:
+                self.text_content = shape.text_frame.text
+                self.has_text = bool(self.text_content.strip())
+        except:
+            pass
+            
+        # Shape type information
+        self.shape_type = getattr(shape, 'shape_type', None)
+        self.shape_name = getattr(shape, 'name', '') or ''
+        
+        # Generate element hash for duplicate detection
+        if self.image_hash:
+            self.element_hash = self.image_hash
+        else:
+            # For non-images, create hash based on properties
+            try:
+                hash_content = f"{self.shape_type}_{self.width_px}_{self.height_px}_{self.text_content}"
+                import hashlib
+                self.element_hash = hashlib.md5(hash_content.encode()).hexdigest()[:16]
+            except:
+                # Fallback to simple string-based hash
+                self.element_hash = f"{slide_idx}_{shape_idx}_{element_type}"
+
 class PPTXShapeInfo:
     """Container for PPTX shape information for decorative detection."""
     
@@ -199,14 +270,13 @@ class PPTXAccessibilityProcessor:
         logger.debug(f"Include slide text: {self.include_slide_text}")
     
     def process_pptx(self, pptx_path: str, output_path: Optional[str] = None, 
-                    force_decorative: bool = False, failed_generation_callback=None, debug: bool = False) -> Dict[str, Any]:
+                    failed_generation_callback=None, debug: bool = False) -> Dict[str, Any]:
         """
-        Process a PPTX file to add ALT text to images.
+        Process a PPTX file to add ALT text to all visual elements.
         
         Args:
             pptx_path: Path to the input PPTX file
             output_path: Optional path for output file. If None, overwrites original.
-            force_decorative: Force decorative fallback for failed generations
             failed_generation_callback: Callback function for failed generations
             
         Returns:
@@ -222,17 +292,11 @@ class PPTXAccessibilityProcessor:
             'input_file': str(pptx_path),
             'output_file': '',
             'total_slides': 0,
-            'total_images': 0,
-            'processed_images': 0,
-            'decorative_images': 0,
-            'fallback_decorative': 0,
-            'failed_images': 0,
-            'total_shapes': 0,
-            'decorative_shapes_marked': 0,
-            'shapes_with_content': 0,
+            'total_visual_elements': 0,
+            'processed_visual_elements': 0,
+            'failed_visual_elements': 0,
             'generation_time': 0.0,
             'injection_time': 0.0,
-            'decorative_marking_time': 0.0,
             'total_time': 0.0,
             'errors': []
         }
@@ -257,197 +321,133 @@ class PPTXAccessibilityProcessor:
         logger.info(f"Output will be saved to: {output_path}")
         
         try:
-            # Step 1: Extract images and context from PPTX
-            logger.info("Step 1: Extracting images and context from PPTX...")
+            # Step 1: Extract all visual elements from PPTX
+            logger.info("Step 1: Extracting all visual elements from PPTX...")
             extraction_start = time.time()
             
-            presentation, image_infos = self._extract_images_from_pptx(str(pptx_path))
+            presentation, visual_elements = self._extract_all_visual_elements(str(pptx_path))
             
             extraction_time = time.time() - extraction_start
-            logger.info(f"Context extraction completed in {extraction_time:.2f}s")
+            logger.info(f"Visual element extraction completed in {extraction_time:.2f}s")
             
             result['total_slides'] = len(presentation.slides)
-            result['total_images'] = len(image_infos)
+            result['total_visual_elements'] = len(visual_elements)
             
-            if not image_infos:
-                logger.warning(f"No images found in PPTX: {pptx_path.name}")
-                result['success'] = True  # Not an error, just no images to process
+            if not visual_elements:
+                logger.warning(f"No visual elements found in PPTX: {pptx_path.name}")
+                result['success'] = True  # Not an error, just no visual elements to process
                 result['total_time'] = time.time() - start_time
                 return result
             
-            logger.info(f"Found {len(image_infos)} images across {result['total_slides']} slides")
+            logger.info(f"Found {len(visual_elements)} visual elements across {result['total_slides']} slides")
             
-            # Step 2: Generate ALT text for images
-            logger.info("Step 2: Generating ALT text for images...")
+            # Step 2: Generate ALT text for all visual elements
+            logger.info("Step 2: Generating ALT text for all visual elements...")
             generation_start = time.time()
             
             alt_text_mapping = {}
-            image_tracker = defaultdict(list)  # Track duplicate images
+            element_tracker = defaultdict(list)  # Track duplicate elements
             
-            for image_info in image_infos:
-                # Track image occurrences for duplicate detection
-                image_tracker[image_info.image_hash].append(image_info)
+            for visual_element in visual_elements:
+                # Track element occurrences for duplicate detection
+                element_key = getattr(visual_element, 'element_hash', str(visual_element.element_key))
+                element_tracker[element_key].append(visual_element)
             
-            for image_info in image_infos:
+            for visual_element in visual_elements:
                 generation_failure_reason = None
                 
                 try:
-                    # Check if we should generate ALT text for this image
-                    if not self._should_generate_alt_text(image_info, image_tracker):
-                        alt_text_mapping[image_info.image_key] = {
-                            'alt_text': '[Decorative image]',
-                            'shape': image_info.shape,
-                            'slide_idx': image_info.slide_idx,
-                            'shape_idx': image_info.shape_idx
-                        }
-                        result['decorative_images'] += 1
-                        logger.debug(f"Skipping decorative image: {image_info.image_key}")
-                        continue
-                    
-                    # Generate ALT text with comprehensive error handling
+                    # Generate ALT text for ALL visual elements - let LLaVa decide if decorative
                     if debug:
-                        logger.info(f"🔍 DEBUG: Attempting ALT text generation for {image_info.image_key}")
-                        logger.info(f"🔍 DEBUG: Image: {image_info.width_px}x{image_info.height_px}px, file: {image_info.filename}")
-                        logger.info(f"🔍 DEBUG: Slide text: {image_info.slide_text[:100]}...")
+                        logger.info(f"🔍 DEBUG: Processing {visual_element.element_type}: {visual_element.element_key}")
+                        logger.info(f"🔍 DEBUG: Size: {visual_element.width_px}x{visual_element.height_px}px")
+                        if visual_element.filename:
+                            logger.info(f"🔍 DEBUG: Filename: {visual_element.filename}")
+                        logger.info(f"🔍 DEBUG: Slide text: {visual_element.slide_text[:100]}...")
                     
-                    alt_text, failure_reason = self._generate_alt_text_for_image_with_validation(image_info, debug)
+                    alt_text, failure_reason = self._generate_alt_text_for_visual_element(visual_element, debug)
                     
                     if alt_text and alt_text.strip() and alt_text.strip() != "":
                         # Successfully generated valid ALT text
-                        alt_text_mapping[image_info.image_key] = {
+                        alt_text_mapping[visual_element.element_key] = {
                             'alt_text': alt_text.strip(),
-                            'shape': image_info.shape,
-                            'slide_idx': image_info.slide_idx,
-                            'shape_idx': image_info.shape_idx
+                            'shape': visual_element.shape,
+                            'slide_idx': visual_element.slide_idx,
+                            'shape_idx': visual_element.shape_idx
                         }
-                        result['processed_images'] += 1
+                        result['processed_visual_elements'] += 1
                         if debug:
-                            logger.info(f"✅ DEBUG: Generated ALT text for {image_info.image_key}: {alt_text[:50]}...")
+                            logger.info(f"✅ DEBUG: Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
                         else:
-                            logger.info(f"Generated ALT text for {image_info.image_key}: {alt_text[:50]}...")
+                            logger.info(f"Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
                     else:
                         # Generation failed or returned empty/invalid text
                         generation_failure_reason = failure_reason or "Empty or invalid ALT text returned"
                         
-                        if debug:
-                            logger.warning(f"❌ DEBUG: Generation failed for {image_info.image_key}: {generation_failure_reason}")
+                        result['failed_visual_elements'] += 1
                         
-                        # Apply decorative fallback for 100% coverage
-                        if force_decorative:
-                            fallback_alt_text = "[Decorative image]"
-                            alt_text_mapping[image_info.image_key] = {
-                                'alt_text': fallback_alt_text,
-                                'shape': image_info.shape,
-                                'slide_idx': image_info.slide_idx,
-                                'shape_idx': image_info.shape_idx
-                            }
-                            result['fallback_decorative'] += 1
-                            logger.info(f"Applied decorative fallback for {image_info.image_key} - Reason: {generation_failure_reason}")
+                        if debug:
+                            logger.warning(f"❌ DEBUG: Generation failed for {visual_element.element_key}: {generation_failure_reason}")
                             
-                            # Log failed generation for manual review
-                            if failed_generation_callback:
-                                failed_generation_callback(
-                                    image_info.image_key,
-                                    {
-                                        'slide_idx': image_info.slide_idx,
-                                        'shape_idx': image_info.shape_idx,
-                                        'filename': image_info.filename,
-                                        'width_px': image_info.width_px,
-                                        'height_px': image_info.height_px,
-                                        'slide_text': image_info.slide_text
-                                    },
-                                    f"ALT text generation failed ({generation_failure_reason}), applied decorative fallback"
-                                )
-                        else:
-                            result['failed_images'] += 1
-                            error_msg = f"Failed to generate ALT text for {image_info.image_key}: {generation_failure_reason}"
-                            logger.warning(error_msg)
-                            result['errors'].append(error_msg)
-                            
-                            # Log failed generation for manual review
-                            if failed_generation_callback:
-                                failed_generation_callback(
-                                    image_info.image_key,
-                                    {
-                                        'slide_idx': image_info.slide_idx,
-                                        'shape_idx': image_info.shape_idx,
-                                        'filename': image_info.filename,
-                                        'width_px': image_info.width_px,
-                                        'height_px': image_info.height_px,
-                                        'slide_text': image_info.slide_text
-                                    },
-                                    f"ALT text generation failed: {generation_failure_reason}"
-                                )
+                        # Log failed generation for manual review
+                        if failed_generation_callback:
+                            failed_generation_callback(
+                                visual_element.element_key,
+                                {
+                                    'slide_idx': visual_element.slide_idx,
+                                    'shape_idx': visual_element.shape_idx,
+                                    'element_type': visual_element.element_type,
+                                    'filename': visual_element.filename,
+                                    'width_px': visual_element.width_px,
+                                    'height_px': visual_element.height_px,
+                                    'slide_text': visual_element.slide_text
+                                },
+                                f"ALT text generation failed: {generation_failure_reason}"
+                            )
                 
                 except Exception as e:
                     generation_failure_reason = f"Exception during generation: {str(e)}"
+                    result['failed_visual_elements'] += 1
                     
                     if debug:
-                        logger.error(f"💥 DEBUG: Exception processing {image_info.image_key}: {e}", exc_info=True)
-                    
-                    # Apply decorative fallback for exceptions too if force_decorative is enabled
-                    if force_decorative:
-                        fallback_alt_text = "[Decorative image]"
-                        alt_text_mapping[image_info.image_key] = {
-                            'alt_text': fallback_alt_text,
-                            'shape': image_info.shape,
-                            'slide_idx': image_info.slide_idx,
-                            'shape_idx': image_info.shape_idx
-                        }
-                        result['fallback_decorative'] += 1
-                        logger.info(f"Applied decorative fallback for {image_info.image_key} after exception - Reason: {generation_failure_reason}")
-                        
-                        # Log failed generation for manual review
-                        if failed_generation_callback:
-                            failed_generation_callback(
-                                image_info.image_key,
-                                {
-                                    'slide_idx': image_info.slide_idx,
-                                    'shape_idx': image_info.shape_idx,
-                                    'filename': image_info.filename,
-                                    'width_px': image_info.width_px,
-                                    'height_px': image_info.height_px,
-                                    'slide_text': image_info.slide_text
-                                },
-                                f"Exception during generation ({generation_failure_reason}), applied decorative fallback"
-                            )
+                        logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key}: {e}", exc_info=True)
                     else:
-                        result['failed_images'] += 1
-                        error_msg = f"Error processing {image_info.image_key}: {str(e)}"
+                        error_msg = f"Error processing {visual_element.element_key}: {str(e)}"
                         logger.error(error_msg)
                         result['errors'].append(error_msg)
                         
-                        # Log failed generation for manual review
-                        if failed_generation_callback:
-                            failed_generation_callback(
-                                image_info.image_key,
-                                {
-                                    'slide_idx': image_info.slide_idx,
-                                    'shape_idx': image_info.shape_idx,
-                                    'filename': image_info.filename,
-                                    'width_px': image_info.width_px,
-                                    'height_px': image_info.height_px,
-                                    'slide_text': image_info.slide_text
-                                },
-                                f"Exception during generation: {str(e)}"
-                            )
+                    # Log failed generation for manual review
+                    if failed_generation_callback:
+                        failed_generation_callback(
+                            visual_element.element_key,
+                            {
+                                'slide_idx': visual_element.slide_idx,
+                                'shape_idx': visual_element.shape_idx,
+                                'element_type': visual_element.element_type,
+                                'filename': visual_element.filename,
+                                'width_px': visual_element.width_px,
+                                'height_px': visual_element.height_px,
+                                'slide_text': visual_element.slide_text
+                            },
+                            f"Exception during generation: {str(e)}"
+                        )
             
             result['generation_time'] = time.time() - generation_start
             logger.info(f"ALT text generation completed in {result['generation_time']:.2f}s")
             
-            # Step 3: Validate 100% coverage before injection
-            logger.info("Step 3: Validating ALT text coverage...")
-            validation_result = self._validate_complete_coverage(image_infos, alt_text_mapping, force_decorative, debug)
+            # Step 3: Validate ALT text coverage before injection
+            logger.info("Step 3: Validating visual element ALT text coverage...")
+            validation_result = self._validate_visual_element_coverage(visual_elements, alt_text_mapping, debug)
             
             if not validation_result['complete_coverage']:
                 missing_count = validation_result['missing_count']
-                error_msg = f"Incomplete ALT text coverage: {missing_count} images missing ALT text"
+                error_msg = f"Incomplete ALT text coverage: {missing_count} visual elements missing ALT text"
                 logger.error(error_msg)
                 result['errors'].append(error_msg)
                 
                 if debug:
-                    logger.error("❌ DEBUG: Images missing ALT text:")
-                    for missing_key in validation_result['missing_images']:
+                    logger.error("❌ DEBUG: Visual elements missing ALT text:")
+                    for missing_key in validation_result['missing_elements']:
                         logger.error(f"   - {missing_key}")
             
             # Step 4: Inject ALT text into PPTX
@@ -468,39 +468,18 @@ class PPTXAccessibilityProcessor:
                 logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
                 
                 if injection_success:
-                    # Step 5: Detect and mark decorative shapes
-                    logger.info("Step 5: Detecting and marking decorative shapes...")
-                    decorative_start = time.time()
-                    
-                    decorative_shapes = self.detect_decorative_shapes(presentation, debug)
-                    result['total_shapes'], result['shapes_with_content'] = self._count_all_shapes(presentation)
-                    
-                    if decorative_shapes:
-                        marked_count = self.set_decorative_flag(decorative_shapes, debug)
-                        result['decorative_shapes_marked'] = marked_count
-                        
-                        if debug:
-                            logger.info(f"🔍 DEBUG: Marked {marked_count} decorative shapes")
-                    else:
-                        logger.info("No decorative shapes detected")
-                        result['decorative_shapes_marked'] = 0
-                    
-                    result['decorative_marking_time'] = time.time() - decorative_start
-                    logger.info(f"Decorative shape processing completed in {result['decorative_marking_time']:.2f}s")
-                    
                     result['success'] = True
                     logger.info("✅ PPTX processing completed successfully!")
                     
-                    # Final coverage validation
-                    final_coverage = validation_result['total_coverage_percent']
-                    logger.info(f"📊 Final ALT text coverage: {final_coverage:.1f}%")
-                    if final_coverage == 100.0:
-                        logger.info("🎯 100% ALT text coverage achieved!")
-                    
-                    # Report decorative shape coverage
-                    if result['total_shapes'] > 0:
-                        shape_coverage = (result['decorative_shapes_marked'] / result['total_shapes']) * 100
-                        logger.info(f"🎨 Decorative shapes marked: {result['decorative_shapes_marked']}/{result['total_shapes']} ({shape_coverage:.1f}%)")
+                    # Report visual element coverage
+                    if result['total_visual_elements'] > 0:
+                        coverage = (result['processed_visual_elements'] / result['total_visual_elements']) * 100
+                        logger.info(f"📊 Visual element ALT text coverage: {result['processed_visual_elements']}/{result['total_visual_elements']} ({coverage:.1f}%)")
+                        
+                        if coverage == 100.0:
+                            logger.info("🎯 100% visual element ALT text coverage achieved!")
+                    else:
+                        logger.info("📊 No visual elements found to process")
                 else:
                     error_msg = "ALT text injection failed"
                     logger.error(error_msg)
@@ -1078,6 +1057,269 @@ class PPTXAccessibilityProcessor:
             logger.debug(f"Error extracting images from relationships: {e}")
         
         return images
+    
+    def _extract_all_visual_elements(self, pptx_path: str) -> Tuple[Presentation, List[PPTXVisualElement]]:
+        """
+        Extract ALL visual elements from PPTX (images, shapes, charts, etc.) for ALT text generation.
+        
+        Args:
+            pptx_path: Path to PPTX file
+            
+        Returns:
+            Tuple of (Presentation object, List of PPTXVisualElement objects)
+        """
+        presentation = Presentation(pptx_path)
+        visual_elements = []
+        
+        logger.info(f"Starting comprehensive visual element extraction from {len(presentation.slides)} slides...")
+        
+        for slide_idx, slide in enumerate(presentation.slides):
+            # Extract slide text for context
+            slide_text = self._extract_slide_text(slide) if self.include_slide_text else ""
+            
+            logger.debug(f"Processing slide {slide_idx + 1} with {len(slide.shapes)} shapes")
+            
+            # Process all shapes recursively
+            slide_elements = self._extract_visual_elements_from_shapes(
+                slide.shapes, slide_idx, slide_text, self.debug
+            )
+            
+            visual_elements.extend(slide_elements)
+            
+            logger.debug(f"Found {len(slide_elements)} visual elements on slide {slide_idx + 1}")
+        
+        logger.info(f"Extracted {len(visual_elements)} total visual elements")
+        return presentation, visual_elements
+    
+    def _generate_alt_text_for_visual_element(self, visual_element: PPTXVisualElement, debug: bool = False) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Generate ALT text for any type of visual element.
+        
+        Args:
+            visual_element: Visual element information
+            debug: Enable debug logging
+            
+        Returns:
+            Tuple of (alt_text, failure_reason)
+        """
+        try:
+            # For images, use the existing image generation logic
+            if visual_element.element_type == "image" and visual_element.image_data:
+                # Create a temporary PPTXImageInfo for compatibility
+                temp_image_info = type('PPTXImageInfo', (), {
+                    'image_data': visual_element.image_data,
+                    'filename': visual_element.filename,
+                    'slide_text': visual_element.slide_text,
+                    'width_px': visual_element.width_px,
+                    'height_px': visual_element.height_px,
+                    'slide_idx': visual_element.slide_idx,
+                    'shape_idx': visual_element.shape_idx,
+                    'shape': visual_element.shape
+                })()
+                
+                return self._generate_alt_text_for_image_with_validation(temp_image_info, debug)
+            
+            # For non-image visual elements, create a screenshot and analyze it
+            else:
+                return self._generate_alt_text_for_shape_element(visual_element, debug)
+                
+        except Exception as e:
+            error_msg = f"Error generating ALT text for {visual_element.element_type}: {str(e)}"
+            if debug:
+                logger.error(f"Exception in _generate_alt_text_for_visual_element: {e}", exc_info=True)
+            return None, error_msg
+    
+    def _generate_alt_text_for_shape_element(self, visual_element: PPTXVisualElement, debug: bool = False) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Generate ALT text for shape elements by creating descriptive text based on element type and properties.
+        
+        Args:
+            visual_element: Visual element information
+            debug: Enable debug logging
+            
+        Returns:
+            Tuple of (alt_text, failure_reason)
+        """
+        try:
+            # Create context-aware ALT text based on element type
+            element_description = self._create_element_description(visual_element)
+            
+            if not element_description:
+                return None, f"Could not create description for {visual_element.element_type}"
+            
+            # Enhance with context from slide
+            if visual_element.slide_text and len(visual_element.slide_text.strip()) > 0:
+                context_prompt = f"Slide context: {visual_element.slide_text[:200]}...\n\nShape: {element_description}\n\nCreate appropriate ALT text for this visual element considering the slide context. If it appears decorative, respond with 'decorative [element type]':"
+            else:
+                context_prompt = f"Shape: {element_description}\n\nCreate appropriate ALT text for this visual element. If it appears decorative, respond with 'decorative [element type]':"
+            
+            # Use the text generator to create ALT text
+            alt_text = self.alt_generator.generate_text_response(context_prompt)
+            
+            if alt_text and alt_text.strip():
+                return alt_text.strip(), None
+            else:
+                return None, "Empty response from text generator"
+                
+        except Exception as e:
+            error_msg = f"Error generating ALT text for shape: {str(e)}"
+            if debug:
+                logger.error(f"Exception in _generate_alt_text_for_shape_element: {e}", exc_info=True)
+            return None, error_msg
+    
+    def _create_element_description(self, visual_element: PPTXVisualElement) -> str:
+        """
+        Create a descriptive text for a visual element based on its properties.
+        
+        Args:
+            visual_element: Visual element to describe
+            
+        Returns:
+            Descriptive text string
+        """
+        description_parts = []
+        
+        # Add element type
+        description_parts.append(f"A {visual_element.element_type}")
+        
+        # Add dimensions if available
+        if visual_element.width_px > 0 and visual_element.height_px > 0:
+            description_parts.append(f"sized {visual_element.width_px}x{visual_element.height_px} pixels")
+        
+        # Add text content if available
+        if visual_element.has_text and visual_element.text_content:
+            text_preview = visual_element.text_content[:100] + "..." if len(visual_element.text_content) > 100 else visual_element.text_content
+            description_parts.append(f"containing text: '{text_preview}'")
+        
+        # Add shape name if available and meaningful
+        if visual_element.shape_name and visual_element.shape_name.lower() not in ['unnamed', 'shape', 'autoshape']:
+            description_parts.append(f"named '{visual_element.shape_name}'")
+        
+        # Add position context
+        if visual_element.top_px < 200:  # Likely in title area
+            description_parts.append("located in the upper area of the slide")
+        elif visual_element.top_px > 400:  # Likely in lower area
+            description_parts.append("located in the lower area of the slide")
+        
+        return " ".join(description_parts)
+    
+    def _extract_visual_elements_from_shapes(self, shapes, slide_idx: int, slide_text: str, debug: bool = False) -> List[PPTXVisualElement]:
+        """
+        Recursively extract visual elements from shapes collection.
+        
+        Args:
+            shapes: Collection of shapes to process
+            slide_idx: Slide index
+            slide_text: Slide text context
+            debug: Enable debug logging
+            
+        Returns:
+            List of PPTXVisualElement objects
+        """
+        visual_elements = []
+        
+        for shape_idx, shape in enumerate(shapes):
+            try:
+                # Handle grouped shapes recursively
+                if hasattr(shape, 'shapes') and shape.shapes:
+                    # Process shapes within groups
+                    group_elements = self._extract_visual_elements_from_shapes(
+                        shape.shapes, slide_idx, slide_text, debug
+                    )
+                    visual_elements.extend(group_elements)
+                    continue
+                
+                # Determine element type
+                element_type = self._classify_visual_element(shape)
+                
+                # Skip text-only placeholders unless they have visual significance
+                if element_type == "text_placeholder" and not self._has_visual_significance(shape):
+                    if debug:
+                        logger.debug(f"Skipping text-only placeholder: {getattr(shape, 'name', 'unnamed')}")
+                    continue
+                
+                # Create visual element
+                visual_element = PPTXVisualElement(shape, slide_idx, shape_idx, slide_text, element_type)
+                visual_elements.append(visual_element)
+                
+                if debug:
+                    logger.debug(f"Added {element_type}: {visual_element.element_key} ({visual_element.width_px}x{visual_element.height_px}px)")
+                
+            except Exception as e:
+                logger.warning(f"Error processing shape {shape_idx} on slide {slide_idx}: {e}")
+                continue
+        
+        return visual_elements
+    
+    def _classify_visual_element(self, shape) -> str:
+        """
+        Classify the type of visual element.
+        
+        Args:
+            shape: Shape object
+            
+        Returns:
+            String classification of the element type
+        """
+        try:
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            
+            shape_type = getattr(shape, 'shape_type', None)
+            
+            if shape_type == MSO_SHAPE_TYPE.PICTURE:
+                return "image"
+            elif shape_type == MSO_SHAPE_TYPE.CHART:
+                return "chart" 
+            elif shape_type == MSO_SHAPE_TYPE.TABLE:
+                return "table"
+            elif shape_type in [MSO_SHAPE_TYPE.AUTO_SHAPE, MSO_SHAPE_TYPE.FREEFORM]:
+                return "shape"
+            elif shape_type == MSO_SHAPE_TYPE.LINE:
+                return "line"
+            elif shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                return "text_box"
+            elif shape_type == MSO_SHAPE_TYPE.PLACEHOLDER:
+                return "text_placeholder"
+            elif shape_type == MSO_SHAPE_TYPE.MEDIA:
+                return "media"
+            elif shape_type == MSO_SHAPE_TYPE.OLE_OBJECT:
+                return "embedded_object"
+            else:
+                return "unknown"
+                
+        except Exception:
+            return "unknown"
+    
+    def _has_visual_significance(self, shape) -> bool:
+        """
+        Determine if a shape has visual significance beyond just text.
+        
+        Args:
+            shape: Shape object
+            
+        Returns:
+            Boolean indicating if shape is visually significant
+        """
+        try:
+            # Check for fills, borders, or visual styling
+            if hasattr(shape, 'fill') and shape.fill:
+                return True
+            if hasattr(shape, 'line') and shape.line:
+                return True
+            
+            # Check dimensions - very large elements might be visually significant
+            if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                try:
+                    width_px = int(shape.width.emu / 914400 * 96) if shape.width else 0
+                    height_px = int(shape.height.emu / 914400 * 96) if shape.height else 0
+                    if width_px > 200 or height_px > 200:
+                        return True
+                except:
+                    pass
+            
+            return False
+        except:
+            return False
     
     def detect_decorative_shapes(self, presentation: Presentation, debug: bool = False) -> List[PPTXShapeInfo]:
         """
@@ -2947,6 +3189,79 @@ class PPTXAccessibilityProcessor:
         
         return 'default'
     
+    def _validate_visual_element_coverage(self, visual_elements: List[PPTXVisualElement], alt_text_mapping: Dict[str, Any], debug: bool = False) -> Dict[str, Any]:
+        """
+        Validate ALT text coverage for visual elements.
+        
+        Args:
+            visual_elements: List of all visual elements found in the PPTX
+            alt_text_mapping: Current ALT text mappings
+            debug: Enable debug logging
+            
+        Returns:
+            Dictionary with validation results
+        """
+        total_elements = len(visual_elements)
+        covered_elements = len(alt_text_mapping)
+        missing_elements = []
+        
+        # Check each visual element has ALT text
+        for visual_element in visual_elements:
+            if visual_element.element_key not in alt_text_mapping:
+                missing_elements.append(visual_element.element_key)
+        
+        missing_count = len(missing_elements)
+        coverage_percent = (covered_elements / total_elements * 100) if total_elements > 0 else 0
+        complete_coverage = missing_count == 0
+        
+        # Count descriptive vs decorative
+        descriptive_count = 0
+        decorative_count = 0
+        for element_key, element_data in alt_text_mapping.items():
+            alt_text = element_data.get('alt_text', '').lower()
+            if 'decorative' in alt_text or alt_text.startswith('[decorative'):
+                decorative_count += 1
+            else:
+                descriptive_count += 1
+        
+        validation_result = {
+            'complete_coverage': complete_coverage,
+            'total_elements': total_elements,
+            'covered_elements': covered_elements,
+            'missing_count': missing_count,
+            'missing_elements': missing_elements,
+            'coverage_percent': coverage_percent,
+            'descriptive_count': descriptive_count,
+            'decorative_count': decorative_count,
+            'total_coverage_percent': coverage_percent
+        }
+        
+        if debug:
+            logger.info(f"🔍 DEBUG: Visual element coverage validation results:")
+            logger.info(f"   Total elements: {total_elements}")
+            logger.info(f"   Elements with ALT text: {covered_elements}")
+            logger.info(f"   Descriptive ALT text: {descriptive_count}")
+            logger.info(f"   Decorative ALT text: {decorative_count}")
+            logger.info(f"   Coverage: {coverage_percent:.1f}%")
+            
+            if missing_count > 0:
+                logger.info(f"   Missing ALT text: {missing_count}")
+                if debug and missing_count <= 5:  # Show first few missing
+                    for missing_key in missing_elements[:5]:
+                        logger.info(f"     - {missing_key}")
+                    if missing_count > 5:
+                        logger.info(f"     ... and {missing_count - 5} more")
+        
+        # Log validation summary
+        if complete_coverage:
+            logger.info(f"✅ Complete visual element ALT text coverage achieved: {covered_elements}/{total_elements} elements")
+            logger.info(f"   Descriptive: {descriptive_count}, Decorative: {decorative_count}")
+        else:
+            logger.warning(f"⚠️ Partial visual element ALT text coverage: {covered_elements}/{total_elements} elements ({coverage_percent:.1f}%)")
+            logger.warning(f"   Missing ALT text for {missing_count} elements")
+        
+        return validation_result
+    
     def _validate_complete_coverage(self, image_infos: List[PPTXImageInfo], alt_text_mapping: Dict[str, Any], 
                                   force_decorative: bool = False, debug: bool = False) -> Dict[str, Any]:
         """
@@ -2963,14 +3278,14 @@ class PPTXAccessibilityProcessor:
         """
         total_images = len(image_infos)
         covered_images = len(alt_text_mapping)
-        missing_images = []
+        missing_elements = []
         
         # Check each image has ALT text
         for image_info in image_infos:
             if image_info.image_key not in alt_text_mapping:
-                missing_images.append(image_info.image_key)
+                missing_elements.append(image_info.image_key)
         
-        missing_count = len(missing_images)
+        missing_count = len(missing_elements)
         coverage_percent = (covered_images / total_images * 100) if total_images > 0 else 0
         complete_coverage = missing_count == 0
         
@@ -2990,7 +3305,7 @@ class PPTXAccessibilityProcessor:
             'total_images': total_images,
             'covered_images': covered_images,
             'missing_count': missing_count,
-            'missing_images': missing_images,
+            'missing_elements': missing_elements,
             'descriptive_count': descriptive_count,
             'decorative_count': decorative_count,
             'total_coverage_percent': coverage_percent
@@ -3007,10 +3322,10 @@ class PPTXAccessibilityProcessor:
             
             if missing_count > 0:
                 logger.warning(f"❌ DEBUG: {missing_count} images missing ALT text:")
-                for missing_key in missing_images[:5]:  # Show first 5
+                for missing_key in missing_elements[:5]:  # Show first 5
                     logger.warning(f"   - {missing_key}")
-                if len(missing_images) > 5:
-                    logger.warning(f"   ... and {len(missing_images) - 5} more")
+                if len(missing_elements) > 5:
+                    logger.warning(f"   ... and {len(missing_elements) - 5} more")
         
         # Log validation summary
         if complete_coverage:
@@ -3133,18 +3448,10 @@ class PPTXAccessibilityProcessor:
         logger.info(f"  Output file: {result['output_file']}")
         logger.info(f"  Total slides: {result['total_slides']}")
         
-        # Image processing summary
-        logger.info(f"  Total images found: {result['total_images']}")
-        logger.info(f"  Images processed (descriptive): {result['processed_images']}")
-        logger.info(f"  Decorative images (heuristic): {result['decorative_images']}")
-        logger.info(f"  Decorative images (fallback): {result['fallback_decorative']}")
-        logger.info(f"  Failed images: {result['failed_images']}")
-        
-        # Shape processing summary
-        if 'total_shapes' in result:
-            logger.info(f"  Total shapes found: {result['total_shapes']}")
-            logger.info(f"  Shapes with content: {result.get('shapes_with_content', 0)}")
-            logger.info(f"  Decorative shapes marked: {result.get('decorative_shapes_marked', 0)}")
+        # Visual element processing summary
+        logger.info(f"  Total visual elements found: {result.get('total_visual_elements', 0)}")
+        logger.info(f"  Visual elements processed: {result.get('processed_visual_elements', 0)}")
+        logger.info(f"  Failed visual elements: {result.get('failed_visual_elements', 0)}")
         
         # Timing information
         logger.info(f"  Generation time: {result['generation_time']:.2f}s")
@@ -3155,14 +3462,9 @@ class PPTXAccessibilityProcessor:
         logger.info(f"  Success: {result['success']}")
         
         # Calculate and log coverage
-        total_covered = result['processed_images'] + result['decorative_images'] + result['fallback_decorative']
-        coverage_percent = (total_covered / result['total_images'] * 100) if result['total_images'] > 0 else 0
-        logger.info(f"  Image Coverage: {total_covered}/{result['total_images']} ({coverage_percent:.1f}%)")
-        
-        # Shape coverage if available
-        if 'total_shapes' in result and result['total_shapes'] > 0:
-            shape_coverage = (result.get('decorative_shapes_marked', 0) / result['total_shapes']) * 100
-            logger.info(f"  Shape Coverage (decorative): {result.get('decorative_shapes_marked', 0)}/{result['total_shapes']} ({shape_coverage:.1f}%)")
+        if result.get('total_visual_elements', 0) > 0:
+            coverage_percent = (result.get('processed_visual_elements', 0) / result['total_visual_elements'] * 100)
+            logger.info(f"  Visual Element Coverage: {result.get('processed_visual_elements', 0)}/{result['total_visual_elements']} ({coverage_percent:.1f}%)")
         
         if result['errors']:
             logger.warning(f"Errors encountered: {len(result['errors'])}")
@@ -3272,15 +3574,9 @@ def main():
         print("Processing Results:")
         print(f"  Success: {result['success']}")
         print(f"  Total slides: {result['total_slides']}")
-        print(f"  Total images: {result['total_images']}")
-        print(f"  Processed: {result['processed_images']}")
-        print(f"  Decorative (skipped): {result['decorative_images']}")
-        print(f"  Failed: {result['failed_images']}")
-        
-        # Show shape information if available
-        if 'total_shapes' in result:
-            print(f"  Total shapes: {result['total_shapes']}")
-            print(f"  Decorative shapes marked: {result.get('decorative_shapes_marked', 0)}")
+        print(f"  Total visual elements: {result.get('total_visual_elements', 0)}")
+        print(f"  Processed: {result.get('processed_visual_elements', 0)}")
+        print(f"  Failed: {result.get('failed_visual_elements', 0)}")
         
         print(f"  Total time: {result['total_time']:.2f}s")
         

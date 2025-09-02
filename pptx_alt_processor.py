@@ -47,14 +47,13 @@ class PPTXAltProcessor:
     Provides an easy-to-use interface for complete PPTX accessibility processing.
     """
     
-    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, force_decorative: bool = False, debug: bool = False):
+    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False):
         """
         Initialize the PPTX ALT text processor.
         
         Args:
             config_path: Optional path to configuration file
             verbose: Enable verbose logging
-            force_decorative: Force decorative fallback for failed generations
             debug: Enable detailed debug logging for generation attempts
         """
         if verbose:
@@ -64,7 +63,6 @@ class PPTXAltProcessor:
         self.config_manager = ConfigManager(config_path)
         self.pptx_processor = PPTXAccessibilityProcessor(self.config_manager, debug=debug)
         self.alt_injector = PPTXAltTextInjector(self.config_manager)
-        self.force_decorative = force_decorative
         self.debug = debug
         
         # Setup failed generation logging
@@ -110,7 +108,6 @@ class PPTXAltProcessor:
             result = self.pptx_processor.process_pptx(
                 str(input_path), 
                 str(output_path), 
-                force_decorative=self.force_decorative,
                 failed_generation_callback=self._log_failed_generation,
                 debug=self.debug
             )
@@ -741,7 +738,6 @@ Examples:
     # Global options
     parser.add_argument('--config', help='Configuration file path')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
-    parser.add_argument('--force-decorative', action='store_true', help='Force decorative fallback for failed generations (ensures 100%% coverage)')
     parser.add_argument('--debug', action='store_true', help='Enable detailed debug logging for generation attempts and failures')
     
     args = parser.parse_args()
@@ -752,7 +748,7 @@ Examples:
     
     try:
         # Initialize processor
-        processor = PPTXAltProcessor(args.config, args.verbose, args.force_decorative, args.debug)
+        processor = PPTXAltProcessor(args.config, args.verbose, args.debug)
         
         if args.command == 'process':
             result = processor.process_single_file(
