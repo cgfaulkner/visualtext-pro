@@ -1003,6 +1003,63 @@ class FlexibleAltGenerator:
         
         return performance
 
+    def generate_text_response(self, prompt: str) -> Optional[str]:
+        """
+        Generate text response without an image (text-only generation).
+        For shape elements and other non-image visual elements.
+        
+        Args:
+            prompt: Text prompt for generation
+            
+        Returns:
+            Generated text response or None if generation failed
+        """
+        try:
+            # Use the first available provider for text generation
+            # Most providers can handle text-only prompts
+            for provider_name in self.fallback_chain:
+                if provider_name not in self.providers:
+                    continue
+                    
+                provider = self.providers[provider_name]
+                
+                # For text-only generation, create a minimal "image" or use provider's text capability
+                # Since most vision models can also do text generation, we can send a text prompt
+                try:
+                    if hasattr(provider, 'generate_text_response'):
+                        # If provider has dedicated text method, use it
+                        result, metadata = provider.generate_text_response(prompt)
+                        if result and result.strip():
+                            return result.strip()
+                    else:
+                        # For LLaVA and similar vision models, we can't do text-only generation
+                        # Instead, provide a basic descriptive text based on the prompt
+                        logger.debug(f"Provider {provider_name} doesn't support text-only generation")
+                        continue
+                            
+                except Exception as e:
+                    logger.debug(f"Provider {provider_name} failed text generation: {e}")
+                    continue
+            
+            # If all providers fail, create a simple descriptive text
+            logger.warning("All providers failed for text generation, creating fallback description")
+            
+            # Extract basic information from the prompt to create a simple description
+            if "shape:" in prompt.lower():
+                return "PowerPoint shape element"
+            elif "chart" in prompt.lower():
+                return "Chart or graph element"
+            elif "text" in prompt.lower():
+                return "Text element"
+            elif "diagram" in prompt.lower():
+                return "Diagram or visual element"
+            else:
+                return "Visual element"
+            
+        except Exception as e:
+            logger.error(f"Error in generate_text_response: {e}")
+            return None
+
 
 # Backwards compatibility functions
 def generate_alt_text_unified(image_path: str,

@@ -10,6 +10,7 @@ import tempfile
 import time
 import base64
 import re
+import io
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from collections import defaultdict
@@ -45,20 +46,29 @@ from decorative_filter import (
     validate_decorative_config
 )
 
+# Import PIL for shape-to-image rendering
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    logging.warning("PIL not available - shape-to-image rendering will be disabled")
+
 logger = logging.getLogger(__name__)
 
 
 class PPTXImageInfo:
     """Container for PPTX image information."""
     
-    def __init__(self, shape: Picture, slide_idx: int, shape_idx: int, 
-                 image_data: bytes, filename: str, slide_text: str = ""):
+    def __init__(self, shape: BaseShape, slide_idx: int, shape_idx: int, 
+                 image_data: bytes, filename: str, slide_text: str = "", is_rendered: bool = False):
         self.shape = shape
         self.slide_idx = slide_idx
         self.shape_idx = shape_idx
         self.image_data = image_data
         self.filename = filename
         self.slide_text = slide_text
+        self.is_rendered = is_rendered  # Flag to track if this was rendered from a shape
         self.image_hash = get_image_hash(image_data)
         
         # Extract shape properties
@@ -76,20 +86,11 @@ class PPTXImageInfo:
         # Unique identifier consistent with PPTXAltTextInjector
         self.image_key = self._create_consistent_image_key(slide_idx, shape_idx, shape)
     
-    def _create_consistent_image_key(self, slide_idx: int, shape_idx: int, shape: Picture) -> str:
-        """Create image key consistent with PPTXAltTextInjector."""
-        components = [f"slide_{slide_idx}", f"shape_{shape_idx}"]
-        
-        # Add shape name if meaningful (not default Picture names)
-        shape_name = getattr(shape, 'name', '')
-        if shape_name and not shape_name.startswith('Picture'):
-            components.append(f"name_{shape_name}")
-        
-        # Add hash for uniqueness (consistent with injector)
-        if self.image_hash:
-            components.append(f"hash_{self.image_hash[:8]}")
-        
-        return "_".join(components)
+    def _create_consistent_image_key(self, slide_idx: int, shape_idx: int, shape: BaseShape) -> str:
+        """Create image key consistent with PPTXAltTextInjector format: slide_X_shape_Y_hash_XXXXX."""
+        # Always use 8-character hash to match injector expectations
+        hash_value = self.image_hash[:8] if self.image_hash else f"{slide_idx}{shape_idx}img"[:8]
+        return f"slide_{slide_idx}_shape_{shape_idx}_hash_{hash_value}"
 
 
 class PPTXVisualElement:
@@ -133,10 +134,7 @@ class PPTXVisualElement:
         except:
             self.width_px = self.height_px = self.left_px = self.top_px = 0
         
-        # Generate unique element key
-        self.element_key = f"slide_{slide_idx}_element_{shape_idx}_{self.element_type}"
-        
-        # Extract text content
+        # Extract text content (needed for hash generation)
         self.has_text = False
         self.text_content = ""
         try:
@@ -146,22 +144,25 @@ class PPTXVisualElement:
         except:
             pass
             
-        # Shape type information
+        # Shape type information (needed for hash generation)
         self.shape_type = getattr(shape, 'shape_type', None)
         self.shape_name = getattr(shape, 'name', '') or ''
         
         # Generate element hash for duplicate detection
         if self.image_hash:
-            self.element_hash = self.image_hash
+            self.element_hash = self.image_hash[:8]  # Truncate to 8 chars to match injector expectations
         else:
             # For non-images, create hash based on properties
             try:
                 hash_content = f"{self.shape_type}_{self.width_px}_{self.height_px}_{self.text_content}"
                 import hashlib
-                self.element_hash = hashlib.md5(hash_content.encode()).hexdigest()[:16]
+                self.element_hash = hashlib.md5(hash_content.encode()).hexdigest()[:8]  # 8 chars to match injector
             except:
                 # Fallback to simple string-based hash
-                self.element_hash = f"{slide_idx}_{shape_idx}_{element_type}"
+                self.element_hash = f"{slide_idx}{shape_idx}{element_type}"[:8]  # Keep under 8 chars
+        
+        # Generate unique element key in format expected by injector: slide_X_shape_Y_hash_XXXXX
+        self.element_key = f"slide_{slide_idx}_shape_{shape_idx}_hash_{self.element_hash}"
 
 class PPTXShapeInfo:
     """Container for PPTX shape information for decorative detection."""
@@ -502,6 +503,365 @@ class PPTXAccessibilityProcessor:
         
         return result
     
+    def _render_shape_to_image(self, shape: BaseShape, slide_idx: int, shape_idx: int, slide_context: str = "") -> Optional[PPTXImageInfo]:
+        """
+        Render a PowerPoint shape to an image for LLaVa processing.
+        
+        Args:
+            shape: Shape to render
+            slide_idx: Slide index
+            shape_idx: Shape index
+            slide_context: Slide text context
+            
+        Returns:
+            PPTXImageInfo with rendered image data or None if rendering failed
+        """
+        if not PIL_AVAILABLE:
+            logger.warning("PIL not available - cannot render shapes to images")
+            return None
+        
+        try:
+            # Get shape dimensions and position
+            width_emu = getattr(shape, 'width', 0)
+            height_emu = getattr(shape, 'height', 0)
+            
+            if width_emu <= 0 or height_emu <= 0:
+                return None
+            
+            # Convert EMU to pixels (914400 EMU = 1 inch, 96 DPI)
+            width_px = max(int(width_emu / 914400 * 96), 50)
+            height_px = max(int(height_emu / 914400 * 96), 50)
+            
+            # Create image canvas with white background
+            img = Image.new('RGB', (width_px, height_px), 'white')
+            draw = ImageDraw.Draw(img)
+            
+            # Render shape based on type
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            shape_type = getattr(shape, 'shape_type', None)
+            
+            if shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
+                self._render_auto_shape(draw, shape, width_px, height_px)
+            elif shape_type == MSO_SHAPE_TYPE.LINE:
+                self._render_line_shape(draw, shape, width_px, height_px)
+            elif shape_type == MSO_SHAPE_TYPE.FREEFORM:
+                self._render_freeform_shape(draw, shape, width_px, height_px)
+            elif shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                self._render_text_box(draw, shape, width_px, height_px)
+            else:
+                # Generic shape rendering
+                self._render_generic_shape(draw, shape, width_px, height_px)
+            
+            # Convert PIL image to bytes
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format='PNG')
+            image_data = img_bytes.getvalue()
+            
+            # Create PPTXImageInfo
+            filename = f"rendered_shape_{slide_idx}_{shape_idx}.png"
+            image_info = PPTXImageInfo(
+                shape=shape,
+                slide_idx=slide_idx,
+                shape_idx=shape_idx,
+                image_data=image_data,
+                filename=filename,
+                slide_text=slide_context[:self.max_context_length] if slide_context else "",
+                is_rendered=True  # Flag to indicate this was rendered
+            )
+            
+            logger.debug(f"Rendered shape to image: {filename} ({width_px}x{height_px}px)")
+            return image_info
+            
+        except Exception as e:
+            logger.warning(f"Failed to render shape {shape_idx} on slide {slide_idx}: {e}")
+            return None
+    
+    def _render_auto_shape(self, draw: ImageDraw.Draw, shape: AutoShape, width: int, height: int):
+        """Render AutoShape (circles, rectangles, etc.)"""
+        try:
+            # Get shape fill color
+            fill_color = self._get_shape_fill_color(shape)
+            line_color = self._get_shape_line_color(shape)
+            line_width = self._get_shape_line_width(shape)
+            
+            # Get shape type for specific rendering
+            auto_shape_type = getattr(shape, 'auto_shape_type', None)
+            
+            if auto_shape_type:
+                from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+                
+                if auto_shape_type == MSO_AUTO_SHAPE_TYPE.OVAL:
+                    # Draw circle/ellipse
+                    draw.ellipse([0, 0, width-1, height-1], fill=fill_color, outline=line_color, width=line_width)
+                elif auto_shape_type in [MSO_AUTO_SHAPE_TYPE.RECTANGLE, MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE]:
+                    # Draw rectangle
+                    draw.rectangle([0, 0, width-1, height-1], fill=fill_color, outline=line_color, width=line_width)
+                elif auto_shape_type == MSO_AUTO_SHAPE_TYPE.HEXAGON:
+                    # Draw hexagon
+                    points = self._get_hexagon_points(width, height)
+                    draw.polygon(points, fill=fill_color, outline=line_color)
+                else:
+                    # Generic rectangle for unknown shapes
+                    draw.rectangle([0, 0, width-1, height-1], fill=fill_color, outline=line_color, width=line_width)
+            else:
+                # Default rectangle
+                draw.rectangle([0, 0, width-1, height-1], fill=fill_color, outline=line_color, width=line_width)
+                
+        except Exception as e:
+            logger.warning(f"Failed to render auto shape: {e}")
+            # Fallback: draw a simple rectangle
+            draw.rectangle([0, 0, width-1, height-1], fill='lightgray', outline='black')
+    
+    def _render_line_shape(self, draw: ImageDraw.Draw, shape: BaseShape, width: int, height: int):
+        """Render line shape"""
+        try:
+            line_color = self._get_shape_line_color(shape)
+            line_width = self._get_shape_line_width(shape)
+            
+            # Draw line from top-left to bottom-right (simplified)
+            draw.line([0, 0, width-1, height-1], fill=line_color, width=line_width)
+            
+        except Exception as e:
+            logger.warning(f"Failed to render line shape: {e}")
+            draw.line([0, 0, width-1, height-1], fill='black', width=2)
+    
+    def _render_freeform_shape(self, draw: ImageDraw.Draw, shape: BaseShape, width: int, height: int):
+        """Render freeform shape"""
+        try:
+            fill_color = self._get_shape_fill_color(shape)
+            line_color = self._get_shape_line_color(shape)
+            
+            # For freeform, draw a polygon (simplified)
+            # This is a basic implementation - complex freeforms would need path parsing
+            points = [(0, height//2), (width//4, 0), (3*width//4, 0), (width-1, height//2), (width-1, height-1), (0, height-1)]
+            draw.polygon(points, fill=fill_color, outline=line_color)
+            
+        except Exception as e:
+            logger.warning(f"Failed to render freeform shape: {e}")
+            draw.rectangle([0, 0, width-1, height-1], fill='lightgray', outline='black')
+    
+    def _render_text_box(self, draw: ImageDraw.Draw, shape: BaseShape, width: int, height: int):
+        """Render text box with background"""
+        try:
+            fill_color = self._get_shape_fill_color(shape)
+            line_color = self._get_shape_line_color(shape)
+            line_width = self._get_shape_line_width(shape)
+            
+            # Draw background
+            draw.rectangle([0, 0, width-1, height-1], fill=fill_color, outline=line_color, width=line_width)
+            
+            # Add text if available
+            if hasattr(shape, 'text') and shape.text:
+                try:
+                    font = ImageFont.load_default()
+                    text_color = 'black'
+                    
+                    # Simple text positioning (centered)
+                    text_width = len(shape.text) * 8  # Rough estimate
+                    text_height = 12
+                    x = max(0, (width - text_width) // 2)
+                    y = max(0, (height - text_height) // 2)
+                    
+                    draw.text((x, y), shape.text[:50], fill=text_color, font=font)  # Limit text length
+                except:
+                    pass  # Text rendering is optional
+                    
+        except Exception as e:
+            logger.warning(f"Failed to render text box: {e}")
+            draw.rectangle([0, 0, width-1, height-1], fill='white', outline='black')
+    
+    def _render_generic_shape(self, draw: ImageDraw.Draw, shape: BaseShape, width: int, height: int):
+        """Generic shape rendering fallback"""
+        try:
+            fill_color = self._get_shape_fill_color(shape)
+            line_color = self._get_shape_line_color(shape)
+            line_width = self._get_shape_line_width(shape)
+            
+            # Draw as rectangle with visual indication
+            draw.rectangle([0, 0, width-1, height-1], fill=fill_color, outline=line_color, width=line_width)
+            
+            # Add X marks to indicate it's a generic shape
+            draw.line([0, 0, width-1, height-1], fill=line_color, width=1)
+            draw.line([0, height-1, width-1, 0], fill=line_color, width=1)
+            
+        except Exception as e:
+            logger.warning(f"Failed to render generic shape: {e}")
+            draw.rectangle([0, 0, width-1, height-1], fill='lightgray', outline='black')
+    
+    def _get_shape_fill_color(self, shape: BaseShape) -> str:
+        """Get shape fill color"""
+        try:
+            if hasattr(shape, 'fill') and shape.fill:
+                fill = shape.fill
+                if hasattr(fill, 'fore_color') and fill.fore_color:
+                    # Try to get RGB color
+                    try:
+                        rgb = fill.fore_color.rgb
+                        return f"#{rgb:06x}"
+                    except:
+                        pass
+                
+                # Check for solid fill
+                from pptx.enum.dml import MSO_FILL_TYPE
+                if hasattr(fill, 'type') and fill.type == MSO_FILL_TYPE.SOLID:
+                    return 'lightblue'  # Default solid color
+                    
+            # Shape-specific defaults
+            shape_type = getattr(shape, 'shape_type', None)
+            auto_shape_type = getattr(shape, 'auto_shape_type', None)
+            
+            if auto_shape_type:
+                from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+                if auto_shape_type == MSO_AUTO_SHAPE_TYPE.OVAL:
+                    return 'lightblue'  # Blue circle default
+                elif auto_shape_type == MSO_AUTO_SHAPE_TYPE.HEXAGON:
+                    return 'purple'  # Purple hexagon default
+                    
+            return 'lightgray'  # Generic default
+            
+        except Exception:
+            return 'lightgray'
+    
+    def _get_shape_line_color(self, shape: BaseShape) -> str:
+        """Get shape line color"""
+        try:
+            if hasattr(shape, 'line') and shape.line:
+                line = shape.line
+                if hasattr(line, 'color') and line.color:
+                    try:
+                        rgb = line.color.rgb
+                        return f"#{rgb:06x}"
+                    except:
+                        pass
+            return 'black'  # Default line color
+        except Exception:
+            return 'black'
+    
+    def _get_shape_line_width(self, shape: BaseShape) -> int:
+        """Get shape line width"""
+        try:
+            if hasattr(shape, 'line') and shape.line:
+                line = shape.line
+                if hasattr(line, 'width') and line.width:
+                    # Convert EMU to pixels (rough approximation)
+                    width_emu = line.width
+                    width_px = max(1, int(width_emu / 914400 * 96 / 72))  # Convert to reasonable pixel width
+                    return min(width_px, 10)  # Cap at 10px
+            return 2  # Default line width
+        except Exception:
+            return 2
+    
+    def _get_hexagon_points(self, width: int, height: int) -> List[Tuple[int, int]]:
+        """Generate hexagon points"""
+        cx, cy = width // 2, height // 2
+        radius_x, radius_y = width // 2 - 2, height // 2 - 2
+        
+        import math
+        points = []
+        for i in range(6):
+            angle = i * math.pi / 3
+            x = cx + radius_x * math.cos(angle)
+            y = cy + radius_y * math.sin(angle)
+            points.append((int(x), int(y)))
+        
+        return points
+    
+    def _should_render_shape_to_image(self, shape: BaseShape) -> bool:
+        """
+        Determine if a shape should be rendered to an image for LLaVa processing.
+        
+        Args:
+            shape: Shape to evaluate
+            
+        Returns:
+            True if shape should be rendered to image
+        """
+        try:
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            shape_type = getattr(shape, 'shape_type', None)
+            
+            # Don't render shapes that already contain images
+            if hasattr(shape, 'image') and shape.image:
+                return False
+            
+            # Don't render group shapes (they're processed recursively)
+            if hasattr(shape, 'shapes'):
+                return False
+            
+            # Render visual shape types that should be processed by LLaVa
+            visual_shape_types = [
+                MSO_SHAPE_TYPE.AUTO_SHAPE,      # Circles, rectangles, hexagons, etc.
+                MSO_SHAPE_TYPE.LINE,            # Lines and connectors
+                MSO_SHAPE_TYPE.FREEFORM,        # Custom drawn shapes
+                MSO_SHAPE_TYPE.TEXT_BOX,        # Text boxes with visual styling
+            ]
+            
+            if shape_type in visual_shape_types:
+                # Additional checks for shapes with visual content
+                
+                # Check if shape has visual significance (fill, border, etc.)
+                if self._has_visual_significance_for_rendering(shape):
+                    return True
+                
+                # Check if text box has substantial text content
+                if shape_type == MSO_SHAPE_TYPE.TEXT_BOX and hasattr(shape, 'text') and shape.text:
+                    # Render text boxes with meaningful content
+                    text_content = shape.text.strip()
+                    if len(text_content) > 10:  # More than just a few characters
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error determining if shape should be rendered: {e}")
+            return False
+    
+    def _has_visual_significance_for_rendering(self, shape: BaseShape) -> bool:
+        """
+        Check if shape has visual significance that warrants rendering for LLaVa.
+        More permissive than the decorative detection logic.
+        
+        Args:
+            shape: Shape to evaluate
+            
+        Returns:
+            True if shape has visual significance
+        """
+        try:
+            # Check for fill colors/patterns
+            if hasattr(shape, 'fill') and shape.fill:
+                from pptx.enum.dml import MSO_FILL_TYPE
+                if hasattr(shape.fill, 'type') and shape.fill.type == MSO_FILL_TYPE.SOLID:
+                    return True
+                if hasattr(shape.fill, 'type') and shape.fill.type != MSO_FILL_TYPE.NO_FILL:
+                    return True
+            
+            # Check for borders/outlines
+            if hasattr(shape, 'line') and shape.line:
+                from pptx.enum.dml import MSO_LINE_STYLE
+                if hasattr(shape.line, 'style') and hasattr(shape.line, 'width'):
+                    if shape.line.width and shape.line.width > 0:
+                        return True
+            
+            # Check size - larger shapes are more likely to be content
+            if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                width_emu = getattr(shape, 'width', 0)
+                height_emu = getattr(shape, 'height', 0)
+                
+                if width_emu and height_emu:
+                    # Convert to pixels for evaluation
+                    width_px = int(width_emu / 914400 * 96)
+                    height_px = int(height_emu / 914400 * 96)
+                    
+                    # Consider shapes larger than 30x30 pixels as potentially significant
+                    if width_px >= 30 and height_px >= 30:
+                        return True
+            
+            return False
+            
+        except Exception:
+            return False
+    
     def _extract_images_from_pptx(self, pptx_path: str) -> Tuple[Presentation, List[PPTXImageInfo]]:
         """
         Extract all images from PPTX with their context, including grouped shapes, 
@@ -645,6 +1005,15 @@ class PPTXAccessibilityProcessor:
                     images_from_shape.extend(ole_images)
                     if ole_images:
                         logger.debug(f"      -> Extracted {len(ole_images)} images from OLE objects")
+                
+                # 7. Render visual shapes to images for LLaVa processing
+                # If no images were found from this shape but it's a visual element, render it
+                if not images_from_shape and self._should_render_shape_to_image(shape):
+                    logger.debug(f"      -> Rendering shape to image for LLaVa processing")
+                    rendered_image = self._render_shape_to_image(shape, slide_idx, shape_id, slide_context)
+                    if rendered_image:
+                        images_from_shape.append(rendered_image)
+                        logger.debug(f"      -> Successfully rendered shape: {rendered_image.filename}")
                 
                 image_infos.extend(images_from_shape)
                 
@@ -1202,6 +1571,217 @@ class PPTXAccessibilityProcessor:
             description_parts.append("located in the lower area of the slide")
         
         return " ".join(description_parts)
+    
+    def _create_descriptive_shape_alt_text(self, shape: BaseShape, width_px: int, height_px: int) -> str:
+        """
+        Create descriptive ALT text for PowerPoint shapes when LLaVa processing fails.
+        Provides meaningful information for screen readers.
+        
+        Args:
+            shape: PowerPoint shape object
+            width_px: Shape width in pixels
+            height_px: Shape height in pixels
+            
+        Returns:
+            Descriptive ALT text string
+        """
+        try:
+            from pptx.enum.shapes import MSO_SHAPE_TYPE, MSO_AUTO_SHAPE_TYPE
+            
+            # Get shape type and auto-shape type
+            shape_type = getattr(shape, 'shape_type', None)
+            auto_shape_type = getattr(shape, 'auto_shape_type', None)
+            
+            # Determine the specific shape name and appropriate article
+            shape_name, article = self._get_shape_name_and_article(shape_type, auto_shape_type)
+            
+            # Format dimensions
+            dimension_text = f"({width_px}x{height_px}px)" if width_px > 0 and height_px > 0 else ""
+            
+            # Create the descriptive text
+            alt_text = f"This is a PowerPoint shape. It is {article} {shape_name} {dimension_text}".strip()
+            
+            # Add orientation information for lines and rectangles
+            if shape_type == MSO_SHAPE_TYPE.LINE or "line" in shape_name.lower():
+                orientation = self._get_line_orientation(width_px, height_px)
+                if orientation:
+                    alt_text = alt_text.replace(f"{shape_name}", f"{orientation} {shape_name}")
+            
+            return alt_text
+            
+        except Exception as e:
+            logger.debug(f"Error creating descriptive shape ALT text: {e}")
+            # Ultimate fallback
+            if width_px > 0 and height_px > 0:
+                return f"This is a PowerPoint shape ({width_px}x{height_px}px)"
+            else:
+                return "This is a PowerPoint shape"
+    
+    def _get_shape_name_and_article(self, shape_type, auto_shape_type) -> Tuple[str, str]:
+        """
+        Get the shape name and appropriate article (a/an) for a PowerPoint shape.
+        
+        Args:
+            shape_type: MSO_SHAPE_TYPE enumeration value
+            auto_shape_type: MSO_AUTO_SHAPE_TYPE enumeration value
+            
+        Returns:
+            Tuple of (shape_name, article)
+        """
+        try:
+            from pptx.enum.shapes import MSO_SHAPE_TYPE, MSO_AUTO_SHAPE_TYPE
+            
+            # Handle auto shapes with specific types
+            if shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE and auto_shape_type:
+                # Create shape mapping using only existing enum values
+                shape_mapping = {}
+                
+                # Basic shapes
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'RECTANGLE'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.RECTANGLE] = ("rectangle", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'ROUNDED_RECTANGLE'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE] = ("rounded rectangle", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'OVAL'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.OVAL] = ("oval", "an")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'DIAMOND'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.DIAMOND] = ("diamond", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'RIGHT_TRIANGLE'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.RIGHT_TRIANGLE] = ("right triangle", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'PARALLELOGRAM'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.PARALLELOGRAM] = ("parallelogram", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'TRAPEZOID'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.TRAPEZOID] = ("trapezoid", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'HEXAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.HEXAGON] = ("hexagon", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'OCTAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.OCTAGON] = ("octagon", "an")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'DECAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.DECAGON] = ("decagon", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'DODECAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.DODECAGON] = ("dodecagon", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'PENTAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.PENTAGON] = ("pentagon", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'REGULAR_PENTAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.REGULAR_PENTAGON] = ("regular pentagon", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'HEPTAGON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.HEPTAGON] = ("heptagon", "a")
+                
+                # Stars (using actual enum names)
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_4_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_4_POINT] = ("4-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_5_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_5_POINT] = ("5-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_6_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_6_POINT] = ("6-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_7_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_7_POINT] = ("7-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_8_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_8_POINT] = ("8-point star", "an")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_10_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_10_POINT] = ("10-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_12_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_12_POINT] = ("12-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_16_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_16_POINT] = ("16-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_24_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_24_POINT] = ("24-point star", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'STAR_32_POINT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.STAR_32_POINT] = ("32-point star", "a")
+                    
+                # Other common shapes
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'CROSS'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.CROSS] = ("cross", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'HEART'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.HEART] = ("heart", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'LIGHTNING_BOLT'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.LIGHTNING_BOLT] = ("lightning bolt", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'MOON'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.MOON] = ("moon", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'SUN'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.SUN] = ("sun", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'CLOUD'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.CLOUD] = ("cloud", "a")
+                
+                # Arrows
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'LEFT_ARROW'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.LEFT_ARROW] = ("left arrow", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'RIGHT_ARROW'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.RIGHT_ARROW] = ("right arrow", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'UP_ARROW'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.UP_ARROW] = ("up arrow", "an")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'DOWN_ARROW'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.DOWN_ARROW] = ("down arrow", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'LEFT_RIGHT_ARROW'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.LEFT_RIGHT_ARROW] = ("left-right arrow", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'UP_DOWN_ARROW'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.UP_DOWN_ARROW] = ("up-down arrow", "an")
+                
+                # Flowchart shapes (common ones)
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'FLOWCHART_PROCESS'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.FLOWCHART_PROCESS] = ("flowchart process box", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'FLOWCHART_DECISION'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.FLOWCHART_DECISION] = ("flowchart decision diamond", "a")
+                if hasattr(MSO_AUTO_SHAPE_TYPE, 'FLOWCHART_TERMINATOR'):
+                    shape_mapping[MSO_AUTO_SHAPE_TYPE.FLOWCHART_TERMINATOR] = ("flowchart terminator", "a")
+                
+                if auto_shape_type in shape_mapping:
+                    return shape_mapping[auto_shape_type]
+            
+            # Handle general shape types
+            if shape_type == MSO_SHAPE_TYPE.LINE:
+                return ("line", "a")
+            elif shape_type == MSO_SHAPE_TYPE.FREEFORM:
+                return ("freeform shape", "a")
+            elif shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
+                return ("auto shape", "an")
+            elif shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                return ("text box", "a")
+            elif shape_type == MSO_SHAPE_TYPE.CHART:
+                return ("chart", "a")
+            elif shape_type == MSO_SHAPE_TYPE.TABLE:
+                return ("table", "a")
+            elif shape_type == MSO_SHAPE_TYPE.PICTURE:
+                return ("picture", "a")
+            elif shape_type == MSO_SHAPE_TYPE.MEDIA:
+                return ("media object", "a")
+            elif shape_type == MSO_SHAPE_TYPE.OLE_OBJECT:
+                return ("embedded object", "an")
+            elif shape_type == MSO_SHAPE_TYPE.PLACEHOLDER:
+                return ("placeholder", "a")
+            elif shape_type == MSO_SHAPE_TYPE.GROUP:
+                return ("group of shapes", "a")
+            else:
+                return ("shape", "a")
+                
+        except Exception as e:
+            logger.debug(f"Error mapping shape type: {e}")
+            return ("shape", "a")
+    
+    def _get_line_orientation(self, width_px: int, height_px: int) -> str:
+        """
+        Determine line orientation based on dimensions.
+        
+        Args:
+            width_px: Width in pixels
+            height_px: Height in pixels
+            
+        Returns:
+            Orientation description or empty string
+        """
+        if width_px <= 0 or height_px <= 0:
+            return ""
+        
+        # Calculate aspect ratio
+        aspect_ratio = width_px / height_px
+        
+        if aspect_ratio > 3:  # Much wider than tall
+            return "horizontal"
+        elif aspect_ratio < 0.33:  # Much taller than wide
+            return "vertical"
+        elif 0.8 <= aspect_ratio <= 1.2:  # Roughly square
+            return "diagonal"
+        else:
+            return ""  # Don't specify if unclear
     
     def _extract_visual_elements_from_shapes(self, shapes, slide_idx: int, slide_text: str, debug: bool = False) -> List[PPTXVisualElement]:
         """
@@ -3124,6 +3704,20 @@ class PPTXAccessibilityProcessor:
             failure_reason = f"Exception during generation: {str(e)}"
             if debug:
                 logger.error(f"💥 DEBUG: Exception in ALT text generation: {e}", exc_info=True)
+            
+            # Try to provide a descriptive fallback for rendered shapes
+            if hasattr(image_info, 'is_rendered') and image_info.is_rendered:
+                try:
+                    fallback_alt_text = self._create_descriptive_shape_alt_text(
+                        image_info.shape, image_info.width_px, image_info.height_px
+                    )
+                    if debug:
+                        logger.info(f"🔧 DEBUG: Using descriptive shape fallback: '{fallback_alt_text}'")
+                    return fallback_alt_text, None
+                except Exception as fallback_error:
+                    if debug:
+                        logger.error(f"Fallback generation also failed: {fallback_error}")
+                    
             return None, failure_reason
     
     def _build_generation_context(self, image_info: PPTXImageInfo) -> Optional[str]:
@@ -3161,6 +3755,11 @@ class PPTXAccessibilityProcessor:
         Returns:
             Prompt type string
         """
+        # Special handling for rendered shapes
+        if hasattr(image_info, 'is_rendered') and image_info.is_rendered:
+            # For rendered shapes, use a shape-specific prompt or diagram prompt
+            return 'diagram'
+        
         # Check filename and context for medical content indicators
         text_to_check = (image_info.filename + " " + image_info.slide_text).lower()
         

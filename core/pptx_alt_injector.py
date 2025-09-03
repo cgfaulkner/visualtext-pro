@@ -264,6 +264,10 @@ class PPTXAltTextInjector:
             
             logger.info(f"Key matching results: {len(matched_keys)} matched, {len(unmatched_keys)} unmatched")
             
+            # VERIFICATION STEP: Check what ALT texts are actually in the presentation before saving
+            logger.info("🔍 DEBUG: POST-INJECTION VERIFICATION")
+            self._perform_post_injection_verification(presentation, image_identifiers, alt_text_mapping)
+            
             # Save presentation
             output_path.parent.mkdir(parents=True, exist_ok=True)
             presentation.save(str(output_path))
@@ -304,23 +308,49 @@ class PPTXAltTextInjector:
             Dictionary mapping image keys to (identifier, shape) tuples
         """
         mapping = {}
+        logger.info("🔍 DEBUG: Starting _build_image_identifier_mapping")
         
         for slide_idx, slide in enumerate(presentation.slides):
-            logger.debug(f"Processing slide {slide_idx + 1} for image mapping")
+            logger.info(f"🔍 DEBUG: Processing slide {slide_idx + 1} for image mapping")
+            logger.info(f"🔍 DEBUG:   Total shapes on slide: {len(slide.shapes)}")
             
             # Use recursive shape processing from enhanced detection system
             images_found = self._extract_images_from_shapes_for_mapping(
                 slide.shapes, slide_idx, parent_group_idx=None
             )
             
+            logger.info(f"🔍 DEBUG:   Images found on slide {slide_idx + 1}: {len(images_found)}")
+            
             for identifier, shape in images_found:
                 self.injection_stats['total_images'] += 1
                 mapping[identifier.image_key] = (identifier, shape)
-                logger.debug(f"Mapped image: {identifier.image_key}")
+                
+                # Log detailed shape information
+                logger.info(f"🔍 DEBUG:   Mapped image key: {identifier.image_key}")
+                logger.info(f"🔍 DEBUG:     Shape type: {type(shape).__name__}")
+                logger.info(f"🔍 DEBUG:     Shape ID: {getattr(shape, 'id', 'unknown')}")
+                logger.info(f"🔍 DEBUG:     Shape name: {getattr(shape, 'name', 'unknown')}")
+                if hasattr(shape, '_element'):
+                    logger.info(f"🔍 DEBUG:     XML element: {shape._element.tag if hasattr(shape._element, 'tag') else 'unknown'}")
+                
+                # Check current ALT text
+                current_alt = ""
+                try:
+                    if hasattr(shape, 'descr'):
+                        current_alt = shape.descr or ""
+                    elif hasattr(shape, '_element'):
+                        current_alt = shape._element.get('descr', "") or ""
+                except:
+                    pass
+                logger.info(f"🔍 DEBUG:     Current ALT text: '{current_alt}'")
             
-            logger.debug(f"Found {len(images_found)} images on slide {slide_idx + 1}")
+            logger.info(f"🔍 DEBUG: Completed slide {slide_idx + 1} - found {len(images_found)} images")
         
-        logger.info(f"Built identifier mapping for {len(mapping)} images using recursive traversal")
+        logger.info(f"🔍 DEBUG: Completed mapping build - total images: {len(mapping)}")
+        logger.info(f"🔍 DEBUG: Final image keys in mapping:")
+        for key in sorted(mapping.keys()):
+            logger.info(f"🔍 DEBUG:   - {key}")
+        
         return mapping
     
     def _extract_images_from_shapes_for_mapping(self, shapes, slide_idx: int, parent_group_idx: str = None) -> List[Tuple[PPTXImageIdentifier, Picture]]:
@@ -832,33 +862,56 @@ class PPTXAltTextInjector:
     
     def _inject_via_modern_property(self, shape: Picture, alt_text: str) -> bool:
         """Inject using modern property-based approach (python-pptx >= 0.6.22)."""
+        logger.info(f"🔍 DEBUG: XML PATH - Modern property injection")
+        logger.info(f"🔍 DEBUG:   Shape type: {type(shape).__name__}")
         if hasattr(shape, 'descr'):
-            logger.debug(f"       Using shape.descr property")
+            logger.info(f"🔍 DEBUG:   Using shape.descr property (modern approach)")
+            logger.info(f"🔍 DEBUG:   Setting ALT text: '{alt_text}'")
             shape.descr = alt_text
+            
+            # Verify it was set
+            actual_value = getattr(shape, 'descr', '')
+            logger.info(f"🔍 DEBUG:   Verification - got back: '{actual_value}'")
             return True
         else:
-            logger.debug(f"       Shape does not have 'descr' property")
+            logger.info(f"🔍 DEBUG:   Shape does not have 'descr' property")
         return False
     
     def _inject_via_xml_cnvpr(self, shape: Picture, alt_text: str) -> bool:
         """Inject via direct XML cNvPr element manipulation."""
+        logger.info(f"🔍 DEBUG: XML PATH - cNvPr element injection")
         try:
+            logger.info(f"🔍 DEBUG:   Accessing shape._element._nvXxPr.cNvPr")
             cNvPr = shape._element._nvXxPr.cNvPr
-            logger.debug(f"       Setting descr on cNvPr element")
+            logger.info(f"🔍 DEBUG:   cNvPr element found: {cNvPr}")
+            logger.info(f"🔍 DEBUG:   cNvPr tag: {getattr(cNvPr, 'tag', 'unknown')}")
+            logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
             cNvPr.set('descr', alt_text)
+            
+            # Verify it was set
+            actual_value = cNvPr.get('descr', '')
+            logger.info(f"🔍 DEBUG:   Verification - cNvPr.get('descr'): '{actual_value}'")
             return True
         except AttributeError as e:
-            logger.debug(f"       cNvPr element access failed: {e}")
+            logger.info(f"🔍 DEBUG:   cNvPr element access failed: {e}")
             return False
     
     def _inject_via_xml_element(self, shape: Picture, alt_text: str) -> bool:
         """Inject via XML element attribute (current approach)."""
+        logger.info(f"🔍 DEBUG: XML PATH - Direct element injection")
         try:
-            logger.debug(f"       Setting descr on shape._element")
+            logger.info(f"🔍 DEBUG:   Accessing shape._element")
+            logger.info(f"🔍 DEBUG:   Element: {shape._element}")
+            logger.info(f"🔍 DEBUG:   Element tag: {getattr(shape._element, 'tag', 'unknown')}")
+            logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
             shape._element.set('descr', alt_text)
+            
+            # Verify it was set
+            actual_value = shape._element.get('descr', '')
+            logger.info(f"🔍 DEBUG:   Verification - element.get('descr'): '{actual_value}'")
             return True
         except Exception as e:
-            logger.debug(f"       XML element access failed: {e}")
+            logger.info(f"🔍 DEBUG:   XML element access failed: {e}")
             return False
     
     def _inject_via_xml_fallback(self, shape: Picture, alt_text: str) -> bool:
@@ -937,6 +990,77 @@ class PPTXAltTextInjector:
         """
         actual_alt_text = self._get_existing_alt_text(shape)
         return actual_alt_text == expected_alt_text
+    
+    def _perform_post_injection_verification(self, presentation: Presentation, 
+                                          image_identifiers: Dict[str, Tuple], 
+                                          alt_text_mapping: Dict[str, str]) -> None:
+        """
+        Verify that ALT texts were actually injected after the injection process.
+        
+        Args:
+            presentation: PowerPoint presentation
+            image_identifiers: Mapping of image keys to (identifier, shape) tuples
+            alt_text_mapping: Original ALT text mapping requested
+        """
+        logger.info("🔍 DEBUG: Verifying ALT text injection results...")
+        
+        successful_injections = 0
+        failed_injections = 0
+        
+        # Check each image that we tried to inject
+        for image_key, expected_alt_text in alt_text_mapping.items():
+            if image_key in image_identifiers:
+                identifier, shape = image_identifiers[image_key]
+                
+                # Get current ALT text using all available methods
+                current_alt_text = self._get_existing_alt_text(shape)
+                
+                if current_alt_text == expected_alt_text:
+                    logger.info(f"🔍 DEBUG: ✅ VERIFIED: {image_key}")
+                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
+                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
+                    successful_injections += 1
+                else:
+                    logger.info(f"🔍 DEBUG: ❌ FAILED: {image_key}")
+                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
+                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
+                    failed_injections += 1
+                    
+                    # Additional debug info for failed injections
+                    logger.info(f"🔍 DEBUG:   Shape type: {type(shape).__name__}")
+                    logger.info(f"🔍 DEBUG:   Shape ID: {getattr(shape, 'id', 'unknown')}")
+                    if hasattr(shape, '_element'):
+                        try:
+                            # Check XML attributes directly
+                            descr_attr = shape._element.get('descr')
+                            logger.info(f"🔍 DEBUG:   XML descr attribute: '{descr_attr}'")
+                            
+                            # Check cNvPr element
+                            if hasattr(shape._element, '_nvXxPr'):
+                                cnvpr = getattr(shape._element._nvXxPr, 'cNvPr', None)
+                                if cnvpr is not None:
+                                    cnvpr_descr = cnvpr.get('descr')
+                                    logger.info(f"🔍 DEBUG:   cNvPr descr attribute: '{cnvpr_descr}'")
+                        except Exception as e:
+                            logger.info(f"🔍 DEBUG:   XML inspection failed: {e}")
+        
+        logger.info(f"🔍 DEBUG: VERIFICATION SUMMARY:")
+        logger.info(f"🔍 DEBUG:   Successful injections: {successful_injections}")
+        logger.info(f"🔍 DEBUG:   Failed injections: {failed_injections}")
+        logger.info(f"🔍 DEBUG:   Total attempted: {len(alt_text_mapping)}")
+        
+        # Also verify by re-scanning the presentation
+        logger.info("🔍 DEBUG: Re-scanning presentation for all ALT texts...")
+        all_alt_texts_found = 0
+        for slide_idx, slide in enumerate(presentation.slides):
+            for shape_idx, shape in enumerate(slide.shapes):
+                if hasattr(shape, 'image') or hasattr(shape, '_element'):
+                    alt_text = self._get_existing_alt_text(shape)
+                    if alt_text.strip():
+                        all_alt_texts_found += 1
+                        logger.info(f"🔍 DEBUG:   Found ALT text on slide {slide_idx}, shape {shape_idx}: '{alt_text}'")
+        
+        logger.info(f"🔍 DEBUG: Total ALT texts found in presentation: {all_alt_texts_found}")
     
     def _should_skip_alt_text(self, alt_text: str) -> bool:
         """
@@ -1029,7 +1153,8 @@ class PPTXAltTextInjector:
                         # Create robust identifier
                         identifier = PPTXImageIdentifier.from_shape(shape, slide_idx, shape_idx)
                         
-                        # Extract image information
+                        # Extract image information with consistent ALT text extraction
+                        alt_text = self._get_existing_alt_text(shape)
                         image_info = {
                             'identifier': identifier,
                             'slide_idx': slide_idx,
@@ -1038,7 +1163,8 @@ class PPTXAltTextInjector:
                             'image_key': identifier.image_key,
                             'image_hash': identifier.image_hash,
                             'embed_id': identifier.embed_id,
-                            'existing_alt_text': self._get_existing_alt_text(shape),
+                            'existing_alt_text': alt_text,
+                            'alt_text': alt_text,  # Add explicit alt_text field for compatibility
                             'image_data': shape.image.blob,
                             'filename': getattr(shape.image, 'filename', f'slide_{slide_idx}_shape_{shape_idx}.png')
                         }
