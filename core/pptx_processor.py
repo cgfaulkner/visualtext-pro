@@ -46,6 +46,36 @@ from decorative_filter import (
     validate_decorative_config
 )
 
+def describe_shape_with_details(shape) -> str:
+    """Create descriptive ALT text for PowerPoint shapes with size and type info."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    
+    def emu_to_px(emu_value):
+        """Convert EMU (English Metric Units) to pixels. 1 px ≈ 9525 EMUs"""
+        return round(emu_value / 9525)
+    
+    # Get shape type description
+    shape_type_desc = "shape"
+    try:
+        if hasattr(shape, 'shape_type') and shape.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
+            # Try to get specific auto shape type
+            if hasattr(shape, 'auto_shape_type'):
+                shape_type_desc = str(shape.auto_shape_type).split('.')[-1].replace('_', ' ').lower()
+        elif hasattr(shape, 'shape_type'):
+            shape_type_desc = str(shape.shape_type).split('.')[-1].replace('_', ' ').lower()
+    except Exception:
+        pass
+    
+    # Get dimensions
+    try:
+        width_px = emu_to_px(shape.width) if hasattr(shape, 'width') else 0
+        height_px = emu_to_px(shape.height) if hasattr(shape, 'height') else 0
+        size_info = f"({width_px}x{height_px}px)" if width_px > 0 and height_px > 0 else ""
+    except Exception:
+        size_info = ""
+    
+    return f"This is a PowerPoint shape. It is a {shape_type_desc} {size_info}".strip()
+
 # Import PIL for shape-to-image rendering
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -86,11 +116,18 @@ class PPTXImageInfo:
         # Unique identifier consistent with PPTXAltTextInjector
         self.image_key = self._create_consistent_image_key(slide_idx, shape_idx, shape)
     
-    def _create_consistent_image_key(self, slide_idx: int, shape_idx: int, shape: BaseShape) -> str:
-        """Create image key consistent with PPTXAltTextInjector format: slide_X_shape_Y_hash_XXXXX."""
-        # Always use 8-character hash to match injector expectations
-        hash_value = self.image_hash[:8] if self.image_hash else f"{slide_idx}{shape_idx}img"[:8]
-        return f"slide_{slide_idx}_shape_{shape_idx}_hash_{hash_value}"
+    def _create_consistent_image_key(self, slide_idx: int, shape_idx, shape: BaseShape) -> str:
+        """Create stable image key using shape ID instead of enumeration index."""
+        # Use shape.id for stable identification (consistent across runs)
+        shape_id = getattr(shape, 'id', None)
+        if shape_id is not None:
+            # Use stable shape ID format: slide_X_shapeid_Y_hash_Z
+            hash_value = self.image_hash[:8] if self.image_hash else f"{slide_idx}{shape_id}img"[:8]
+            return f"slide_{slide_idx}_shapeid_{shape_id}_hash_{hash_value}"
+        else:
+            # Fallback to index-based key for shapes without IDs
+            hash_value = self.image_hash[:8] if self.image_hash else f"{slide_idx}{shape_idx}img"[:8]
+            return f"slide_{slide_idx}_shape_{shape_idx}_hash_{hash_value}"
 
 
 class PPTXVisualElement:
@@ -161,8 +198,14 @@ class PPTXVisualElement:
                 # Fallback to simple string-based hash
                 self.element_hash = f"{slide_idx}{shape_idx}{element_type}"[:8]  # Keep under 8 chars
         
-        # Generate unique element key in format expected by injector: slide_X_shape_Y_hash_XXXXX
-        self.element_key = f"slide_{slide_idx}_shape_{shape_idx}_hash_{self.element_hash}"
+        # Generate stable element key using shape ID when available
+        shape_id = getattr(shape, 'id', None)
+        if shape_id is not None:
+            # Use stable shape ID format: slide_X_shapeid_Y_hash_Z
+            self.element_key = f"slide_{slide_idx}_shapeid_{shape_id}_hash_{self.element_hash}"
+        else:
+            # Fallback to index-based key for shapes without IDs
+            self.element_key = f"slide_{slide_idx}_shape_{shape_idx}_hash_{self.element_hash}"
 
 class PPTXShapeInfo:
     """Container for PPTX shape information for decorative detection."""
@@ -382,43 +425,84 @@ class PPTXAccessibilityProcessor:
                         else:
                             logger.info(f"Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
                     else:
-                        # Generation failed or returned empty/invalid text
+                        # Generation failed - try creating fallback descriptive ALT text
                         generation_failure_reason = failure_reason or "Empty or invalid ALT text returned"
                         
-                        result['failed_visual_elements'] += 1
-                        
-                        if debug:
-                            logger.warning(f"❌ DEBUG: Generation failed for {visual_element.element_key}: {generation_failure_reason}")
+                        # Instead of generic "PowerPoint shape element", use descriptive text
+                        if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
+                            fallback_description = describe_shape_with_details(visual_element.shape)
+                            alt_text_mapping[visual_element.element_key] = {
+                                'alt_text': fallback_description,
+                                'shape': visual_element.shape,
+                                'slide_idx': visual_element.slide_idx,
+                                'shape_idx': visual_element.shape_idx
+                            }
+                            result['processed_visual_elements'] += 1
+                            if debug:
+                                logger.info(f"✅ DEBUG: Used fallback description for {visual_element.element_key}: {fallback_description}")
+                            else:
+                                logger.info(f"Used fallback description for {visual_element.element_key}: {fallback_description}")
+                        else:
+                            # For other element types, still count as failed
+                            result['failed_visual_elements'] += 1
                             
-                        # Log failed generation for manual review
-                        if failed_generation_callback:
-                            failed_generation_callback(
-                                visual_element.element_key,
-                                {
-                                    'slide_idx': visual_element.slide_idx,
-                                    'shape_idx': visual_element.shape_idx,
-                                    'element_type': visual_element.element_type,
-                                    'filename': visual_element.filename,
-                                    'width_px': visual_element.width_px,
-                                    'height_px': visual_element.height_px,
-                                    'slide_text': visual_element.slide_text
-                                },
-                                f"ALT text generation failed: {generation_failure_reason}"
-                            )
+                            if debug:
+                                logger.warning(f"❌ DEBUG: Generation failed for {visual_element.element_key}: {generation_failure_reason}")
+                                
+                            # Log failed generation for manual review
+                            if failed_generation_callback:
+                                failed_generation_callback(
+                                    visual_element.element_key,
+                                    {
+                                        'slide_idx': visual_element.slide_idx,
+                                        'shape_idx': visual_element.shape_idx,
+                                        'element_type': visual_element.element_type,
+                                        'filename': visual_element.filename,
+                                        'width_px': visual_element.width_px,
+                                        'height_px': visual_element.height_px,
+                                        'slide_text': visual_element.slide_text
+                                    },
+                                    f"ALT text generation failed: {generation_failure_reason}"
+                                )
                 
                 except Exception as e:
                     generation_failure_reason = f"Exception during generation: {str(e)}"
-                    result['failed_visual_elements'] += 1
                     
-                    if debug:
-                        logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key}: {e}", exc_info=True)
+                    # Try fallback description even for exceptions on shapes
+                    if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
+                        try:
+                            fallback_description = describe_shape_with_details(visual_element.shape)
+                            alt_text_mapping[visual_element.element_key] = {
+                                'alt_text': fallback_description,
+                                'shape': visual_element.shape,
+                                'slide_idx': visual_element.slide_idx,
+                                'shape_idx': visual_element.shape_idx
+                            }
+                            result['processed_visual_elements'] += 1
+                            if debug:
+                                logger.info(f"✅ DEBUG: Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
+                            else:
+                                logger.info(f"Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
+                        except Exception as fallback_e:
+                            # Fallback failed too
+                            result['failed_visual_elements'] += 1
+                            if debug:
+                                logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key} and fallback failed: {e}, fallback: {fallback_e}", exc_info=True)
+                            else:
+                                error_msg = f"Error processing {visual_element.element_key}: {str(e)}"
+                                logger.error(error_msg)
+                                result['errors'].append(error_msg)
                     else:
-                        error_msg = f"Error processing {visual_element.element_key}: {str(e)}"
-                        logger.error(error_msg)
-                        result['errors'].append(error_msg)
+                        result['failed_visual_elements'] += 1
+                        if debug:
+                            logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key}: {e}", exc_info=True)
+                        else:
+                            error_msg = f"Error processing {visual_element.element_key}: {str(e)}"
+                            logger.error(error_msg)
+                            result['errors'].append(error_msg)
                         
-                    # Log failed generation for manual review
-                    if failed_generation_callback:
+                    # Log failed generation for manual review (only if no fallback was used)
+                    if visual_element.element_key not in alt_text_mapping and failed_generation_callback:
                         failed_generation_callback(
                             visual_element.element_key,
                             {

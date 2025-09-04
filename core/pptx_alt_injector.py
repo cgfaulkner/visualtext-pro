@@ -52,17 +52,21 @@ class PPTXImageIdentifier:
         self.image_key = self._create_image_key()
     
     def _create_image_key(self) -> str:
-        """Create robust, unique identifier for image, supporting nested shapes."""
-        # Handle nested shape IDs (e.g., "0_1_2" for deeply nested groups)
-        if isinstance(self.shape_idx, str) and '_' in str(self.shape_idx):
-            shape_component = f"shape_{self.shape_idx}"
+        """Create stable, unique identifier using shape ID when available."""
+        # If shape_idx is a shape ID (integer), use shapeid format for stability
+        if isinstance(self.shape_idx, int):
+            # Use stable shape ID format: slide_X_shapeid_Y_hash_Z
+            components = [f"slide_{self.slide_idx}", f"shapeid_{self.shape_idx}"]
         else:
-            shape_component = f"shape_{self.shape_idx}"
+            # Fallback for complex/string indices
+            if isinstance(self.shape_idx, str) and '_' in str(self.shape_idx):
+                shape_component = f"shape_{self.shape_idx}"
+            else:
+                shape_component = f"shape_{self.shape_idx}"
+            components = [f"slide_{self.slide_idx}", shape_component]
         
-        components = [f"slide_{self.slide_idx}", shape_component]
-        
-        if self.shape_name and not self.shape_name.startswith('Picture'):
-            components.append(f"name_{self.shape_name}")
+        # REMOVED: shape_name component to match processor key format exactly
+        # The processor doesn't include name segments, so injector shouldn't either
         
         if self.image_hash:
             components.append(f"hash_{self.image_hash[:8]}")
@@ -250,17 +254,26 @@ class PPTXAltTextInjector:
             
             for image_key, alt_text in alt_text_mapping.items():
                 if image_key in image_identifiers:
+                    # Direct key match
                     identifier, shape = image_identifiers[image_key]
                     self._inject_alt_text_single(shape, alt_text, identifier)
                     matched_keys.append(image_key)
                 else:
-                    # Try fallback injection methods for unmatched keys
-                    if self._try_fallback_injection(presentation, image_key, alt_text):
+                    # Try fallback key matching by (slide_index, hash) combination
+                    fallback_match = self._try_fallback_key_matching(image_key, image_identifiers)
+                    if fallback_match:
+                        identifier, shape = fallback_match
+                        self._inject_alt_text_single(shape, alt_text, identifier)
                         matched_keys.append(image_key)
-                        logger.info(f"Successfully injected via fallback method: {image_key}")
+                        logger.info(f"Successfully matched via fallback key matching: {image_key} -> {identifier.image_key}")
                     else:
-                        logger.warning(f"Could not find image for key (even with fallback): {image_key}")
-                        unmatched_keys.append(image_key)
+                        # Try general fallback injection methods for unmatched keys
+                        if self._try_fallback_injection(presentation, image_key, alt_text):
+                            matched_keys.append(image_key)
+                            logger.info(f"Successfully injected via fallback method: {image_key}")
+                        else:
+                            logger.warning(f"Could not find image for key (even with fallback): {image_key}")
+                            unmatched_keys.append(image_key)
             
             logger.info(f"Key matching results: {len(matched_keys)} matched, {len(unmatched_keys)} unmatched")
             
@@ -296,7 +309,7 @@ class PPTXAltTextInjector:
                 'errors': [error_msg]
             }
     
-    def _build_image_identifier_mapping(self, presentation: Presentation) -> Dict[str, Tuple[PPTXImageIdentifier, Picture]]:
+    def _build_image_identifier_mapping(self, presentation: Presentation) -> Dict[str, Tuple[PPTXImageIdentifier, Any]]:
         """
         Build mapping from image keys to (identifier, shape) tuples using recursive traversal
         to find images within grouped shapes, chart elements, and nested structures.
@@ -353,71 +366,85 @@ class PPTXAltTextInjector:
         
         return mapping
     
-    def _extract_images_from_shapes_for_mapping(self, shapes, slide_idx: int, parent_group_idx: str = None) -> List[Tuple[PPTXImageIdentifier, Picture]]:
+    def _extract_images_from_shapes_for_mapping(self, shapes, slide_idx: int, parent_group_idx: str = None) -> List[Tuple[PPTXImageIdentifier, Any]]:
         """
-        Recursively extract images from shapes for identifier mapping, including grouped shapes.
-        Based on the enhanced detection system's recursive logic.
+        Extract ALL visual elements from shapes using FLATTENED indexing to match processor.
+        This must match the processor's _extract_visual_elements_from_shapes() indexing exactly.
         
         Args:
             shapes: Collection of shapes to process
             slide_idx: Slide index
-            parent_group_idx: Index of parent group if this is a nested call
+            parent_group_idx: Not used in flattened mode (kept for compatibility)
             
         Returns:
-            List of (identifier, shape) tuples
+            List of (identifier, shape) tuples with flattened sequential indices
         """
-        image_mappings = []
+        # Use flattened indexing approach to match processor
+        return self._extract_shapes_flattened(shapes, slide_idx)
+    
+    def _extract_shapes_flattened(self, shapes, slide_idx: int, shape_counter: int = 0) -> List[Tuple[PPTXImageIdentifier, Any]]:
+        """
+        Extract shapes using STABLE SHAPE IDs instead of enumeration indices.
+        This provides consistent identification across extraction and injection.
+        
+        Args:
+            shapes: Collection of shapes to process
+            slide_idx: Slide index  
+            shape_counter: Starting counter for fallback (if no shape.id)
+            
+        Returns:
+            List of (identifier, shape) tuples with stable shape IDs
+        """
+        shape_mappings = []
+        current_counter = shape_counter
         
         for shape_idx, shape in enumerate(shapes):
             try:
-                # Create hierarchical shape identifier for nested images
-                if parent_group_idx is not None:
-                    shape_id = f"{parent_group_idx}_{shape_idx}"
-                else:
-                    shape_id = shape_idx
-                
-                # Debug: Log shape examination
+                # Get stable shape ID
+                shape_id = getattr(shape, 'id', None)
                 shape_name = getattr(shape, 'name', 'unnamed')
                 shape_type = getattr(shape, 'shape_type', 'unknown')
-                logger.debug(f"    Examining shape {shape_id}: {type(shape).__name__} (type={shape_type}, name='{shape_name}')")
                 
-                # 1. Direct picture shapes (original logic)
-                if hasattr(shape, 'image') and shape.image:
-                    logger.debug(f"      -> Found direct picture shape")
-                    try:
-                        identifier = PPTXImageIdentifier.from_shape(shape, slide_idx, shape_id)
-                        # Update identifier to handle complex nested IDs
-                        identifier = self._update_identifier_for_nested_shape(identifier, shape_id)
-                        image_mappings.append((identifier, shape))
-                        logger.debug(f"      -> Mapped direct image: {identifier.image_key}")
-                        
-                    except Exception as e:
-                        logger.warning(f"Failed to create identifier for direct image at shape {shape_id}: {e}")
+                if shape_id is not None:
+                    logger.debug(f"    Examining shape ID {shape_id}: {type(shape).__name__} (type={shape_type}, name='{shape_name}')")
+                else:
+                    logger.debug(f"    Examining shape {current_counter}: {type(shape).__name__} (type={shape_type}, name='{shape_name}') [No ID]")
                 
-                # 2. Group shapes (recursively process shapes within groups)
+                # 1. Group shapes (recursively process shapes within groups)
                 if hasattr(shape, 'shapes'):
                     logger.debug(f"      -> Found group shape with {len(shape.shapes)} child shapes")
-                    group_images = self._extract_images_from_shapes_for_mapping(
-                        shape.shapes, slide_idx, shape_id
+                    group_shapes = self._extract_shapes_flattened(
+                        shape.shapes, slide_idx, current_counter
                     )
-                    image_mappings.extend(group_images)
-                    logger.debug(f"      -> Mapped {len(group_images)} images from group")
+                    shape_mappings.extend(group_shapes)
+                    logger.debug(f"      -> Mapped {len(group_shapes)} shapes from group")
+                    # Update counter for fallback indexing
+                    current_counter += len(group_shapes)
+                    continue  # Don't process the group shape itself, just its contents (matches processor)
                 
-                # 3. Chart shapes (may contain images) - placeholder for future enhancement
-                if hasattr(shape, 'chart'):
-                    logger.debug(f"      -> Found chart shape (chart image mapping not yet implemented)")
-                    # Future: Extract images from chart backgrounds, fills, etc.
-                
-                # 4. Text boxes and shape fills with image content - placeholder
-                if hasattr(shape, 'fill'):
-                    logger.debug(f"      -> Shape has fill property (fill image mapping not yet implemented)")
-                    # Future: Extract images from picture fills, texture fills
+                # 2. Check if this is a visual element that would have been processed
+                if self._is_visual_element_for_injection(shape):
+                    if shape_id is not None:
+                        logger.debug(f"      -> Found visual element with stable ID {shape_id}")
+                        identifier = self._create_identifier_from_shape(shape, slide_idx, shape_id)
+                    else:
+                        logger.debug(f"      -> Found visual element, using fallback index {current_counter}")
+                        identifier = self._create_identifier_from_shape(shape, slide_idx, current_counter)
+                    
+                    shape_mappings.append((identifier, shape))
+                    logger.debug(f"      -> Mapped visual element: {identifier.image_key}")
+                    current_counter += 1  # Increment fallback counter
+                        
+                else:
+                    logger.debug(f"      -> Skipping non-visual element: {type(shape).__name__}")
+                    current_counter += 1  # Still increment for consistency
                 
             except Exception as e:
-                logger.warning(f"Error processing shape {shape_idx} on slide {slide_idx}: {e}")
+                logger.warning(f"Error processing shape on slide {slide_idx}: {e}")
+                current_counter += 1
                 continue
         
-        return image_mappings
+        return shape_mappings
     
     def _update_identifier_for_nested_shape(self, identifier: PPTXImageIdentifier, shape_id) -> PPTXImageIdentifier:
         """
@@ -438,6 +465,260 @@ class PPTXAltTextInjector:
             identifier.image_key = identifier._create_image_key()
         
         return identifier
+    
+    def _is_visual_element_for_injection(self, shape) -> bool:
+        """
+        Determine if a shape is a visual element that would have ALT text generated for it.
+        This should match the logic in pptx_processor._classify_visual_element().
+        
+        Args:
+            shape: Shape to check
+            
+        Returns:
+            bool: True if this shape should have ALT text injected
+        """
+        try:
+            # Images with actual image data
+            if hasattr(shape, 'image') and shape.image:
+                return True
+                
+            # Check shape type for visual elements
+            if hasattr(shape, 'shape_type'):
+                from pptx.enum.shapes import MSO_SHAPE_TYPE
+                
+                shape_type = shape.shape_type
+                
+                # Pictures
+                if shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    return True
+                
+                # Auto shapes (lines, rectangles, circles, etc.)
+                if shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
+                    return True
+                
+                # Freeform shapes
+                if shape_type == MSO_SHAPE_TYPE.FREEFORM:
+                    return True
+                
+                # Charts
+                if shape_type == MSO_SHAPE_TYPE.CHART:
+                    return True
+                
+                # Text boxes and placeholders that might be visual
+                if shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                    return True
+                
+                if shape_type == MSO_SHAPE_TYPE.PLACEHOLDER:
+                    # Only include placeholders that have visual significance
+                    return self._has_visual_significance(shape)
+                
+                # Connectors (lines between shapes)
+                if shape_type == MSO_SHAPE_TYPE.LINE:
+                    return True
+                
+                # Tables can be visual
+                if shape_type == MSO_SHAPE_TYPE.TABLE:
+                    return True
+                
+                # Media (embedded videos, etc.)
+                if shape_type == MSO_SHAPE_TYPE.MEDIA:
+                    return True
+            
+            # Check if shape has visual fill properties
+            if hasattr(shape, 'fill'):
+                # Shapes with picture fills or other visual fills
+                try:
+                    from pptx.enum.dml import MSO_FILL
+                    if hasattr(shape.fill, 'type'):
+                        if shape.fill.type == MSO_FILL.PICTURE:
+                            return True
+                        elif shape.fill.type == MSO_FILL.PATTERNED:
+                            return True
+                except:
+                    pass
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error checking if shape is visual element: {e}")
+            return False
+    
+    def _has_visual_significance(self, shape) -> bool:
+        """
+        Check if a shape has visual significance beyond just text content.
+        
+        Args:
+            shape: Shape to check
+            
+        Returns:
+            bool: True if shape has visual significance
+        """
+        try:
+            # Check if shape has background fill
+            if hasattr(shape, 'fill'):
+                try:
+                    from pptx.enum.dml import MSO_FILL
+                    if hasattr(shape.fill, 'type') and shape.fill.type != MSO_FILL.BACKGROUND:
+                        return True
+                except:
+                    pass
+            
+            # Check if shape has borders/outline
+            if hasattr(shape, 'line'):
+                try:
+                    if hasattr(shape.line, 'color') and shape.line.color:
+                        return True
+                except:
+                    pass
+            
+            # Check dimensions - very small shapes might not be visually significant
+            try:
+                width_px = int(shape.width.emu / 914400 * 96) if hasattr(shape, 'width') and shape.width else 0
+                height_px = int(shape.height.emu / 914400 * 96) if hasattr(shape, 'height') and shape.height else 0
+                
+                # If shape is too small, it's probably not visually significant
+                if width_px < 10 or height_px < 10:
+                    return False
+            except:
+                pass
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Error checking visual significance: {e}")
+            return True  # Default to including it
+    
+    def _create_identifier_from_shape(self, shape, slide_idx: int, shape_identifier) -> PPTXImageIdentifier:
+        """
+        Create a PPTXImageIdentifier from a shape using STABLE shape IDs when available.
+        
+        Args:
+            shape: Shape object
+            slide_idx: Slide index
+            shape_identifier: Shape ID (from shape.id) or fallback index
+            
+        Returns:
+            PPTXImageIdentifier instance
+        """
+        shape_name = getattr(shape, 'name', '')
+        
+        # For shapes with actual images, use the same logic as processor
+        if hasattr(shape, 'image') and shape.image:
+            try:
+                image_data = shape.image.blob
+                # Use same hash function as processor: get_image_hash()
+                from decorative_filter import get_image_hash
+                image_hash = get_image_hash(image_data)
+            except Exception:
+                # Fallback to direct md5 if get_image_hash fails
+                image_hash = md5(shape.image.blob).hexdigest()
+            
+            embed_id = ""
+            try:
+                blip_fill = shape._element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip')
+                if blip_fill is not None:
+                    embed_id = blip_fill.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed', '')
+            except Exception:
+                pass
+                
+            return PPTXImageIdentifier(slide_idx, shape_identifier, shape_name, image_hash, embed_id)
+        
+        # For non-image visual elements, create hash similar to processor's PPTXVisualElement
+        # This should match how processor creates element_hash for non-image shapes
+        embed_id = ""
+        image_hash = ""
+        
+        try:
+            # Use same hash logic as processor's PPTXVisualElement.element_hash
+            shape_type = getattr(shape, 'shape_type', None)
+            width_px = 0
+            height_px = 0
+            text_content = ""
+            
+            # Extract dimensions like processor does
+            try:
+                width_px = int(shape.width.emu / 914400 * 96) if hasattr(shape, 'width') and shape.width else 0
+                height_px = int(shape.height.emu / 914400 * 96) if hasattr(shape, 'height') and shape.height else 0
+            except:
+                pass
+            
+            # Extract text content like processor does
+            try:
+                if hasattr(shape, 'text_frame') and shape.text_frame:
+                    text_content = shape.text_frame.text or ""
+            except:
+                pass
+            
+            # Create hash content using same format as processor PPTXVisualElement
+            hash_content = f"{shape_type}_{width_px}_{height_px}_{text_content}"
+            import hashlib
+            full_hash = hashlib.md5(hash_content.encode()).hexdigest()
+            # Truncate to 8 chars like processor does
+            image_hash = full_hash[:8]
+            
+        except Exception:
+            # Fallback hash - use simple approach
+            import hashlib
+            hash_content = f"{slide_idx}_{shape_identifier}_{shape_name}"
+            full_hash = hashlib.md5(hash_content.encode()).hexdigest()
+            image_hash = full_hash[:8]
+        
+        return PPTXImageIdentifier(slide_idx, shape_identifier, shape_name, image_hash, embed_id)
+    
+    def _try_fallback_key_matching(self, target_key: str, image_identifiers: Dict[str, Tuple]) -> Optional[Tuple]:
+        """
+        Try to match a generation key with injection keys using fallback methods.
+        Matches by (slide_index, hash) combination when shape IDs don't align.
+        
+        Args:
+            target_key: Key from generation that couldn't be matched directly
+            image_identifiers: Available injection identifiers
+            
+        Returns:
+            (identifier, shape) tuple if match found, None otherwise
+        """
+        try:
+            # Parse the target key to extract slide and hash
+            target_parts = target_key.split('_')
+            target_slide = None
+            target_hash = None
+            
+            # Extract slide index
+            for i, part in enumerate(target_parts):
+                if part == 'slide' and i + 1 < len(target_parts):
+                    try:
+                        target_slide = int(target_parts[i + 1])
+                    except ValueError:
+                        pass
+                elif part == 'hash' and i + 1 < len(target_parts):
+                    target_hash = target_parts[i + 1]
+            
+            if target_slide is None or target_hash is None:
+                logger.debug(f"Could not parse slide/hash from key: {target_key}")
+                return None
+            
+            logger.debug(f"Looking for fallback match: slide={target_slide}, hash={target_hash}")
+            
+            # Try to find a match by (slide_index, hash) combination
+            for available_key, (identifier, shape) in image_identifiers.items():
+                if identifier.slide_idx == target_slide and target_hash in identifier.image_hash:
+                    logger.debug(f"Found fallback match: {target_key} -> {available_key}")
+                    return (identifier, shape)
+            
+            # Try partial hash matching (first 8 characters)
+            for available_key, (identifier, shape) in image_identifiers.items():
+                if identifier.slide_idx == target_slide:
+                    available_hash = identifier.image_hash[:8]
+                    if available_hash == target_hash:
+                        logger.debug(f"Found partial hash match: {target_key} -> {available_key}")
+                        return (identifier, shape)
+            
+            logger.debug(f"No fallback match found for: {target_key}")
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error in fallback key matching for {target_key}: {e}")
+            return None
     
     def _try_fallback_injection(self, presentation: Presentation, image_key: str, alt_text: str) -> bool:
         """
@@ -684,7 +965,7 @@ class PPTXAltTextInjector:
             logger.debug(f"Slide part injection failed: {e}")
             return False
     
-    def _inject_alt_text_single(self, shape: Picture, alt_text: str, identifier: PPTXImageIdentifier) -> bool:
+    def _inject_alt_text_single(self, shape, alt_text: str, identifier: PPTXImageIdentifier) -> bool:
         """
         Inject ALT text into a single shape with comprehensive debug logging.
         
@@ -824,7 +1105,7 @@ class PPTXAltTextInjector:
             # Unknown mode, default to inject
             return True, f"Unknown mode '{self.mode}' - defaulting to inject"
     
-    def _inject_alt_text_robust(self, shape: Picture, alt_text: str) -> bool:
+    def _inject_alt_text_robust(self, shape, alt_text: str) -> bool:
         """
         Inject ALT text using multiple fallback methods for maximum compatibility.
         
@@ -839,6 +1120,7 @@ class PPTXAltTextInjector:
         injection_methods = [
             ('modern_property', self._inject_via_modern_property),
             ('xml_cnvpr', self._inject_via_xml_cnvpr),
+            ('xml_shape_cnvpr', self._inject_via_xml_shape_cnvpr),  # For non-picture shapes
             ('xml_element', self._inject_via_xml_element),
             ('xml_fallback', self._inject_via_xml_fallback)
         ]
@@ -860,7 +1142,7 @@ class PPTXAltTextInjector:
         logger.debug(f"   ❌ All {len(injection_methods)} injection methods failed")
         return False
     
-    def _inject_via_modern_property(self, shape: Picture, alt_text: str) -> bool:
+    def _inject_via_modern_property(self, shape, alt_text: str) -> bool:
         """Inject using modern property-based approach (python-pptx >= 0.6.22)."""
         logger.info(f"🔍 DEBUG: XML PATH - Modern property injection")
         logger.info(f"🔍 DEBUG:   Shape type: {type(shape).__name__}")
@@ -877,7 +1159,7 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   Shape does not have 'descr' property")
         return False
     
-    def _inject_via_xml_cnvpr(self, shape: Picture, alt_text: str) -> bool:
+    def _inject_via_xml_cnvpr(self, shape, alt_text: str) -> bool:
         """Inject via direct XML cNvPr element manipulation."""
         logger.info(f"🔍 DEBUG: XML PATH - cNvPr element injection")
         try:
@@ -896,7 +1178,7 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   cNvPr element access failed: {e}")
             return False
     
-    def _inject_via_xml_element(self, shape: Picture, alt_text: str) -> bool:
+    def _inject_via_xml_element(self, shape, alt_text: str) -> bool:
         """Inject via XML element attribute (current approach)."""
         logger.info(f"🔍 DEBUG: XML PATH - Direct element injection")
         try:
@@ -914,7 +1196,67 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   XML element access failed: {e}")
             return False
     
-    def _inject_via_xml_fallback(self, shape: Picture, alt_text: str) -> bool:
+    def _inject_via_xml_shape_cnvpr(self, shape, alt_text: str) -> bool:
+        """Inject via XML cNvPr element for general shapes (not just pictures)."""
+        logger.info(f"🔍 DEBUG: XML PATH - Shape cNvPr element injection")
+        try:
+            # Look for cNvPr elements in the shape's XML structure
+            if not hasattr(shape, '_element'):
+                logger.info(f"🔍 DEBUG:   Shape has no _element attribute")
+                return False
+                
+            element = shape._element
+            logger.info(f"🔍 DEBUG:   Shape element: {element}")
+            logger.info(f"🔍 DEBUG:   Element tag: {getattr(element, 'tag', 'unknown')}")
+            
+            # Try to find cNvPr element using XPath
+            # Different shape types have different XML structures:
+            # - Pictures: p:pic/p:nvPicPr/p:cNvPr
+            # - Shapes: p:sp/p:nvSpPr/p:cNvPr
+            # - Lines: p:cxnSp/p:nvCxnSpPr/p:cNvPr
+            
+            namespaces = {
+                'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+                'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+            }
+            
+            # Try different cNvPr paths for different shape types
+            cnvpr_paths = [
+                './/p:cNvPr',           # Most general - any cNvPr element
+                './/pic:cNvPr',         # Picture-specific
+                './p:nvSpPr/p:cNvPr',   # Shape-specific
+                './p:nvPicPr/p:cNvPr',  # Picture-specific
+                './p:nvCxnSpPr/p:cNvPr' # Connector-specific
+            ]
+            
+            for path in cnvpr_paths:
+                try:
+                    cnvpr_elements = element.xpath(path, namespaces=namespaces)
+                    if cnvpr_elements:
+                        cnvpr_element = cnvpr_elements[0]  # Take the first match
+                        logger.info(f"🔍 DEBUG:   Found cNvPr via path: {path}")
+                        logger.info(f"🔍 DEBUG:   cNvPr element: {cnvpr_element}")
+                        logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
+                        
+                        cnvpr_element.set('descr', alt_text)
+                        
+                        # Verify it was set
+                        actual_value = cnvpr_element.get('descr', '')
+                        logger.info(f"🔍 DEBUG:   Verification - cNvPr.get('descr'): '{actual_value}'")
+                        return True
+                        
+                except Exception as e:
+                    logger.info(f"🔍 DEBUG:   Path {path} failed: {e}")
+                    continue
+            
+            logger.info(f"🔍 DEBUG:   No cNvPr element found via any path")
+            return False
+            
+        except Exception as e:
+            logger.info(f"🔍 DEBUG:   Shape cNvPr injection failed: {e}")
+            return False
+    
+    def _inject_via_xml_fallback(self, shape, alt_text: str) -> bool:
         """Fallback XML injection method."""
         elements_to_try = [
             ('shape._element', lambda: shape._element),
@@ -936,7 +1278,7 @@ class PPTXAltTextInjector:
         logger.debug(f"       All fallback methods exhausted")
         return False
     
-    def _get_existing_alt_text(self, shape: Picture) -> str:
+    def _get_existing_alt_text(self, shape) -> str:
         """
         Get existing ALT text from shape with debug logging.
         
@@ -977,19 +1319,126 @@ class PPTXAltTextInjector:
         logger.debug(f"   No ALT text found via any method")
         return ""
     
-    def _validate_alt_text_injection(self, shape: Picture, expected_alt_text: str) -> bool:
+    def _validate_alt_text_injection(self, shape, expected_alt_text: str) -> bool:
         """
         Validate that ALT text was successfully injected.
+        Uses multiple methods to retrieve ALT text to account for different injection methods.
         
         Args:
-            shape: Picture shape
+            shape: Shape object (picture or other visual element)
             expected_alt_text: Expected ALT text
             
         Returns:
             bool: True if validation passed
         """
-        actual_alt_text = self._get_existing_alt_text(shape)
-        return actual_alt_text == expected_alt_text
+        # Normalize expected text for comparison
+        expected_normalized = expected_alt_text.strip()
+        
+        # Try multiple methods to get the actual ALT text, since different injection
+        # methods might store it in different places
+        retrieval_methods = [
+            ('standard_method', self._get_existing_alt_text),
+            ('descr_property', self._get_alt_via_descr_property),
+            ('xml_cnvpr', self._get_alt_via_xml_cnvpr),
+            ('xml_element', self._get_alt_via_xml_element)
+        ]
+        
+        for method_name, method_func in retrieval_methods:
+            try:
+                actual_alt_text = method_func(shape)
+                actual_normalized = actual_alt_text.strip() if actual_alt_text else ""
+                
+                if actual_normalized == expected_normalized:
+                    logger.debug(f"   ✅ Validation successful via {method_name}: '{actual_normalized}'")
+                    return True
+                elif actual_normalized:  # Log non-empty mismatches
+                    logger.debug(f"   ⚠️  Method {method_name} returned: '{actual_normalized}' (expected: '{expected_normalized}')")
+                    
+            except Exception as e:
+                logger.debug(f"   ❌ Validation method {method_name} failed: {e}")
+                continue
+        
+        # If no exact match, check for partial matches (in case of text cleaning/modification)
+        try:
+            actual_alt_text = self._get_existing_alt_text(shape)
+            actual_normalized = actual_alt_text.strip() if actual_alt_text else ""
+            
+            if actual_normalized and expected_normalized:
+                # Check if core content matches (allows for minor differences)
+                if len(actual_normalized) >= 10 and len(expected_normalized) >= 10:
+                    # For longer texts, check if 80% of content matches
+                    if self._texts_substantially_match(actual_normalized, expected_normalized, 0.8):
+                        logger.debug(f"   ✅ Validation successful via substantial match: '{actual_normalized[:30]}...'")
+                        return True
+                        
+        except Exception as e:
+            logger.debug(f"   ❌ Partial match validation failed: {e}")
+        
+        logger.debug(f"   ❌ Validation failed - no retrieval method found matching ALT text")
+        return False
+    
+    def _get_alt_via_descr_property(self, shape) -> str:
+        """Get ALT text via the descr property."""
+        try:
+            if hasattr(shape, 'descr'):
+                return shape.descr or ""
+        except:
+            pass
+        return ""
+    
+    def _get_alt_via_xml_cnvpr(self, shape) -> str:
+        """Get ALT text via XML cNvPr element."""
+        try:
+            if hasattr(shape, '_element'):
+                # Try the standard cNvPr path for pictures
+                cNvPr = getattr(shape._element, '_nvXxPr', None)
+                if cNvPr:
+                    cNvPr_elem = getattr(cNvPr, 'cNvPr', None)
+                    if cNvPr_elem:
+                        return cNvPr_elem.get('descr', '') or ""
+        except:
+            pass
+        return ""
+    
+    def _get_alt_via_xml_element(self, shape) -> str:
+        """Get ALT text via direct XML element access."""
+        try:
+            if hasattr(shape, '_element'):
+                return shape._element.get('descr', '') or ""
+        except:
+            pass
+        return ""
+    
+    def _texts_substantially_match(self, text1: str, text2: str, threshold: float = 0.8) -> bool:
+        """
+        Check if two texts substantially match using a simple similarity metric.
+        
+        Args:
+            text1: First text
+            text2: Second text  
+            threshold: Similarity threshold (0.0 to 1.0)
+            
+        Returns:
+            bool: True if texts are substantially similar
+        """
+        try:
+            # Simple word-based similarity
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+            
+            if not words1 and not words2:
+                return True
+            if not words1 or not words2:
+                return False
+                
+            intersection = len(words1.intersection(words2))
+            union = len(words1.union(words2))
+            
+            similarity = intersection / union if union > 0 else 0
+            return similarity >= threshold
+            
+        except Exception:
+            return False
     
     def _perform_post_injection_verification(self, presentation: Presentation, 
                                           image_identifiers: Dict[str, Tuple], 

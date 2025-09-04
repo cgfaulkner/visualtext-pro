@@ -1041,12 +1041,12 @@ class FlexibleAltGenerator:
                     logger.debug(f"Provider {provider_name} failed text generation: {e}")
                     continue
             
-            # If all providers fail, create a simple descriptive text
+            # If all providers fail, create a descriptive fallback using prompt information
             logger.warning("All providers failed for text generation, creating fallback description")
             
-            # Extract basic information from the prompt to create a simple description
+            # Extract detailed information from the prompt to create a descriptive fallback
             if "shape:" in prompt.lower():
-                return "PowerPoint shape element"
+                return self._create_shape_fallback_from_prompt(prompt)
             elif "chart" in prompt.lower():
                 return "Chart or graph element"
             elif "text" in prompt.lower():
@@ -1059,6 +1059,94 @@ class FlexibleAltGenerator:
         except Exception as e:
             logger.error(f"Error in generate_text_response: {e}")
             return None
+    
+    def _create_shape_fallback_from_prompt(self, prompt: str) -> str:
+        """
+        Create descriptive fallback ALT text for shapes by parsing the prompt information.
+        Replaces generic 'PowerPoint shape element' with descriptive text.
+        
+        Args:
+            prompt: The original prompt containing shape information
+            
+        Returns:
+            Descriptive ALT text for the shape
+        """
+        try:
+            # Extract shape description from prompt (format: "Shape: A [element_type] sized WxH pixels...")
+            shape_info = ""
+            if "shape:" in prompt.lower():
+                # Find the line that starts with "Shape:"
+                lines = prompt.split('\n')
+                for line in lines:
+                    if line.strip().lower().startswith('shape:'):
+                        shape_info = line.strip()[6:].strip()  # Remove "Shape:" prefix
+                        break
+            
+            if not shape_info:
+                return "PowerPoint shape element"
+            
+            # Parse information from shape description
+            shape_type = "shape"
+            dimensions = ""
+            is_line_type = False
+            
+            # Extract element type (e.g., "A text_box", "A line", "A auto_shape", "A connector")
+            # Handle both " a " (space-separated) and starting with "a " patterns
+            shape_info_lower = shape_info.lower()
+            if shape_info_lower.startswith("a "):
+                # Pattern: "A connector sized..." -> get "connector"
+                type_part = shape_info_lower.split()[1]  # Get second word
+            elif " a " in shape_info_lower:
+                # Pattern: "...contains a text_box..." -> get "text_box" 
+                parts = shape_info_lower.split(" a ", 1)
+                if len(parts) > 1:
+                    type_part = parts[1].split()[0]
+            else:
+                type_part = None
+                
+            if type_part:
+                # Clean up the type name
+                if type_part == "text_box":
+                    shape_type = "text box"
+                elif type_part == "auto_shape":
+                    shape_type = "shape"
+                elif type_part == "connector":
+                    shape_type = "line"  # Connectors are lines
+                    is_line_type = True
+                elif type_part == "line":
+                    shape_type = "line"
+                    is_line_type = True
+                else:
+                    shape_type = type_part.replace('_', ' ')
+            
+            # Extract dimensions (pattern: "sized 123x456 pixels" or "123x456 pixels")
+            import re
+            dimension_pattern = r'(\d+)x(\d+)\s*pixels?'
+            match = re.search(dimension_pattern, shape_info, re.IGNORECASE)
+            if match:
+                width, height = match.groups()
+                dimensions = f"({width}x{height}px)"
+                
+                # Determine line orientation for lines
+                if is_line_type and width and height:
+                    width_px = int(width)
+                    height_px = int(height)
+                    if width_px > height_px * 3:  # Much wider than tall
+                        shape_type = "horizontal line"
+                    elif height_px > width_px * 3:  # Much taller than wide
+                        shape_type = "vertical line"
+                    elif abs(width_px - height_px) < min(width_px, height_px) * 0.2:  # Roughly equal
+                        shape_type = "diagonal line"
+            
+            # Create descriptive ALT text
+            if dimensions:
+                return f"This is a PowerPoint shape. It is a {shape_type} {dimensions}".strip()
+            else:
+                return f"This is a PowerPoint shape. It is a {shape_type}".strip()
+                
+        except Exception as e:
+            logger.debug(f"Error creating shape fallback from prompt: {e}")
+            return "PowerPoint shape element"  # Fallback to generic if parsing fails
 
 
 # Backwards compatibility functions
