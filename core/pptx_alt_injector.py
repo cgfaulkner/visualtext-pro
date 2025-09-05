@@ -194,6 +194,51 @@ class PPTXAltTextInjector:
         logger.debug(f"Skip ALT text if: {self.skip_alt_text_if}")
         logger.debug(f"Mode: {self.mode}")
     
+    def _normalize_alt_universal(self, txt: str) -> str:
+        """
+        Universal normalization applied before ALL ALT text injections.
+        This ensures deduplication runs consistently across all injection paths.
+        
+        Args:
+            txt: ALT text that may contain duplications
+            
+        Returns:
+            Cleaned and normalized ALT text
+        """
+        if not txt or not txt.strip():
+            return ""
+        
+        import re
+        
+        # Normalize whitespace
+        t = " ".join(txt.split())
+        
+        # Remove duplicate size preambles like "A shape (99x99px) This is a PowerPoint shape. It is a shape (99x99px)"
+        # Pattern: "A (shape|line|connector) (NxNpx) This is a PowerPoint shape. It is a (shape|line|connector) (NxNpx)"
+        t = re.sub(r"^(A (?:shape|line|connector) \(\d+x\d+px\))\s+(This is a PowerPoint shape\..*?)\s+\1", r"\2", t, flags=re.IGNORECASE)
+        
+        # Remove duplicate shape descriptions within the same text
+        # Pattern: "This is a PowerPoint shape. It is a shape (99x99px). This is a PowerPoint shape. It is a shape (99x99px)"
+        t = re.sub(r"(This is a PowerPoint shape\.[^.]*\.)\s*\1", r"\1", t, flags=re.IGNORECASE)
+        
+        # Remove duplicate size information within shape descriptions
+        # Pattern: "This is a PowerPoint shape. It is a shape (99x99px) (99x99px)"
+        t = re.sub(r"(\(\d+x\d+px\))\s*\1", r"\1", t)
+        
+        # Remove redundant "This is a PowerPoint shape" if it appears multiple times
+        parts = t.split("This is a PowerPoint shape")
+        if len(parts) > 2:  # More than one occurrence
+            # Keep the first occurrence and the most detailed part
+            detailed_part = max(parts[1:], key=len) if len(parts) > 1 else parts[1] if len(parts) > 1 else ""
+            t = f"This is a PowerPoint shape{detailed_part}"
+        
+        # Clean up extra spaces and periods
+        t = re.sub(r'\s+', ' ', t)  # Multiple spaces -> single space
+        t = re.sub(r'\.+', '.', t)  # Multiple periods -> single period
+        t = re.sub(r'\s+\.', '.', t)  # "space." -> "."
+        
+        return t.strip()
+    
     def _register_namespaces(self):
         """Register required XML namespaces."""
         try:
@@ -828,7 +873,9 @@ class PPTXAltTextInjector:
                         cnvpr_element = cnvpr_elements[0]
                         # Verify this matches our identifier if possible
                         if self._verify_element_matches_identifier(cnvpr_element, identifier):
-                            cnvpr_element.set('descr', alt_text)
+                            # Apply universal normalization
+                            normalized_alt_text = self._normalize_alt_universal(alt_text)
+                            cnvpr_element.set('descr', normalized_alt_text)
                             logger.debug(f"Injected ALT text via relationship {rel_id}")
                             return True
             
@@ -892,7 +939,9 @@ class PPTXAltTextInjector:
             # Try to match by position or other identifying characteristics
             for i, cnvpr in enumerate(cnvpr_elements):
                 if self._element_matches_shape_index(cnvpr, identifier.shape_idx, i):
-                    cnvpr.set('descr', alt_text)
+                    # Apply universal normalization
+                    normalized_alt_text = self._normalize_alt_universal(alt_text)
+                    cnvpr.set('descr', normalized_alt_text)
                     logger.debug(f"Injected ALT text via XML manipulation at index {i}")
                     return True
             
@@ -980,6 +1029,13 @@ class PPTXAltTextInjector:
         try:
             logger.debug(f"🔍 Processing injection for {identifier.image_key}")
             logger.debug(f"   Generated ALT text: '{alt_text}'")
+            
+            # CRITICAL FIX: Apply universal normalization before ALL injections
+            original_alt_text = alt_text
+            alt_text = self._normalize_alt_universal(alt_text)
+            
+            if alt_text != original_alt_text:
+                logger.debug(f"   🔧 Normalized ALT text: '{original_alt_text}' -> '{alt_text}'")
             
             # Check if we should skip this ALT text
             if self._should_skip_alt_text(alt_text):
@@ -1150,7 +1206,7 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   Using shape.descr property (modern approach)")
             logger.info(f"🔍 DEBUG:   Setting ALT text: '{alt_text}'")
             
-            # Set description (full ALT text)
+            # Set description (full ALT text) - normalization already applied in _inject_alt_text_single
             shape.descr = alt_text
             
             # Set title (short version for Reading Order)

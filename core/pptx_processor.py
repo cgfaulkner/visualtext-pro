@@ -412,6 +412,15 @@ class PPTXAccessibilityProcessor:
                     alt_text, failure_reason = self._generate_alt_text_for_visual_element(visual_element, debug)
                     
                     if alt_text and alt_text.strip() and alt_text.strip() != "":
+                        # Check for LLaVA errors and handle them
+                        if self._is_llava_error(alt_text.strip()):
+                            # LLaVA returned error - try fallback
+                            fallback_description = self._handle_llava_error_with_fallback(visual_element, debug)
+                            if fallback_description:
+                                alt_text = fallback_description
+                                if debug:
+                                    logger.info(f"🔄 DEBUG: LLaVA error handled with fallback for {visual_element.element_key}")
+                        
                         # Successfully generated valid ALT text - normalize to remove duplications
                         normalized_alt_text = self._normalize_alt(alt_text.strip())
                         alt_text_mapping[visual_element.element_key] = {
@@ -431,7 +440,7 @@ class PPTXAccessibilityProcessor:
                         
                         # Instead of generic "PowerPoint shape element", use descriptive text
                         if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
-                            fallback_description = describe_shape_with_details(visual_element.shape)
+                            fallback_description = self._create_enhanced_fallback_description(visual_element)
                             
                             # Add bypass annotation for session data visibility
                             bypass_reason = self._check_element_bypass(visual_element)
@@ -497,7 +506,7 @@ class PPTXAccessibilityProcessor:
                     # Try fallback description even for exceptions on shapes
                     if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
                         try:
-                            fallback_description = describe_shape_with_details(visual_element.shape)
+                            fallback_description = self._create_enhanced_fallback_description(visual_element)
                             
                             # Add bypass annotation for session data visibility
                             bypass_reason = self._check_element_bypass(visual_element)
@@ -1721,22 +1730,38 @@ class PPTXAccessibilityProcessor:
                     
                     # Enhanced group processing logging
                     logger.info(f"🔧 Processing group_id={shape_id}, depth={depth}, children={len(shape.shapes)}")
+                    if debug:
+                        logger.debug(f"🔍 {indent}Group structure analysis:")
+                        logger.debug(f"🔍 {indent}  Depth: {depth}")
+                        logger.debug(f"🔍 {indent}  Shape ID: {shape_id}")
+                        logger.debug(f"🔍 {indent}  Children count: {len(shape.shapes)}")
+                        logger.debug(f"🔍 {indent}  Shape type: {type(shape).__name__}")
+                        if hasattr(shape, 'name'):
+                            logger.debug(f"🔍 {indent}  Shape name: '{shape.name}'")
+                        if hasattr(shape, 'width') and hasattr(shape, 'height'):
+                            try:
+                                width_px = int(shape.width.emu / 914400 * 96) if shape.width else 0
+                                height_px = int(shape.height.emu / 914400 * 96) if shape.height else 0
+                                logger.debug(f"🔍 {indent}  Dimensions: {width_px}x{height_px}px")
+                            except:
+                                pass
                     
                     if debug:
                         logger.debug(f"🔍 {indent}Found group (ID: {shape_id}) with {len(shape.shapes)} children")
                     
-                    # Analyze group children to determine if we should roll up ALT text
-                    child_analysis = self._analyze_group_children_for_rollup(
-                        shape.shapes, slide_idx, visual_elements, debug, depth + 1
-                    )
-                    
-                    # Recursively process nested groups first
+                    # CRITICAL FIX: Process nested groups FIRST before analyzing current group
+                    # This ensures deep nested groups get their ALT text before parent groups analyze them
                     nested_groups_found, nested_groups_with_alt, nested_children_marked = self._process_slide_groups_for_rollup(
                         shape.shapes, slide_idx, visual_elements, debug, depth + 1
                     )
                     groups_found += nested_groups_found
                     groups_with_alt += nested_groups_with_alt
                     children_marked_decorative += nested_children_marked
+                    
+                    # Now analyze group children (which may now include processed nested groups with ALT text)
+                    child_analysis = self._analyze_group_children_for_rollup(
+                        shape.shapes, slide_idx, visual_elements, debug, depth + 1
+                    )
                     
                     # Decide if this group should get parent ALT text
                     should_create_parent_alt, parent_alt_text, children_to_mark_decorative = self._decide_group_alt_rollup(
@@ -1747,9 +1772,18 @@ class PPTXAccessibilityProcessor:
                         groups_with_alt += 1
                         children_marked_decorative += len(children_to_mark_decorative)
                         
+                        # Enhanced roll-up success logging
+                        logger.info(f"✅ Group {shape_id} at depth {depth} received ALT text: '{parent_alt_text[:50]}...'")
+                        if len(children_to_mark_decorative) > 0:
+                            logger.info(f"   🎯 Marked {len(children_to_mark_decorative)} children as decorative")
+                        
                         if debug:
                             logger.debug(f"🔍 {indent}✅ Rolling up ALT to group parent: '{parent_alt_text}'")
                             logger.debug(f"🔍 {indent}   Will mark {len(children_to_mark_decorative)} children as decorative")
+                            logger.debug(f"🔍 {indent}   Child analysis summary:")
+                            logger.debug(f"🔍 {indent}     Meaningful children: {len(child_analysis.get('meaningful_children', []))}")
+                            logger.debug(f"🔍 {indent}     Text-only children: {len(child_analysis.get('text_only_children', []))}")
+                            logger.debug(f"🔍 {indent}     Decorative children: {len(child_analysis.get('decorative_children', []))}")
                         
                         # Inject ALT text directly into the group parent XML
                         self._inject_group_parent_alt_text(shape, parent_alt_text, debug, indent)
@@ -1757,8 +1791,14 @@ class PPTXAccessibilityProcessor:
                         # Mark redundant children as decorative
                         self._mark_group_children_decorative(children_to_mark_decorative, debug, indent)
                     else:
+                        # Enhanced logging for groups without roll-up
+                        logger.info(f"❌ Group {shape_id} at depth {depth} did not receive ALT text")
                         if debug:
                             logger.debug(f"🔍 {indent}⏭️ Group doesn't need parent ALT text")
+                            logger.debug(f"🔍 {indent}   Child analysis summary:")
+                            logger.debug(f"🔍 {indent}     Meaningful children: {len(child_analysis.get('meaningful_children', []))}")
+                            logger.debug(f"🔍 {indent}     Text-only children: {len(child_analysis.get('text_only_children', []))}")
+                            logger.debug(f"🔍 {indent}     Decorative children: {len(child_analysis.get('decorative_children', []))}")
                             
             except Exception as e:
                 if debug:
@@ -4985,6 +5025,129 @@ class PPTXAccessibilityProcessor:
         t = re.sub(r'\s+\.', '.', t)  # "space." -> "."
         
         return t.strip()
+    
+    def _is_llava_error(self, description: str) -> bool:
+        """
+        Check if LLaVA returned an error response.
+        
+        Args:
+            description: Generated description to check
+            
+        Returns:
+            bool: True if this is an error response
+        """
+        if not description or not description.strip():
+            return True
+        
+        error_patterns = [
+            'error', 'failed', 'cannot', 'unable', 'sorry',
+            'i cannot', 'i am unable', 'no description',
+            'not available', 'description not available',
+            'image could not be processed', 'cannot describe',
+            'unable to describe', 'failed to process',
+            'api error', 'request failed', 'timeout'
+        ]
+        
+        description_lower = description.lower().strip()
+        return any(pattern in description_lower for pattern in error_patterns)
+    
+    def _handle_llava_error_with_fallback(self, element, debug: bool = False) -> str:
+        """
+        Handle LLaVA errors with retry and fallback chain.
+        
+        Args:
+            element: Visual element that failed
+            debug: Enable debug logging
+            
+        Returns:
+            str: Fallback description or empty string
+        """
+        if debug:
+            logger.debug(f"    🔄 Handling LLaVA error for {element.element_key}")
+        
+        # For now, return enhanced fallback
+        # TODO: Could add retry with simplified prompt here
+        return self._create_enhanced_fallback_description(element)
+    
+    def _create_enhanced_fallback_description(self, element) -> str:
+        """
+        Create enhanced fallback description with better freeform handling.
+        
+        Args:
+            element: Visual element to describe
+            
+        Returns:
+            str: Enhanced fallback description
+        """
+        try:
+            # Handle freeform shapes explicitly
+            if hasattr(element.shape, 'shape_type'):
+                from pptx.enum.shapes import MSO_SHAPE_TYPE
+                if element.shape.shape_type == MSO_SHAPE_TYPE.FREEFORM:
+                    # Enhanced freeform description
+                    width_px = getattr(element, 'width_px', 0)
+                    height_px = getattr(element, 'height_px', 0)
+                    size_info = f"({width_px}x{height_px}px)" if width_px > 0 and height_px > 0 else ""
+                    
+                    # Try to detect semantic meaning from context
+                    semantic_hint = self._detect_freeform_semantic_meaning(element)
+                    if semantic_hint:
+                        return f"Freeform shape representing {semantic_hint} {size_info}".strip()
+                    else:
+                        return f"PowerPoint freeform shape {size_info}".strip()
+            
+            # Use existing describe_shape_with_details for other shapes
+            return describe_shape_with_details(element.shape)
+            
+        except Exception as e:
+            logger.debug(f"Error creating enhanced fallback: {e}")
+            return f"PowerPoint visual element on slide {element.slide_idx + 1}"
+    
+    def _detect_freeform_semantic_meaning(self, element) -> str:
+        """
+        Detect semantic meaning of freeform shapes based on context.
+        
+        Args:
+            element: Visual element with freeform shape
+            
+        Returns:
+            str: Semantic description or empty string
+        """
+        try:
+            # Check if it's part of a group that might indicate function
+            slide_text = getattr(element, 'slide_text', '').lower()
+            shape_name = getattr(element.shape, 'name', '').lower()
+            
+            # Common icon patterns
+            icon_patterns = {
+                'arrow': ['arrow', 'direction', 'next', 'previous'],
+                'star': ['star', 'rating', 'favorite'],
+                'heart': ['heart', 'love', 'like'],
+                'check': ['check', 'tick', 'correct', 'done'],
+                'cross': ['cross', 'x', 'close', 'delete'],
+                'warning': ['warning', 'alert', 'caution'],
+                'info': ['info', 'information', 'help']
+            }
+            
+            for icon_type, keywords in icon_patterns.items():
+                if any(keyword in shape_name for keyword in keywords):
+                    return f"an {icon_type} icon"
+                if any(keyword in slide_text for keyword in keywords):
+                    return f"an {icon_type} icon"
+            
+            # Fallback based on size
+            width_px = getattr(element, 'width_px', 0)
+            height_px = getattr(element, 'height_px', 0)
+            
+            if width_px < 50 and height_px < 50:
+                return "a small icon or symbol"
+            elif width_px > 200 or height_px > 200:
+                return "a large decorative shape"
+            else:
+                return "an icon or symbol"
+                
+        except Exception:
+            return ""
     
     def _deduplicate_format_references(self, alt_text: str, format_name: str) -> str:
         """
