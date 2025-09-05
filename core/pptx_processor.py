@@ -412,9 +412,10 @@ class PPTXAccessibilityProcessor:
                     alt_text, failure_reason = self._generate_alt_text_for_visual_element(visual_element, debug)
                     
                     if alt_text and alt_text.strip() and alt_text.strip() != "":
-                        # Successfully generated valid ALT text
+                        # Successfully generated valid ALT text - normalize to remove duplications
+                        normalized_alt_text = self._normalize_alt(alt_text.strip())
                         alt_text_mapping[visual_element.element_key] = {
-                            'alt_text': alt_text.strip(),
+                            'alt_text': normalized_alt_text,
                             'shape': visual_element.shape,
                             'slide_idx': visual_element.slide_idx,
                             'shape_idx': visual_element.shape_idx
@@ -431,17 +432,42 @@ class PPTXAccessibilityProcessor:
                         # Instead of generic "PowerPoint shape element", use descriptive text
                         if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
                             fallback_description = describe_shape_with_details(visual_element.shape)
-                            alt_text_mapping[visual_element.element_key] = {
-                                'alt_text': fallback_description,
-                                'shape': visual_element.shape,
-                                'slide_idx': visual_element.slide_idx,
-                                'shape_idx': visual_element.shape_idx
-                            }
-                            result['processed_visual_elements'] += 1
-                            if debug:
-                                logger.info(f"✅ DEBUG: Used fallback description for {visual_element.element_key}: {fallback_description}")
+                            
+                            # Add bypass annotation for session data visibility
+                            bypass_reason = self._check_element_bypass(visual_element)
+                            if bypass_reason:
+                                # Mark as bypassed for session data
+                                annotated_description = f"[BYPASS: {bypass_reason}] {fallback_description}"
+                                normalized_description = self._normalize_alt(annotated_description)
+                                alt_text_mapping[visual_element.element_key] = {
+                                    'alt_text': normalized_description,
+                                    'shape': visual_element.shape,
+                                    'slide_idx': visual_element.slide_idx,
+                                    'shape_idx': visual_element.shape_idx,
+                                    'bypass_reason': bypass_reason,
+                                    'bypassed': True,
+                                    'fallback_used': True
+                                }
+                                if debug:
+                                    logger.info(f"🚧 DEBUG: Used bypassed fallback for {visual_element.element_key}: {bypass_reason}")
+                                else:
+                                    logger.info(f"Used bypassed fallback for {visual_element.element_key}: {bypass_reason}")
                             else:
-                                logger.info(f"Used fallback description for {visual_element.element_key}: {fallback_description}")
+                                # Normal fallback without bypass
+                                normalized_description = self._normalize_alt(fallback_description)
+                                alt_text_mapping[visual_element.element_key] = {
+                                    'alt_text': normalized_description,
+                                    'shape': visual_element.shape,
+                                    'slide_idx': visual_element.slide_idx,
+                                    'shape_idx': visual_element.shape_idx,
+                                    'fallback_used': True
+                                }
+                                if debug:
+                                    logger.info(f"✅ DEBUG: Used fallback description for {visual_element.element_key}: {fallback_description}")
+                                else:
+                                    logger.info(f"Used fallback description for {visual_element.element_key}: {fallback_description}")
+                            
+                            result['processed_visual_elements'] += 1
                         else:
                             # For other element types, still count as failed
                             result['failed_visual_elements'] += 1
@@ -472,17 +498,44 @@ class PPTXAccessibilityProcessor:
                     if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
                         try:
                             fallback_description = describe_shape_with_details(visual_element.shape)
-                            alt_text_mapping[visual_element.element_key] = {
-                                'alt_text': fallback_description,
-                                'shape': visual_element.shape,
-                                'slide_idx': visual_element.slide_idx,
-                                'shape_idx': visual_element.shape_idx
-                            }
-                            result['processed_visual_elements'] += 1
-                            if debug:
-                                logger.info(f"✅ DEBUG: Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
+                            
+                            # Add bypass annotation for session data visibility
+                            bypass_reason = self._check_element_bypass(visual_element)
+                            if bypass_reason:
+                                # Mark as bypassed for session data
+                                annotated_description = f"[BYPASS: {bypass_reason}] {fallback_description}"
+                                normalized_description = self._normalize_alt(annotated_description)
+                                alt_text_mapping[visual_element.element_key] = {
+                                    'alt_text': normalized_description,
+                                    'shape': visual_element.shape,
+                                    'slide_idx': visual_element.slide_idx,
+                                    'shape_idx': visual_element.shape_idx,
+                                    'bypass_reason': bypass_reason,
+                                    'bypassed': True,
+                                    'fallback_used': True,
+                                    'exception_fallback': True
+                                }
+                                if debug:
+                                    logger.info(f"🚧 DEBUG: Used bypassed fallback after exception for {visual_element.element_key}: {bypass_reason}")
+                                else:
+                                    logger.info(f"Used bypassed fallback after exception for {visual_element.element_key}: {bypass_reason}")
                             else:
-                                logger.info(f"Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
+                                # Normal fallback without bypass
+                                normalized_description = self._normalize_alt(fallback_description)
+                                alt_text_mapping[visual_element.element_key] = {
+                                    'alt_text': normalized_description,
+                                    'shape': visual_element.shape,
+                                    'slide_idx': visual_element.slide_idx,
+                                    'shape_idx': visual_element.shape_idx,
+                                    'fallback_used': True,
+                                    'exception_fallback': True
+                                }
+                                if debug:
+                                    logger.info(f"✅ DEBUG: Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
+                                else:
+                                    logger.info(f"Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
+                            
+                            result['processed_visual_elements'] += 1
                         except Exception as fallback_e:
                             # Fallback failed too
                             result['failed_visual_elements'] += 1
@@ -1542,7 +1595,616 @@ class PPTXAccessibilityProcessor:
             logger.debug(f"Found {len(slide_elements)} visual elements on slide {slide_idx + 1}")
         
         logger.info(f"Extracted {len(visual_elements)} total visual elements")
+        
+        # Step 1.5: Process group ALT text roll-up AFTER children are extracted
+        # This creates parent ALT text for group shapes where PowerPoint Reading Order checks
+        if visual_elements:
+            logger.info("Processing group ALT text roll-up for PowerPoint Reading Order...")
+            group_parent_elements = self._process_group_alt_rollup(presentation, visual_elements, self.debug)
+            if group_parent_elements:
+                logger.info(f"Added {len(group_parent_elements)} group parent elements for ALT roll-up")
+                visual_elements.extend(group_parent_elements)
+        
         return presentation, visual_elements
+    
+    def _process_group_alt_rollup(self, presentation: Presentation, visual_elements: List[PPTXVisualElement], debug: bool = False) -> List[PPTXVisualElement]:
+        """
+        Process group ALT text roll-up for PowerPoint Reading Order compatibility.
+        
+        PowerPoint Reading Order evaluates group parents (p:grpSp), not children.
+        This method analyzes groups that contain visual elements and creates appropriate
+        parent ALT text by rolling up from meaningful children.
+        
+        Args:
+            presentation: PowerPoint presentation
+            visual_elements: List of extracted visual elements (children)
+            debug: Enable debug logging
+            
+        Returns:
+            List of new PPTXVisualElement objects for group parents
+        """
+        group_parents = []
+        groups_processed = 0
+        groups_with_alt = 0
+        children_marked_decorative = 0
+        
+        if debug:
+            logger.debug("🔍 Starting group ALT roll-up analysis...")
+        
+        for slide_idx, slide in enumerate(presentation.slides):
+            if debug:
+                logger.debug(f"🔍 Processing slide {slide_idx + 1} for groups...")
+            
+            # Enhanced per-slide counters
+            slide_found_groups = 0
+            slide_found_autoshapes = 0
+            slide_injected_ok = 0
+            
+            # Count elements on this slide for enhanced logging
+            for shape in slide.shapes:
+                if hasattr(shape, 'shapes') and shape.shapes:
+                    slide_found_groups += 1
+                elif hasattr(shape, 'shape_type'):
+                    try:
+                        from pptx.enum.shapes import MSO_SHAPE_TYPE
+                        if shape.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
+                            slide_found_autoshapes += 1
+                    except:
+                        pass
+            
+            slide_groups_found, slide_groups_with_alt, slide_children_marked = self._process_slide_groups_for_rollup(
+                slide.shapes, slide_idx, visual_elements, debug
+            )
+            
+            # Enhanced logging with per-slide counters
+            if slide_groups_found > 0 or slide_found_autoshapes > 0:
+                logger.info(f"📊 Slide {slide_idx + 1} enhanced processing summary:")
+                logger.info(f"   🔧 found_groups: {slide_found_groups}")
+                logger.info(f"   🔷 found_autoshapes: {slide_found_autoshapes}")
+                logger.info(f"   ✅ groups_with_alt: {slide_groups_with_alt}")
+                logger.info(f"   🎯 injected_ok: {slide_groups_with_alt}") # Groups that got ALT text
+            
+            groups_processed += slide_groups_found
+            groups_with_alt += slide_groups_with_alt  
+            children_marked_decorative += slide_children_marked
+            
+            # Enhanced per-slide logging
+            if slide_groups_found > 0:
+                logger.info(f"🔍 Slide {slide_idx + 1} group processing:")
+                logger.info(f"   📊 Groups found: {slide_groups_found}")
+                logger.info(f"   ✅ Groups with parent ALT: {slide_groups_with_alt}")
+                logger.info(f"   👶 Children marked decorative: {slide_children_marked}")
+                if debug:
+                    success_rate = (slide_groups_with_alt/slide_groups_found*100) if slide_groups_found > 0 else 0
+                    logger.debug(f"   🎯 Slide success rate: {success_rate:.1f}%")
+        
+        # Enhanced logging summary
+        logger.info(f"🔄 Group ALT Roll-up Summary:")
+        logger.info(f"   📊 Groups processed: {groups_processed}")
+        logger.info(f"   ✅ Groups with parent ALT: {groups_with_alt}")
+        logger.info(f"   🎯 Success rate: {(groups_with_alt/groups_processed*100):.1f}%" if groups_processed > 0 else "   🎯 Success rate: 0.0%")
+        logger.info(f"   👶 Children marked decorative: {children_marked_decorative}")
+        
+        if debug and groups_processed > 0:
+            logger.debug(f"🔍 Detailed group processing:")
+            logger.debug(f"   - Groups without ALT roll-up: {groups_processed - groups_with_alt}")
+            logger.debug(f"   - Average children marked decorative per group: {children_marked_decorative/groups_processed:.1f}")
+        
+        return group_parents
+    
+    def _process_slide_groups_for_rollup(self, shapes, slide_idx: int, visual_elements: List[PPTXVisualElement], 
+                                       debug: bool = False, depth: int = 0) -> Tuple[int, int, int]:
+        """
+        Recursively process shapes on a slide to find groups and roll up ALT text.
+        
+        Args:
+            shapes: Collection of shapes to process
+            slide_idx: Slide index
+            visual_elements: List of visual elements (for finding children)
+            debug: Enable debug logging
+            depth: Recursion depth for nested groups
+            
+        Returns:
+            Tuple of (groups_found, groups_with_alt, children_marked_decorative)
+        """
+        groups_found = 0
+        groups_with_alt = 0  
+        children_marked_decorative = 0
+        indent = "  " * depth
+        
+        for shape_idx, shape in enumerate(shapes):
+            try:
+                # Check if this is a group shape
+                if hasattr(shape, 'shapes') and shape.shapes:
+                    groups_found += 1
+                    shape_id = getattr(shape, 'id', f"group_{slide_idx}_{shape_idx}")
+                    
+                    # Enhanced group processing logging
+                    logger.info(f"🔧 Processing group_id={shape_id}, depth={depth}, children={len(shape.shapes)}")
+                    
+                    if debug:
+                        logger.debug(f"🔍 {indent}Found group (ID: {shape_id}) with {len(shape.shapes)} children")
+                    
+                    # Analyze group children to determine if we should roll up ALT text
+                    child_analysis = self._analyze_group_children_for_rollup(
+                        shape.shapes, slide_idx, visual_elements, debug, depth + 1
+                    )
+                    
+                    # Recursively process nested groups first
+                    nested_groups_found, nested_groups_with_alt, nested_children_marked = self._process_slide_groups_for_rollup(
+                        shape.shapes, slide_idx, visual_elements, debug, depth + 1
+                    )
+                    groups_found += nested_groups_found
+                    groups_with_alt += nested_groups_with_alt
+                    children_marked_decorative += nested_children_marked
+                    
+                    # Decide if this group should get parent ALT text
+                    should_create_parent_alt, parent_alt_text, children_to_mark_decorative = self._decide_group_alt_rollup(
+                        shape, child_analysis, debug, indent
+                    )
+                    
+                    if should_create_parent_alt:
+                        groups_with_alt += 1
+                        children_marked_decorative += len(children_to_mark_decorative)
+                        
+                        if debug:
+                            logger.debug(f"🔍 {indent}✅ Rolling up ALT to group parent: '{parent_alt_text}'")
+                            logger.debug(f"🔍 {indent}   Will mark {len(children_to_mark_decorative)} children as decorative")
+                        
+                        # Inject ALT text directly into the group parent XML
+                        self._inject_group_parent_alt_text(shape, parent_alt_text, debug, indent)
+                        
+                        # Mark redundant children as decorative
+                        self._mark_group_children_decorative(children_to_mark_decorative, debug, indent)
+                    else:
+                        if debug:
+                            logger.debug(f"🔍 {indent}⏭️ Group doesn't need parent ALT text")
+                            
+            except Exception as e:
+                if debug:
+                    logger.debug(f"🔍 {indent}Error processing shape for group rollup: {e}")
+                continue
+        
+        return groups_found, groups_with_alt, children_marked_decorative
+    
+    def _analyze_group_children_for_rollup(self, group_shapes, slide_idx: int, visual_elements: List[PPTXVisualElement], 
+                                         debug: bool = False, depth: int = 0) -> Dict[str, Any]:
+        """
+        Analyze children of a group to determine ALT text roll-up strategy.
+        
+        Args:
+            group_shapes: Shapes within the group
+            slide_idx: Slide index  
+            visual_elements: List of visual elements
+            debug: Enable debug logging
+            depth: Recursion depth
+            
+        Returns:
+            Dictionary with analysis results
+        """
+        indent = "  " * depth
+        analysis = {
+            'total_children': len(group_shapes),
+            'meaningful_children': [],
+            'decorative_children': [],
+            'text_only_children': [],
+            'has_single_meaningful_child': False,
+            'has_multiple_meaningful_children': False,
+            'recommended_parent_alt': "",
+            'children_with_alt': []
+        }
+        
+        # Find visual elements that belong to this group
+        for child_shape in group_shapes:
+            child_id = getattr(child_shape, 'id', None)
+            child_name = getattr(child_shape, 'name', 'unnamed')
+            
+            # Look for visual elements matching this child
+            matching_elements = []
+            for ve in visual_elements:
+                if (hasattr(ve, 'shape') and ve.shape == child_shape) or \
+                   (child_id and hasattr(ve, 'shape_idx') and ve.shape_idx == child_id):
+                    matching_elements.append(ve)
+            
+            # Classify child based on what we know
+            if matching_elements:
+                # This child has generated visual elements
+                for element in matching_elements:
+                    if hasattr(element, 'element_type') and element.element_type in ['image', 'shape', 'chart']:
+                        analysis['meaningful_children'].append({
+                            'shape': child_shape,
+                            'element': element,
+                            'type': element.element_type,
+                            'id': child_id,
+                            'name': child_name
+                        })
+                        analysis['children_with_alt'].append(element)
+            elif hasattr(child_shape, 'text_frame') and child_shape.text_frame and child_shape.text_frame.text.strip():
+                # Text-only child
+                analysis['text_only_children'].append({
+                    'shape': child_shape,
+                    'text': child_shape.text_frame.text.strip()[:100],
+                    'id': child_id,
+                    'name': child_name
+                })
+            else:
+                # Likely decorative or structural
+                analysis['decorative_children'].append({
+                    'shape': child_shape,
+                    'id': child_id,
+                    'name': child_name
+                })
+        
+        # Determine roll-up strategy
+        meaningful_count = len(analysis['meaningful_children'])
+        analysis['has_single_meaningful_child'] = meaningful_count == 1
+        analysis['has_multiple_meaningful_children'] = meaningful_count > 1
+        
+        if debug:
+            logger.debug(f"🔍 {indent}Group analysis: {meaningful_count} meaningful, {len(analysis['text_only_children'])} text-only, {len(analysis['decorative_children'])} decorative")
+        
+        return analysis
+    
+    def _decide_group_alt_rollup(self, group_shape, child_analysis: Dict[str, Any], debug: bool = False, indent: str = "") -> Tuple[bool, str, List]:
+        """
+        Decide whether a group should get parent ALT text and what it should be.
+        
+        Args:
+            group_shape: The group shape
+            child_analysis: Analysis results from _analyze_group_children_for_rollup
+            debug: Enable debug logging
+            indent: Logging indentation
+            
+        Returns:
+            Tuple of (should_create_alt, parent_alt_text, children_to_mark_decorative)
+        """
+        meaningful_children = child_analysis['meaningful_children']
+        meaningful_count = len(meaningful_children)
+        
+        # DESCRIBE EVERYTHING POLICY - ALL groups get ALT text
+        # No meaningful children - create generic group description
+        if meaningful_count == 0:
+            text_children_count = len(child_analysis['text_only_children'])
+            decorative_children_count = len(child_analysis['decorative_children'])
+            total_children = child_analysis['total_children']
+            
+            # Try to determine if this is a semantic icon group
+            semantic_type = self._detect_group_semantic_type(group_shape, child_analysis)
+            
+            if semantic_type:
+                parent_alt = f"Group representing {semantic_type} icon"
+                policy_applied = "semantic_parent_generic"
+            elif text_children_count > 0:
+                parent_alt = f"Group containing {text_children_count} text element{'s' if text_children_count != 1 else ''}"
+                policy_applied = "text_only_group"
+            elif decorative_children_count > 0:
+                parent_alt = f"Group containing {total_children} decorative element{'s' if total_children != 1 else ''}"
+                policy_applied = "decorative_group"
+            else:
+                parent_alt = f"Group containing {total_children} element{'s' if total_children != 1 else ''}"
+                policy_applied = "generic_group"
+            
+            # Enhanced roll-up decision logging
+            logger.info(f"📋 Applied roll-up policy: {policy_applied} -> '{parent_alt}'")
+                
+            if debug:
+                logger.debug(f"🔍 {indent}Creating group description: '{parent_alt}' (semantic: {semantic_type or 'none'})")
+            return True, parent_alt, []
+        
+        children_to_mark_decorative = []
+        
+        # Single meaningful child - ROBUST ROLL-UP POLICY
+        if meaningful_count == 1:
+            child = meaningful_children[0]
+            element = child['element']
+            
+            # Check if group parent has semantic meaning (icon-like)
+            parent_semantic_type = self._detect_group_semantic_type(group_shape, child_analysis)
+            
+            if parent_semantic_type:
+                # Parent has semantic meaning - keep parent ALT, mark child decorative
+                parent_alt = f"Group representing {parent_semantic_type} icon"
+                children_to_mark_decorative = [child['shape']]
+                policy_applied = "parent_kept_child_decorative"
+                
+                # Enhanced roll-up decision logging
+                logger.info(f"📋 Applied roll-up policy: {policy_applied} -> '{parent_alt}'")
+                
+                if debug:
+                    logger.debug(f"🔍 {indent}Parent semantic strategy: '{parent_alt}' (child becomes decorative)")
+                    
+                return True, parent_alt, children_to_mark_decorative
+            else:
+                # Child carries meaning - create composite description
+                parent_alt = f"Group containing {element.element_type}"
+                # Don't mark child as decorative - both parent and child keep their ALT
+                children_to_mark_decorative = []
+                policy_applied = "child_promoted_both_keep"
+                
+                # Enhanced roll-up decision logging
+                logger.info(f"📋 Applied roll-up policy: {policy_applied} -> '{parent_alt}'")
+                
+                if debug:
+                    logger.debug(f"🔍 {indent}Child meaningful strategy: '{parent_alt}' (both keep ALT)")
+                
+                return True, parent_alt, children_to_mark_decorative
+        
+        # Multiple meaningful children - ROBUST ROLL-UP POLICY
+        if meaningful_count > 1:
+            # Check if parent has semantic meaning
+            parent_semantic_type = self._detect_group_semantic_type(group_shape, child_analysis)
+            
+            if parent_semantic_type:
+                # Parent is semantic (icon) - container description, children keep content
+                parent_alt = f"Group representing {parent_semantic_type} icon with {meaningful_count} elements"
+                # Don't mark children decorative - they provide content detail
+                children_to_mark_decorative = []
+                
+                if debug:
+                    logger.debug(f"🔍 {indent}Semantic parent + meaningful children: container/content split")
+            else:
+                # Parent is structural - create composite description
+                child_types = []
+                for child in meaningful_children:
+                    child_type = child['element'].element_type
+                    if child_type == 'image':
+                        child_types.append('image')
+                    elif child_type == 'shape':
+                        child_types.append('shape')
+                    elif child_type == 'chart':
+                        child_types.append('chart')
+                
+                # Build description based on child types
+                if len(set(child_types)) == 1:
+                    # All same type
+                    child_type = child_types[0]
+                    parent_alt = f"Group of {meaningful_count} {child_type}s"
+                else:
+                    # Mixed types
+                    parent_alt = f"Group containing {meaningful_count} visual elements"
+                
+                # Don't mark children as decorative when multiple meaningful children
+                # Let them keep their individual ALT text
+                children_to_mark_decorative = []
+            
+            # Enhanced roll-up decision logging for multiple children
+            if parent_semantic_type:
+                policy_applied = "composite_semantic_container"
+            else:
+                policy_applied = "composite_structural"
+            logger.info(f"📋 Applied roll-up policy: {policy_applied} -> '{parent_alt}'")
+            
+            if debug:
+                logger.debug(f"🔍 {indent}Multiple meaningful children strategy: '{parent_alt}' (children keep ALT)")
+            
+            return True, parent_alt, children_to_mark_decorative
+        
+        return False, "", []
+    
+    def _detect_group_semantic_type(self, group_shape, child_analysis: Dict[str, Any]) -> Optional[str]:
+        """
+        Detect if a group represents a semantic icon type (lightbulb, brain, etc.).
+        
+        Args:
+            group_shape: The group shape
+            child_analysis: Analysis results from group children
+            
+        Returns:
+            Semantic type string if detected, None otherwise
+        """
+        try:
+            # Analyze shape patterns and geometry to detect common icons
+            total_children = child_analysis['total_children']
+            decorative_count = len(child_analysis['decorative_children'])
+            
+            # Get group dimensions for pattern analysis
+            group_width = getattr(group_shape, 'width', None)
+            group_height = getattr(group_shape, 'height', None)
+            
+            if group_width and group_height:
+                width_px = int(group_width.emu / 914400 * 96) if hasattr(group_width, 'emu') else 0
+                height_px = int(group_height.emu / 914400 * 96) if hasattr(group_height, 'emu') else 0
+                aspect_ratio = width_px / height_px if height_px > 0 else 1
+                
+                # Icon detection based on patterns:
+                
+                # Lightbulb pattern: circular top + narrower bottom, multiple decorative elements
+                if 0.8 <= aspect_ratio <= 1.4 and total_children >= 3 and decorative_count >= 2:
+                    return "lightbulb"
+                
+                # Brain pattern: organic/complex shape with many small elements
+                if 0.9 <= aspect_ratio <= 1.6 and total_children >= 5:
+                    return "brain"
+                    
+                # Lungs pattern: two-part symmetric structure
+                if 1.2 <= aspect_ratio <= 2.0 and total_children >= 2:
+                    return "lungs"
+                
+                # Graduation cap pattern: rectangular base + triangular top
+                if 0.7 <= aspect_ratio <= 1.5 and total_children >= 2:
+                    return "graduation cap"
+            
+            # Fallback pattern analysis based on child count and complexity
+            if total_children >= 5:
+                return "complex icon"
+            elif total_children >= 3:
+                return "composite icon"
+                
+        except Exception as e:
+            # If semantic detection fails, return None
+            pass
+            
+        return None
+    
+    def _inject_group_parent_alt_text(self, group_shape, alt_text: str, debug: bool = False, indent: str = ""):
+        """
+        Inject ALT text directly into group parent XML structure.
+        
+        PowerPoint Reading Order checks p:grpSp/nvGrpSpPr/cNvPr for @descr and @title.
+        
+        Args:
+            group_shape: Group shape object
+            alt_text: ALT text to inject
+            debug: Enable debug logging
+            indent: Logging indentation
+        """
+        try:
+            if not hasattr(group_shape, '_element'):
+                if debug:
+                    logger.debug(f"🔍 {indent}Group shape has no _element - cannot inject XML ALT text")
+                return
+            
+            group_element = group_shape._element
+            
+            # Look for the nvGrpSpPr/cNvPr structure
+            # XPath for group non-visual properties
+            cnvpr_xpath = ".//p:nvGrpSpPr/p:cNvPr"
+            namespaces = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
+            
+            cnvpr_elements = group_element.xpath(cnvpr_xpath, namespaces=namespaces)
+            
+            if cnvpr_elements:
+                cnvpr = cnvpr_elements[0]
+                
+                # Set both descr (full ALT text) and title (short version)  
+                cnvpr.set('descr', alt_text)
+                title_text = self._create_title_from_alt_text(alt_text)
+                cnvpr.set('title', title_text)
+                
+                if debug:
+                    logger.debug(f"🔍 {indent}✅ Injected ALT into group cNvPr: '{alt_text}'")
+                    logger.debug(f"🔍 {indent}   Also set title: '{title_text}'")
+            else:
+                if debug:
+                    logger.debug(f"🔍 {indent}⚠️  Could not find group cNvPr element for ALT injection")
+                    logger.debug(f"🔍 {indent}   Group element: {group_element.tag if hasattr(group_element, 'tag') else 'unknown'}")
+                
+        except Exception as e:
+            if debug:
+                logger.debug(f"🔍 {indent}❌ Error injecting group parent ALT text: {e}")
+    
+    def _mark_group_children_decorative(self, children_to_mark: List, debug: bool = False, indent: str = ""):
+        """
+        Mark group children as decorative to avoid redundant ALT text.
+        
+        Args:
+            children_to_mark: List of child shapes to mark as decorative
+            debug: Enable debug logging
+            indent: Logging indentation
+        """
+        for child_shape in children_to_mark:
+            try:
+                if not hasattr(child_shape, '_element'):
+                    continue
+                
+                child_element = child_shape._element
+                
+                # Look for cNvPr element in child
+                # Different child types have different paths:
+                # - Pictures: p:pic/p:nvPicPr/p:cNvPr
+                # - Shapes: p:sp/p:nvSpPr/p:cNvPr  
+                # - Lines: p:cxnSp/p:nvCxnSpPr/p:cNvPr
+                
+                cnvpr_paths = [
+                    ".//p:cNvPr",           # General path
+                    ".//pic:cNvPr"          # Picture-specific
+                ]
+                
+                namespaces = {
+                    'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+                    'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+                }
+                
+                cnvpr_element = None
+                for xpath in cnvpr_paths:
+                    elements = child_element.xpath(xpath, namespaces=namespaces)
+                    if elements:
+                        cnvpr_element = elements[0]
+                        break
+                
+                if cnvpr_element is not None:
+                    # Create decorative extension element
+                    # This follows Office 2019+ standard for decorative images
+                    from lxml import etree
+                    
+                    # Create extLst if it doesn't exist
+                    extlst = cnvpr_element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}extLst')
+                    if extlst is None:
+                        extlst = etree.SubElement(cnvpr_element, '{http://schemas.openxmlformats.org/drawingml/2006/main}extLst')
+                    
+                    # Create decorative extension
+                    ext = etree.SubElement(extlst, '{http://schemas.openxmlformats.org/drawingml/2006/main}ext')
+                    ext.set('uri', '{C809F854-F9FF-4C6D-B9C3-6A6F6E8C5B8D}')  # Office decorative URI
+                    
+                    decorative = etree.SubElement(ext, '{http://schemas.microsoft.com/office/drawing/2017/decorative}decorative')
+                    decorative.set('val', '1')
+                    
+                    if debug:
+                        child_id = getattr(child_shape, 'id', 'unknown')
+                        logger.debug(f"🔍 {indent}   ✅ Marked child {child_id} as decorative")
+                        
+            except Exception as e:
+                if debug:
+                    logger.debug(f"🔍 {indent}   ❌ Error marking child as decorative: {e}")
+                continue
+    
+    def _create_title_from_alt_text(self, alt_text: str) -> str:
+        """
+        Create a short title from the full ALT text for PowerPoint Reading Order.
+        Same logic as in pptx_alt_injector.py
+        
+        Args:
+            alt_text: Full ALT text
+            
+        Returns:
+            Shortened title (60-80 characters)
+        """
+        if not alt_text or not alt_text.strip():
+            return ""
+        
+        clean_text = alt_text.strip()
+        
+        # Remove common prefixes to make title more concise
+        prefixes_to_remove = [
+            "This is a PowerPoint shape. It is ",
+            "This is a PowerPoint ",
+            "This is a ",
+            "A PowerPoint ",
+            "PowerPoint ",
+            "Group containing ",
+            "Group of "
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if clean_text.startswith(prefix):
+                clean_text = clean_text[len(prefix):]
+                break
+        
+        # Capitalize first letter
+        if clean_text:
+            clean_text = clean_text[0].upper() + clean_text[1:]
+        
+        # Truncate to reasonable title length (60-80 chars)
+        max_title_length = 70
+        if len(clean_text) <= max_title_length:
+            return clean_text
+        
+        # Find a good breaking point
+        truncated = clean_text[:max_title_length]
+        
+        # Try to break at sentence boundaries
+        for break_char in ['. ', '! ', '? ']:
+            last_break = truncated.rfind(break_char)
+            if last_break > max_title_length * 0.7:
+                return truncated[:last_break + 1].strip()
+        
+        # Fall back to word boundary
+        last_space = truncated.rfind(' ')
+        if last_space > max_title_length * 0.7:
+            return truncated[:last_space].strip()
+        
+        # Hard truncate with ellipsis
+        return truncated.strip() + "..."
     
     def _generate_alt_text_for_visual_element(self, visual_element: PPTXVisualElement, debug: bool = False) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -1632,6 +2294,10 @@ class PPTXAccessibilityProcessor:
         Returns:
             Descriptive text string
         """
+        # Special handling for connectors and lines - bypass raster checks
+        if visual_element.element_type in ['connector', 'line']:
+            return self._create_connector_line_description(visual_element)
+        
         description_parts = []
         
         # Add element type
@@ -1657,6 +2323,54 @@ class PPTXAccessibilityProcessor:
             description_parts.append("located in the lower area of the slide")
         
         return " ".join(description_parts)
+    
+    def _create_connector_line_description(self, visual_element: PPTXVisualElement) -> str:
+        """
+        Create direct descriptive text for connectors and lines, bypassing raster checks.
+        
+        Args:
+            visual_element: Connector or line visual element
+            
+        Returns:
+            Direct descriptive ALT text
+        """
+        try:
+            # Get shape properties for enhanced description
+            shape = visual_element.shape
+            width_px = visual_element.width_px
+            height_px = visual_element.height_px
+            
+            # Determine line/connector type and orientation
+            if hasattr(shape, 'connector_type'):
+                element_name = "connector"
+            else:
+                element_name = "line"
+            
+            # Determine orientation
+            orientation = self._get_line_orientation(width_px, height_px)
+            
+            # Get stroke/line properties if available
+            color_info = ""
+            try:
+                if hasattr(shape, 'line') and shape.line:
+                    # Try to get line color
+                    if hasattr(shape.line, 'color') and shape.line.color:
+                        # Extract color information if available
+                        color_info = " colored"
+                    # Could add more detailed stroke analysis here
+            except:
+                pass
+            
+            # Create direct description
+            if orientation:
+                return f"This is a PowerPoint shape. It is a {orientation}{color_info} {element_name}."
+            else:
+                return f"This is a PowerPoint shape. It is a{color_info} {element_name}."
+                
+        except Exception as e:
+            logger.debug(f"Error creating connector/line description: {e}")
+            # Fallback description
+            return f"This is a PowerPoint shape. It is a {visual_element.element_type}."
     
     def _create_descriptive_shape_alt_text(self, shape: BaseShape, width_px: int, height_px: int) -> str:
         """
@@ -1871,7 +2585,7 @@ class PPTXAccessibilityProcessor:
     
     def _extract_visual_elements_from_shapes(self, shapes, slide_idx: int, slide_text: str, debug: bool = False) -> List[PPTXVisualElement]:
         """
-        Recursively extract visual elements from shapes collection.
+        Recursively extract visual elements from shapes collection using stable shape IDs.
         
         Args:
             shapes: Collection of shapes to process
@@ -1886,14 +2600,22 @@ class PPTXAccessibilityProcessor:
         
         for shape_idx, shape in enumerate(shapes):
             try:
-                # Handle grouped shapes recursively
+                # Handle grouped shapes recursively - ALWAYS PROCESS BOTH CHILDREN AND PARENT
                 if hasattr(shape, 'shapes') and shape.shapes:
-                    # Process shapes within groups
+                    # First, process shapes within groups using recursive DFS
+                    if debug:
+                        logger.debug(f"Processing group shape with {len(shape.shapes)} children")
                     group_elements = self._extract_visual_elements_from_shapes(
                         shape.shapes, slide_idx, slide_text, debug
                     )
                     visual_elements.extend(group_elements)
-                    continue
+                    
+                    # DESCRIBE EVERYTHING POLICY: Also create element for group parent
+                    # This ensures PowerPoint Reading Order has ALT text at group level
+                    if debug:
+                        logger.debug(f"Creating group parent element for {len(shape.shapes)} children")
+                    
+                    # Don't continue - process the group parent as well
                 
                 # Determine element type
                 element_type = self._classify_visual_element(shape)
@@ -1904,8 +2626,18 @@ class PPTXAccessibilityProcessor:
                         logger.debug(f"Skipping text-only placeholder: {getattr(shape, 'name', 'unnamed')}")
                     continue
                 
-                # Create visual element
-                visual_element = PPTXVisualElement(shape, slide_idx, shape_idx, slide_text, element_type)
+                # Use stable shape ID when available, with enhanced XML extraction for grouped children
+                shape_identifier = self._extract_robust_shape_id(shape, shape_idx, debug)
+                
+                if shape_identifier == shape_idx:
+                    if debug:
+                        logger.debug(f"Using fallback index {shape_idx} for shape without ID")
+                else:
+                    if debug:
+                        logger.debug(f"Using stable shape ID {shape_identifier}")
+                
+                # Create visual element with stable identifier
+                visual_element = PPTXVisualElement(shape, slide_idx, shape_identifier, slide_text, element_type)
                 visual_elements.append(visual_element)
                 
                 if debug:
@@ -1950,6 +2682,17 @@ class PPTXAccessibilityProcessor:
                 return "media"
             elif shape_type == MSO_SHAPE_TYPE.OLE_OBJECT:
                 return "embedded_object"
+            elif shape_type == MSO_SHAPE_TYPE.GROUP:
+                return "group"
+            # Add connector support
+            elif hasattr(MSO_SHAPE_TYPE, 'CONNECTOR') and shape_type == MSO_SHAPE_TYPE.CONNECTOR:
+                return "connector"
+            # Check for connector-like behavior in shapes without explicit CONNECTOR type
+            elif hasattr(shape, 'connector_type') or 'Connector' in type(shape).__name__:
+                return "connector"
+            # Check if this is a group shape (fallback)
+            elif hasattr(shape, 'shapes') and shape.shapes:
+                return "group"
             else:
                 return "unknown"
                 
@@ -4077,14 +4820,215 @@ class PPTXAccessibilityProcessor:
                 clean_text = clean_text[:97] + "..."
             context_parts.append(f"related to: {clean_text}")
         
-        # Add hint about format limitation
+        # Add hint about format limitation (avoid duplication)
         alt_text = ' '.join(context_parts)
-        alt_text += f". Note: Original {format_name} vector image could not be processed for detailed analysis."
+        format_note = f". Note: Original {format_name} vector image could not be processed for detailed analysis."
+        
+        # DEDUPLICATION: Check if this note was already added to avoid "WMF format... WMF format" duplication
+        if not alt_text.endswith(format_note.strip()) and format_note.strip() not in alt_text:
+            alt_text += format_note
+        
+        # Additional deduplication: Remove any double format references
+        alt_text = self._deduplicate_format_references(alt_text, format_name)
         
         if debug:
             logger.debug(f"Generated vector fallback ALT: {alt_text}")
         
         return alt_text
+    
+    def _check_element_bypass(self, visual_element: PPTXVisualElement) -> Optional[str]:
+        """
+        Check if a visual element should be bypassed and return the reason.
+        
+        Args:
+            visual_element: Visual element to check
+            
+        Returns:
+            Bypass reason string if element should be bypassed, None otherwise
+        """
+        # Connectors and lines get special handling but are not truly bypassed
+        # They get descriptive text instead of AI-generated descriptions
+        if visual_element.element_type in ['connector', 'line']:
+            return f"Using descriptive text for {visual_element.element_type} (no AI analysis needed)"
+        
+        # Very small elements that might be decorative artifacts
+        if visual_element.width_px < 5 or visual_element.height_px < 5:
+            return f"Element too small ({visual_element.width_px}x{visual_element.height_px}px)"
+        
+        # Elements with no visual content
+        if not hasattr(visual_element, 'shape') or visual_element.shape is None:
+            return "No shape data available"
+        
+        return None
+    
+    def _extract_robust_shape_id(self, shape, fallback_idx: int, debug: bool = False) -> int:
+        """
+        Extract robust shape ID with enhanced XML-based extraction for grouped children.
+        
+        Args:
+            shape: Shape object
+            fallback_idx: Fallback index if no ID found
+            debug: Enable debug logging
+            
+        Returns:
+            Shape ID (integer) or fallback index
+        """
+        try:
+            # Method 1: Standard python-pptx API
+            shape_id = getattr(shape, 'id', None)
+            if shape_id is not None:
+                if debug:
+                    logger.debug(f"    Extracted ID via API: {shape_id}")
+                return shape_id
+            
+            # Method 2: XML-based extraction for grouped children
+            if hasattr(shape, '_element') and shape._element is not None:
+                element = shape._element
+                
+                # Try different XML paths for shape IDs
+                id_extraction_paths = [
+                    # Standard shape ID paths
+                    ('.//p:cNvPr/@id', 'p:cNvPr id attribute'),
+                    ('.//pic:cNvPr/@id', 'pic:cNvPr id attribute'),
+                    
+                    # Group-specific paths
+                    ('.//p:nvSpPr/p:cNvPr/@id', 'nvSpPr/cNvPr id'),
+                    ('.//p:nvPicPr/p:cNvPr/@id', 'nvPicPr/cNvPr id'),
+                    ('.//p:nvCxnSpPr/p:cNvPr/@id', 'nvCxnSpPr/cNvPr id'),
+                    
+                    # Fallback paths
+                    ('.//@id', 'any id attribute')
+                ]
+                
+                namespaces = {
+                    'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+                    'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+                }
+                
+                for xpath, description in id_extraction_paths:
+                    try:
+                        id_results = element.xpath(xpath, namespaces=namespaces)
+                        if id_results:
+                            extracted_id = int(id_results[0])
+                            if debug:
+                                logger.debug(f"    Extracted ID via XML ({description}): {extracted_id}")
+                            return extracted_id
+                    except (ValueError, TypeError, Exception) as e:
+                        if debug:
+                            logger.debug(f"    XML extraction failed for {description}: {e}")
+                        continue
+            
+            # Method 3: Shape name-based heuristic ID extraction
+            shape_name = getattr(shape, 'name', '')
+            if shape_name:
+                # Look for ID patterns in shape names like "Shape 123" or "Picture 456"
+                import re
+                id_match = re.search(r'\d+$', shape_name)
+                if id_match:
+                    try:
+                        name_based_id = int(id_match.group())
+                        if debug:
+                            logger.debug(f"    Extracted ID from shape name '{shape_name}': {name_based_id}")
+                        return name_based_id
+                    except ValueError:
+                        pass
+            
+            if debug:
+                logger.debug(f"    No stable ID found, using fallback index: {fallback_idx}")
+            
+        except Exception as e:
+            if debug:
+                logger.debug(f"    Error during robust ID extraction: {e}")
+        
+        return fallback_idx
+    
+    def _normalize_alt(self, txt: str) -> str:
+        """
+        Normalize ALT text by removing duplications and redundant content.
+        
+        Args:
+            txt: ALT text that may contain duplications
+            
+        Returns:
+            Cleaned and normalized ALT text
+        """
+        if not txt or not txt.strip():
+            return ""
+        
+        import re
+        
+        # Normalize whitespace
+        t = " ".join(txt.split())
+        
+        # Remove duplicate size preambles like "A shape (99x99px) This is a PowerPoint shape. It is a shape (99x99px)"
+        # Pattern: "A (shape|line|connector) (NxNpx) This is a PowerPoint shape. It is a (shape|line|connector) (NxNpx)"
+        t = re.sub(r"^(A (?:shape|line|connector) \(\d+x\d+px\))\s+(This is a PowerPoint shape\..*?)\s+\1", r"\2", t, flags=re.IGNORECASE)
+        
+        # Remove duplicate shape descriptions within the same text
+        # Pattern: "This is a PowerPoint shape. It is a shape (99x99px). This is a PowerPoint shape. It is a shape (99x99px)"
+        t = re.sub(r"(This is a PowerPoint shape\.[^.]*\.)\s*\1", r"\1", t, flags=re.IGNORECASE)
+        
+        # Remove duplicate size information within shape descriptions
+        # Pattern: "This is a PowerPoint shape. It is a shape (99x99px) (99x99px)"
+        t = re.sub(r"(\(\d+x\d+px\))\s*\1", r"\1", t)
+        
+        # Remove redundant "This is a PowerPoint shape" if it appears multiple times
+        parts = t.split("This is a PowerPoint shape")
+        if len(parts) > 2:  # More than one occurrence
+            # Keep the first occurrence and the most detailed part
+            detailed_part = max(parts[1:], key=len) if len(parts) > 1 else parts[1] if len(parts) > 1 else ""
+            t = f"This is a PowerPoint shape{detailed_part}"
+        
+        # Clean up extra spaces and periods
+        t = re.sub(r'\s+', ' ', t)  # Multiple spaces -> single space
+        t = re.sub(r'\.+', '.', t)  # Multiple periods -> single period
+        t = re.sub(r'\s+\.', '.', t)  # "space." -> "."
+        
+        return t.strip()
+    
+    def _deduplicate_format_references(self, alt_text: str, format_name: str) -> str:
+        """
+        Remove duplicate format references from ALT text to prevent "WMF format... WMF format" patterns.
+        
+        Args:
+            alt_text: ALT text that may contain duplicate format references
+            format_name: Format name (WMF, EMF, etc.)
+            
+        Returns:
+            Cleaned ALT text with deduplicated format references
+        """
+        try:
+            # Simple approach: check for and remove obvious duplications
+            import re
+            
+            # Check if format name appears multiple times in problematic patterns
+            format_count = alt_text.upper().count(format_name.upper())
+            
+            if format_count > 1:
+                # Remove duplicate format references in common patterns
+                # Pattern 1: "WMF format... WMF format" -> "WMF format..."
+                pattern1 = rf'({format_name}\s+format)(.+?)\1'
+                alt_text = re.sub(pattern1, r'\1\2', alt_text, flags=re.IGNORECASE)
+                
+                # Pattern 2: Remove duplicate format names that are close together
+                pattern2 = rf'({format_name})(\s+[^.]{0,30}?\s+){format_name}'
+                alt_text = re.sub(pattern2, r'\1\2', alt_text, flags=re.IGNORECASE)
+                
+                # Pattern 3: Remove duplicate "Original X vector image" phrases
+                pattern3 = rf'(Original {format_name} vector image[^.]*\.)(.+?)(Original {format_name} vector image[^.]*\.)'
+                alt_text = re.sub(pattern3, r'\1\2', alt_text, flags=re.IGNORECASE)
+            
+            # Clean up any resulting double spaces or formatting issues
+            alt_text = re.sub(r'\s+', ' ', alt_text)  # Multiple spaces -> single space
+            alt_text = re.sub(r'\s+\.', '.', alt_text)  # "space." -> "."
+            alt_text = re.sub(r'\s+,', ',', alt_text)   # "space," -> ","
+            
+            return alt_text.strip()
+            
+        except Exception as e:
+            # If deduplication fails, return original text
+            logger.debug(f"Error deduplicating format references: {e}")
+            return alt_text
     
     def _generate_alt_text_for_image_with_validation(self, image_info: PPTXImageInfo, debug: bool = False) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -4527,15 +5471,29 @@ class PPTXAccessibilityProcessor:
     
     def _log_processing_summary(self, result: Dict[str, Any]):
         """Log a summary of the processing results."""
-        logger.info("PPTX Processing Summary:")
-        logger.info(f"  Input file: {result['input_file']}")
-        logger.info(f"  Output file: {result['output_file']}")
-        logger.info(f"  Total slides: {result['total_slides']}")
+        logger.info("\n" + "="*60)
+        logger.info("📊 PPTX PROCESSING SUMMARY")
+        logger.info("="*60)
+        
+        # File information
+        logger.info(f"📁 Input file: {result['input_file']}")
+        logger.info(f"💾 Output file: {result['output_file']}")
+        logger.info(f"📄 Total slides: {result['total_slides']}")
         
         # Visual element processing summary
-        logger.info(f"  Total visual elements found: {result.get('total_visual_elements', 0)}")
-        logger.info(f"  Visual elements processed: {result.get('processed_visual_elements', 0)}")
-        logger.info(f"  Failed visual elements: {result.get('failed_visual_elements', 0)}")
+        total_elements = result.get('total_visual_elements', 0)
+        processed_elements = result.get('processed_visual_elements', 0)
+        failed_elements = result.get('failed_visual_elements', 0)
+        
+        logger.info(f"\n🎯 Visual Element Processing:")
+        logger.info(f"   📊 Total elements found: {total_elements}")
+        logger.info(f"   ✅ Elements processed: {processed_elements}")
+        logger.info(f"   ❌ Failed elements: {failed_elements}")
+        
+        if total_elements > 0:
+            success_rate = (processed_elements / total_elements) * 100
+            logger.info(f"   🎯 Success rate: {success_rate:.1f}%")
+            logger.info(f"   📈 Elements per slide: {total_elements / result['total_slides']:.1f}")
         
         # Timing information
         logger.info(f"  Generation time: {result['generation_time']:.2f}s")

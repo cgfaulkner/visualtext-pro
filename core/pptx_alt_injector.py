@@ -1149,7 +1149,15 @@ class PPTXAltTextInjector:
         if hasattr(shape, 'descr'):
             logger.info(f"🔍 DEBUG:   Using shape.descr property (modern approach)")
             logger.info(f"🔍 DEBUG:   Setting ALT text: '{alt_text}'")
+            
+            # Set description (full ALT text)
             shape.descr = alt_text
+            
+            # Set title (short version for Reading Order)
+            title_text = self._create_title_from_alt_text(alt_text)
+            if hasattr(shape, 'title'):
+                shape.title = title_text
+                logger.info(f"🔍 DEBUG:   Setting title: '{title_text}'")
             
             # Verify it was set
             actual_value = getattr(shape, 'descr', '')
@@ -1168,7 +1176,14 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   cNvPr element found: {cNvPr}")
             logger.info(f"🔍 DEBUG:   cNvPr tag: {getattr(cNvPr, 'tag', 'unknown')}")
             logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
+            
+            # Set description (full ALT text)
             cNvPr.set('descr', alt_text)
+            
+            # Set title (short version for Reading Order)
+            title_text = self._create_title_from_alt_text(alt_text)
+            cNvPr.set('title', title_text)
+            logger.info(f"🔍 DEBUG:   Setting title attribute: '{title_text}'")
             
             # Verify it was set
             actual_value = cNvPr.get('descr', '')
@@ -1214,6 +1229,7 @@ class PPTXAltTextInjector:
             # - Pictures: p:pic/p:nvPicPr/p:cNvPr
             # - Shapes: p:sp/p:nvSpPr/p:cNvPr
             # - Lines: p:cxnSp/p:nvCxnSpPr/p:cNvPr
+            # - Groups: p:grpSp/p:nvGrpSpPr/p:cNvPr
             
             namespaces = {
                 'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
@@ -1226,7 +1242,8 @@ class PPTXAltTextInjector:
                 './/pic:cNvPr',         # Picture-specific
                 './p:nvSpPr/p:cNvPr',   # Shape-specific
                 './p:nvPicPr/p:cNvPr',  # Picture-specific
-                './p:nvCxnSpPr/p:cNvPr' # Connector-specific
+                './p:nvCxnSpPr/p:cNvPr', # Connector-specific
+                './p:nvGrpSpPr/p:cNvPr' # Group-specific
             ]
             
             for path in cnvpr_paths:
@@ -1238,11 +1255,29 @@ class PPTXAltTextInjector:
                         logger.info(f"🔍 DEBUG:   cNvPr element: {cnvpr_element}")
                         logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
                         
-                        cnvpr_element.set('descr', alt_text)
+                        # OVERWRITE MODE: Check existing ALT text before updating
+                        existing_descr = cnvpr_element.get('descr', '')
+                        existing_title = cnvpr_element.get('title', '')
                         
-                        # Verify it was set
+                        # Compare normalized versions to avoid redundant updates
+                        normalized_new = self._normalize_for_comparison(alt_text)
+                        normalized_existing = self._normalize_for_comparison(existing_descr)
+                        
+                        if normalized_new != normalized_existing or not existing_descr:
+                            # Set description (full ALT text)
+                            cnvpr_element.set('descr', alt_text)
+                            logger.info(f"🔍 DEBUG:   Updated descr: '{existing_descr}' -> '{alt_text}'")
+                            
+                            # Set title (short version for Reading Order)
+                            title_text = self._create_title_from_alt_text(alt_text)
+                            cnvpr_element.set('title', title_text)
+                            logger.info(f"🔍 DEBUG:   Updated title: '{existing_title}' -> '{title_text}'")
+                        else:
+                            logger.info(f"🔍 DEBUG:   Skipping update - ALT text unchanged: '{existing_descr}'")
+                        
+                        # Verify current state
                         actual_value = cnvpr_element.get('descr', '')
-                        logger.info(f"🔍 DEBUG:   Verification - cNvPr.get('descr'): '{actual_value}'")
+                        logger.info(f"🔍 DEBUG:   Final verification - cNvPr.get('descr'): '{actual_value}'")
                         return True
                         
                 except Exception as e:
@@ -1510,6 +1545,97 @@ class PPTXAltTextInjector:
                         logger.info(f"🔍 DEBUG:   Found ALT text on slide {slide_idx}, shape {shape_idx}: '{alt_text}'")
         
         logger.info(f"🔍 DEBUG: Total ALT texts found in presentation: {all_alt_texts_found}")
+    
+    def _normalize_for_comparison(self, text: str) -> str:
+        """
+        Normalize ALT text for comparison to avoid redundant updates.
+        
+        Args:
+            text: ALT text to normalize
+            
+        Returns:
+            Normalized text for comparison
+        """
+        if not text:
+            return ""
+        
+        import re
+        
+        # Normalize whitespace and case
+        normalized = re.sub(r'\s+', ' ', text.strip().lower())
+        
+        # Remove common punctuation variations
+        normalized = re.sub(r'[.!?]+$', '', normalized)  # Remove trailing punctuation
+        
+        # Remove common prefixes that don't affect meaning
+        prefixes = [
+            'this is a powerpoint ',
+            'powerpoint ',
+            'a ',
+            'an ',
+            'the '
+        ]
+        
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        
+        return normalized.strip()
+    
+    def _create_title_from_alt_text(self, alt_text: str) -> str:
+        """
+        Create a short title from the full ALT text for PowerPoint Reading Order.
+        
+        Args:
+            alt_text: Full ALT text
+            
+        Returns:
+            Shortened title (60-80 characters)
+        """
+        if not alt_text or not alt_text.strip():
+            return ""
+        
+        # Remove common prefixes to make title more concise
+        clean_text = alt_text.strip()
+        prefixes_to_remove = [
+            "This is a PowerPoint shape. It is ",
+            "This is a PowerPoint ",
+            "This is a ",
+            "A PowerPoint ",
+            "PowerPoint "
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if clean_text.startswith(prefix):
+                clean_text = clean_text[len(prefix):]
+                break
+        
+        # Capitalize first letter
+        if clean_text:
+            clean_text = clean_text[0].upper() + clean_text[1:]
+        
+        # Truncate to reasonable title length (60-80 chars)
+        max_title_length = 70
+        if len(clean_text) <= max_title_length:
+            return clean_text
+        
+        # Find a good breaking point (sentence end, period, etc.)
+        truncated = clean_text[:max_title_length]
+        
+        # Try to break at sentence boundaries
+        for break_char in ['. ', '! ', '? ']:
+            last_break = truncated.rfind(break_char)
+            if last_break > max_title_length * 0.7:  # At least 70% of target length
+                return truncated[:last_break + 1].strip()
+        
+        # Fall back to word boundary
+        last_space = truncated.rfind(' ')
+        if last_space > max_title_length * 0.7:
+            return truncated[:last_space].strip()
+        
+        # Hard truncate with ellipsis
+        return truncated.strip() + "..."
     
     def _should_skip_alt_text(self, alt_text: str) -> bool:
         """
