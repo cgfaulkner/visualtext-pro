@@ -6,6 +6,8 @@ __pycache__/
 # Local
 .DS_Store
 pdf-alt/
+logs/
+Documents to Review/
 
 # C extensions
 *.so

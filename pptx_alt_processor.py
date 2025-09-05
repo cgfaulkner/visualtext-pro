@@ -33,11 +33,19 @@ from config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
 from pptx_alt_injector import PPTXAltTextInjector
 
-# Set up logging
+# Set up enhanced logging (will be replaced by enhanced config if enabled)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+# Try to import enhanced logging config
+try:
+    from logging_config import setup_enhanced_logging, integrate_with_processor
+    ENHANCED_LOGGING_AVAILABLE = True
+except ImportError:
+    ENHANCED_LOGGING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +55,8 @@ class PPTXAltProcessor:
     Provides an easy-to-use interface for complete PPTX accessibility processing.
     """
     
-    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False):
+    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False, 
+                 enable_file_logging: bool = True):
         """
         Initialize the PPTX ALT text processor.
         
@@ -55,8 +64,18 @@ class PPTXAltProcessor:
             config_path: Optional path to configuration file
             verbose: Enable verbose logging
             debug: Enable detailed debug logging for generation attempts
+            enable_file_logging: Enable enhanced file logging with rotation
         """
-        if verbose:
+        # Setup enhanced logging if available and requested
+        self.log_config = None
+        if enable_file_logging and ENHANCED_LOGGING_AVAILABLE:
+            try:
+                console_level = "DEBUG" if verbose else "INFO"
+                self.log_config = setup_enhanced_logging(console_level=console_level)
+                logger.info("Enhanced file logging enabled")
+            except Exception as e:
+                logger.warning(f"Failed to setup enhanced logging: {e}")
+        elif verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
         # Initialize core components
@@ -64,6 +83,14 @@ class PPTXAltProcessor:
         self.pptx_processor = PPTXAccessibilityProcessor(self.config_manager, debug=debug)
         self.alt_injector = PPTXAltTextInjector(self.config_manager)
         self.debug = debug
+        
+        # Integrate enhanced logging with processor if available
+        if self.log_config:
+            try:
+                integrate_with_processor(self.pptx_processor, self.log_config)
+                logger.info("Enhanced logging integrated with processor")
+            except Exception as e:
+                logger.warning(f"Failed to integrate enhanced logging: {e}")
         
         # Setup failed generation logging
         self.failed_generations = []
@@ -155,6 +182,30 @@ class PPTXAltProcessor:
             if self.failed_generations:
                 self._log_failed_generations_summary()
                 result['failed_generations'] = self.failed_generations
+            
+            # Export session data if enhanced logging is available
+            if self.log_config:
+                try:
+                    # Update processing stats
+                    self.log_config.update_processing_stats({
+                        'processing_time': time.time() - start_time,
+                        'input_file': str(input_path),
+                        'output_file': str(output_path),
+                        'success': True
+                    })
+                    # Export logs and data
+                    self.log_config.export_session_data()
+                    
+                    # Log session summary
+                    summary = self.log_config.get_session_summary()
+                    logger.info(f"📊 Session Summary:")
+                    logger.info(f"   ALT texts generated: {summary['total_alt_texts']}")
+                    logger.info(f"   Failed generations: {summary['total_failures']}")
+                    logger.info(f"   Success rate: {summary['success_rate']:.1f}%")
+                    logger.info(f"   Session logs saved to: logs/{self.log_config.session_id}*")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to export session data: {e}")
             
             return result
             

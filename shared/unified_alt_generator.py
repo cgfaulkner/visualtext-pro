@@ -56,7 +56,7 @@ class LLaVAProvider(BaseAltProvider):
             logger.setLevel(getattr(logging, level_name, logging.INFO))
     
     def generate_alt_text(self, image_path: str, prompt: str, image_data: Optional[str] = None) -> Tuple[Optional[str], Dict[str, Any]]:
-        """Generate ALT text using LLaVA."""
+        """Generate ALT text using LLaVA with smart retry logic."""
         import base64
         import requests
         import time
@@ -68,7 +68,9 @@ class LLaVAProvider(BaseAltProvider):
             'tokens_used': 0,
             'cost_estimate': 0.0,  # Local inference is free
             'generation_time': 0.0,
-            'success': False
+            'success': False,
+            'retry_attempts': 0,
+            'retry_strategies_used': []
         }
         response_text = None
 
@@ -77,6 +79,7 @@ class LLaVAProvider(BaseAltProvider):
             if image_data:
                 # Image data already provided (base64 encoded)
                 logger.debug("Using provided image data")
+                original_image_data = base64.b64decode(image_data)
             else:
                 # Load image from file
                 image_file = Path(image_path)
@@ -84,102 +87,156 @@ class LLaVAProvider(BaseAltProvider):
                     logger.error(f"Image file not found: {image_path}")
                     return None, metadata
 
-                # Encode image
+                # Load original image data
                 with open(image_file, "rb") as f:
-                    image_data = base64.b64encode(f.read()).decode("utf-8")
+                    original_image_data = f.read()
                     
-            logger.debug("Base64 image size: %s", len(image_data))
-
-            prompt_length = len(prompt)
-            if self.logging_config.get('show_prompts', False):
-                logger.debug(
-                    "Prompt length: %s; preview: %s",
-                    prompt_length,
-                    prompt[:100],
-                )
-            else:
-                logger.debug("Prompt length: %s", prompt_length)
-
-            # Build minimal payload with only required fields
-            payload = {
-                "model": self.config['model'],
-                "prompt": prompt,
-                "images": [image_data],
-                "stream": False
-            }
-
-            # Prepare endpoint, forcing 127.0.0.1 to avoid localhost resolution issues
-            endpoint = self.config['endpoint'].replace('localhost', '127.0.0.1')
-            timeout = self.config.get('timeout', 60)
-            logger.debug("Endpoint: %s; timeout: %s", endpoint, timeout)
+            # Try different image formats/sizes on failure
+            retry_strategies = [
+                {'format': 'PNG', 'quality': None, 'max_size': None, 'description': 'original format'},
+                {'format': 'JPEG', 'quality': 90, 'max_size': None, 'description': 'JPEG high quality'},
+                {'format': 'PNG', 'quality': None, 'max_size': 1024, 'description': 'PNG smaller'},
+                {'format': 'JPEG', 'quality': 75, 'max_size': 800, 'description': 'JPEG medium quality, smaller'},
+                {'format': 'JPEG', 'quality': 60, 'max_size': 512, 'description': 'JPEG low quality, small'}
+            ]
             
-            # Enhanced logging based on configuration
-            logging_config = self.config_manager.config.get('logging', {})
-            
-            if logging_config.get('log_request_details', False):
-                # Log exact request payload being sent (truncated image data for readability)
-                payload_debug = payload.copy()
-                if 'images' in payload_debug and payload_debug['images']:
-                    payload_debug['images'] = [f"<base64_image_data_length:{len(payload_debug['images'][0])}>"]
-                logger.info("🔄 REQUEST: %s", json.dumps(payload_debug, indent=2))
-                logger.info("🌐 ENDPOINT: %s", endpoint)
-                logger.info("⏱️ TIMEOUT: %ss", timeout)
-
-            # Make request with performance tracking
-            request_start = time.time()
-            response = requests.post(
-                endpoint,
-                json=payload,
-                timeout=timeout
-            )
-            request_duration = time.time() - request_start
-            
-            # Enhanced response logging
-            response_text = response.text
-            
-            if logging_config.get('log_request_details', False):
-                logger.info("📥 RESPONSE STATUS: %s", response.status_code)
-                logger.info("📊 RESPONSE TIME: %.3fs", request_duration)
-                logger.info("📄 RESPONSE SIZE: %d bytes", len(response_text))
+            for attempt, strategy in enumerate(retry_strategies):
+                metadata['retry_attempts'] = attempt
+                if attempt > 0:
+                    logger.info(f"Retry attempt {attempt} using strategy: {strategy['description']}")
                 
-                # Log response headers if interesting
-                content_type = response.headers.get('content-type', 'unknown')
-                logger.info("📋 CONTENT-TYPE: %s", content_type)
-                
-                # Log response preview
-                if logging_config.get('show_responses', False):
-                    logger.info("📝 RESPONSE BODY: %s", response_text[:1000])
-                else:
-                    logger.info("📝 RESPONSE PREVIEW: %s", response_text[:200])
-            
-            response.raise_for_status()
+                try:
+                    # Process image according to retry strategy
+                    processed_image_data = self._process_image_for_retry(
+                        original_image_data, strategy, image_path
+                    )
+                    
+                    # Encode as base64
+                    image_data_b64 = base64.b64encode(processed_image_data).decode("utf-8")
+                    metadata['retry_strategies_used'].append(strategy['description'])
+                    
+                    logger.debug("Base64 image size: %s", len(image_data_b64))
 
-            result = response.json()
-            alt_text = result.get("response", "").strip()
+                    prompt_length = len(prompt)
+                    if self.logging_config.get('show_prompts', False):
+                        logger.debug(
+                            "Prompt length: %s; preview: %s",
+                            prompt_length,
+                            prompt[:100],
+                        )
+                    else:
+                        logger.debug("Prompt length: %s", prompt_length)
+
+                    # Build minimal payload with only required fields
+                    payload = {
+                        "model": self.config['model'],
+                        "prompt": prompt,
+                        "images": [image_data_b64],
+                        "stream": False
+                    }
+
+                    # Prepare endpoint, forcing 127.0.0.1 to avoid localhost resolution issues
+                    endpoint = self.config['endpoint'].replace('localhost', '127.0.0.1')
+                    timeout = self.config.get('timeout', 60)
+                    logger.debug("Endpoint: %s; timeout: %s", endpoint, timeout)
+                    
+                    # Enhanced logging based on configuration
+                    logging_config = self.config_manager.config.get('logging', {})
+                    
+                    if logging_config.get('log_request_details', False):
+                        # Log exact request payload being sent (truncated image data for readability)
+                        payload_debug = payload.copy()
+                        if 'images' in payload_debug and payload_debug['images']:
+                            payload_debug['images'] = [f"<base64_image_data_length:{len(payload_debug['images'][0])}>"]
+                        logger.info("🔄 REQUEST: %s", json.dumps(payload_debug, indent=2))
+                        logger.info("🌐 ENDPOINT: %s", endpoint)
+                        logger.info("⏱️ TIMEOUT: %ss", timeout)
+
+                    # Make request with performance tracking
+                    request_start = time.time()
+                    response = requests.post(
+                        endpoint,
+                        json=payload,
+                        timeout=timeout
+                    )
+                    request_duration = time.time() - request_start
+                    
+                    # Enhanced response logging
+                    response_text = response.text
+                    
+                    if logging_config.get('log_request_details', False):
+                        logger.info("📥 RESPONSE STATUS: %s", response.status_code)
+                        logger.info("📊 RESPONSE TIME: %.3fs", request_duration)
+                        logger.info("📄 RESPONSE SIZE: %d bytes", len(response_text))
+                        
+                        # Log response headers if interesting
+                        content_type = response.headers.get('content-type', 'unknown')
+                        logger.info("📋 CONTENT-TYPE: %s", content_type)
+                        
+                        # Log response preview
+                        if logging_config.get('show_responses', False):
+                            logger.info("📝 RESPONSE BODY: %s", response_text[:1000])
+                        else:
+                            logger.info("📝 RESPONSE PREVIEW: %s", response_text[:200])
+                    
+                    response.raise_for_status()
+
+                    result = response.json()
+                    alt_text = result.get("response", "").strip()
+                    
+                    total_time = time.time() - start_time
+                    metadata['generation_time'] = total_time
+                    metadata['request_time'] = request_duration
+                    metadata['processing_time'] = total_time - request_duration
+                    metadata['success'] = bool(alt_text)
+                    
+                    # Performance logging
+                    if logging_config.get('log_performance', False):
+                        logger.info("⚡ PERFORMANCE BREAKDOWN:")
+                        logger.info("  🌐 Request time: %.3fs", request_duration)
+                        logger.info("  🔄 Processing time: %.3fs", total_time - request_duration)
+                        logger.info("  📊 Total time: %.3fs", total_time)
+                        if alt_text:
+                            chars_per_sec = len(alt_text) / total_time if total_time > 0 else 0
+                            logger.info("  📝 Generation rate: %.1f chars/sec", chars_per_sec)
+                    
+                    # Log successful generation
+                    if alt_text:
+                        logger.info("✅ Generated ALT text (%.3fs): %s", total_time, alt_text[:100])
+                        return alt_text, metadata
+                    else:
+                        logger.warning("⚠️ No ALT text generated despite successful response")
+                        if attempt < len(retry_strategies) - 1:
+                            continue  # Try next strategy
+                            
+                except requests.exceptions.RequestException as e:
+                    status_code = getattr(e.response, 'status_code', None)
+                    logger.warning(f"Request failed (attempt {attempt + 1}): {e} (status: {status_code})")
+                    
+                    # For 500 errors, definitely try next strategy
+                    if status_code == 500 and attempt < len(retry_strategies) - 1:
+                        logger.info("Server error 500 - trying next format strategy")
+                        time.sleep(2)  # Brief delay before retry
+                        continue
+                    
+                    # For other request errors, only retry if we have strategies left
+                    if attempt < len(retry_strategies) - 1:
+                        time.sleep(1)  # Brief delay before retry
+                        continue
+                    else:
+                        # Last attempt failed, re-raise the exception
+                        raise e
+                        
+                except Exception as e:
+                    logger.warning(f"Processing failed (attempt {attempt + 1}): {e}")
+                    if attempt < len(retry_strategies) - 1:
+                        continue
+                    else:
+                        raise e
             
-            total_time = time.time() - start_time
-            metadata['generation_time'] = total_time
-            metadata['request_time'] = request_duration
-            metadata['processing_time'] = total_time - request_duration
-            metadata['success'] = bool(alt_text)
-            
-            # Performance logging
-            if logging_config.get('log_performance', False):
-                logger.info("⚡ PERFORMANCE BREAKDOWN:")
-                logger.info("  🌐 Request time: %.3fs", request_duration)
-                logger.info("  🔄 Processing time: %.3fs", total_time - request_duration)
-                logger.info("  📊 Total time: %.3fs", total_time)
-                if alt_text:
-                    chars_per_sec = len(alt_text) / total_time if total_time > 0 else 0
-                    logger.info("  📝 Generation rate: %.1f chars/sec", chars_per_sec)
-            
-            # Log successful generation
-            if alt_text:
-                logger.info("✅ Generated ALT text (%.3fs): %s", total_time, alt_text[:100])
-            else:
-                logger.warning("⚠️ No ALT text generated despite successful response")
-            
-            return alt_text if alt_text else None, metadata
+            # If we get here, all strategies failed
+            logger.error("All retry strategies exhausted")
+            return None, metadata
             
         except requests.exceptions.RequestException as e:
             metadata['generation_time'] = time.time() - start_time
@@ -209,6 +266,64 @@ class LLaVAProvider(BaseAltProvider):
                 "Error with %s: %s", self.provider_name, e, exc_info=True
             )
             return None, metadata
+    
+    def _process_image_for_retry(self, image_data: bytes, strategy: dict, image_path: str) -> bytes:
+        """
+        Process image according to retry strategy (format conversion, resizing, quality adjustment).
+        
+        Args:
+            image_data: Original image data
+            strategy: Retry strategy configuration
+            image_path: Original image path for logging
+            
+        Returns:
+            Processed image data
+        """
+        try:
+            from PIL import Image
+            import io
+            
+            # First attempt - return original data
+            if strategy['format'] == 'PNG' and strategy.get('max_size') is None:
+                return image_data
+            
+            # Load image with PIL
+            with io.BytesIO(image_data) as img_buffer:
+                img = Image.open(img_buffer)
+                
+                # Convert to RGB if needed (especially for JPEG output)
+                if strategy['format'] == 'JPEG' and img.mode in ('RGBA', 'LA', 'P'):
+                    # Convert transparent images to white background for JPEG
+                    if img.mode == 'RGBA':
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        background.paste(img, mask=img.split()[-1])  # Use alpha channel as mask
+                        img = background
+                    else:
+                        img = img.convert('RGB')
+                elif img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+                
+                # Resize if requested
+                if strategy.get('max_size'):
+                    max_size = strategy['max_size']
+                    if max(img.size) > max_size:
+                        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                        logger.debug(f"Resized image to {img.size} for retry strategy")
+                
+                # Save with appropriate format and quality
+                output_buffer = io.BytesIO()
+                save_kwargs = {'format': strategy['format'], 'optimize': True}
+                
+                if strategy['format'] == 'JPEG' and strategy.get('quality'):
+                    save_kwargs['quality'] = strategy['quality']
+                
+                img.save(output_buffer, **save_kwargs)
+                return output_buffer.getvalue()
+                
+        except Exception as e:
+            logger.warning(f"Image processing failed for retry strategy {strategy}: {e}")
+            # Fallback to original data
+            return image_data
 
 
 class FlexibleAltGenerator:

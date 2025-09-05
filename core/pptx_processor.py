@@ -3672,10 +3672,24 @@ class PPTXAccessibilityProcessor:
             Generated ALT text or None if generation failed
         """
         try:
-            # Save image to temporary file for ALT text generation
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
-                temp_file.write(image_info.image_data)
-                temp_image_path = temp_file.name
+            # Normalize image format before processing
+            try:
+                normalized_image_data = self._normalize_image_format(image_info.image_data, image_info.filename)
+                
+                # Save normalized image to temporary file for ALT text generation
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                    temp_file.write(normalized_image_data)
+                    temp_image_path = temp_file.name
+                    
+            except Exception as norm_error:
+                # Check if this is a vector format conversion failure
+                if "Vector format conversion failed" in str(norm_error) and image_info.filename.lower().endswith(('.wmf', '.emf')):
+                    # Generate contextual fallback ALT text
+                    format_name = "WMF" if image_info.filename.lower().endswith('.wmf') else "EMF"
+                    return self._generate_vector_fallback_alt(image_info, format_name)
+                else:
+                    # For other normalization failures, re-raise
+                    raise norm_error
             
             try:
                 # Build context for better ALT text generation
@@ -3704,6 +3718,356 @@ class PPTXAccessibilityProcessor:
             logger.error(f"Failed to generate ALT text for {image_info.image_key}: {e}")
             return None
     
+    def _normalize_image_format(self, image_data: bytes, filename: str, debug: bool = False) -> bytes:
+        """
+        Normalize image format to prevent TIFF/WMF/EMF crashes with LLaVA.
+        Converts problematic formats to PNG and optionally resizes large images.
+        
+        Args:
+            image_data: Original image data
+            filename: Original filename for format detection
+            debug: Enable debug logging
+            
+        Returns:
+            Normalized image data (PNG format)
+        """
+        try:
+            if not PIL_AVAILABLE:
+                logger.warning("PIL not available - cannot normalize image format")
+                return image_data
+            
+            # Detect problematic formats that crash LLaVA
+            filename_lower = filename.lower()
+            is_problematic_format = (
+                filename_lower.endswith(('.tiff', '.tif', '.wmf', '.emf')) or
+                b'TIFF' in image_data[:100] or
+                b'WMF' in image_data[:100] or 
+                b'EMF' in image_data[:100]
+            )
+            
+            if debug:
+                logger.debug(f"Image format check: {filename} -> problematic: {is_problematic_format}")
+            
+            # Try to open the image with PIL
+            try:
+                with io.BytesIO(image_data) as img_buffer:
+                    img = Image.open(img_buffer)
+                    original_format = img.format
+                    original_size = img.size
+                    
+                    if debug:
+                        logger.debug(f"Original image: format={original_format}, size={original_size}")
+                    
+                    # Convert to RGB if needed (handles RGBA, CMYK, etc.)
+                    if img.mode not in ('RGB', 'L'):  # L for grayscale
+                        if debug:
+                            logger.debug(f"Converting from {img.mode} to RGB")
+                        img = img.convert('RGB')
+                    
+                    # Check if image is very large and resize if configured
+                    max_dimension = self.processing_config.get('max_image_dimension', 1600)
+                    if max(original_size) > max_dimension:
+                        # Calculate new size maintaining aspect ratio
+                        width, height = original_size
+                        if width > height:
+                            new_width = max_dimension
+                            new_height = int(height * (max_dimension / width))
+                        else:
+                            new_height = max_dimension
+                            new_width = int(width * (max_dimension / height))
+                        
+                        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                        if debug:
+                            logger.debug(f"Resized image from {original_size} to {img.size}")
+                    
+                    # Save as PNG
+                    output_buffer = io.BytesIO()
+                    img.save(output_buffer, format='PNG', optimize=True)
+                    normalized_data = output_buffer.getvalue()
+                    
+                    if debug:
+                        logger.debug(f"Normalized: {len(image_data)} -> {len(normalized_data)} bytes")
+                    
+                    return normalized_data
+                    
+            except Exception as pil_error:
+                logger.warning(f"PIL failed to process image {filename}: {pil_error}")
+                
+                # For WMF/EMF formats, try external converters
+                if filename_lower.endswith(('.wmf', '.emf')):
+                    logger.info(f"Attempting external conversion for {filename}")
+                    try:
+                        converted_data = self._convert_vector_image_external(image_data, filename, debug)
+                        if converted_data:
+                            return converted_data
+                    except Exception as ext_error:
+                        logger.warning(f"External conversion failed for {filename}: {ext_error}")
+                
+                # If PIL fails but it's a problematic format, we can't process it
+                if is_problematic_format:
+                    logger.error(f"Cannot process problematic format {filename} - all conversion methods failed")
+                    
+                    # For WMF/EMF, provide contextual fallback instead of failing completely
+                    if filename_lower.endswith(('.wmf', '.emf')):
+                        logger.info(f"Using contextual fallback for unsupported vector format {filename}")
+                        # Don't raise exception - let the calling method handle contextual fallback
+                        raise Exception(f"Vector format conversion failed: {filename}")
+                    
+                    raise Exception(f"Unsupported image format: {filename}")
+                
+                # For other formats that PIL can't handle, return original data
+                return image_data
+                
+        except Exception as e:
+            logger.error(f"Image normalization failed for {filename}: {e}")
+            # If normalization fails and it's a problematic format, we should fail
+            if filename.lower().endswith(('.tiff', '.tif', '.wmf', '.emf')):
+                raise Exception(f"Cannot process {filename}: format normalization failed")
+            # Otherwise return original data and hope for the best
+            return image_data
+    
+    def _convert_vector_image_external(self, image_data: bytes, filename: str, debug: bool = False) -> bytes:
+        """
+        Convert WMF/EMF images using external tools when PIL fails.
+        Tries multiple conversion strategies in order of preference.
+        
+        Args:
+            image_data: Original WMF/EMF image data
+            filename: Original filename for logging
+            debug: Enable debug logging
+            
+        Returns:
+            Converted PNG image data
+            
+        Raises:
+            Exception: If all conversion methods fail
+        """
+        import subprocess
+        import tempfile
+        import shutil
+        
+        # Create temporary files for input and output
+        input_suffix = '.wmf' if filename.lower().endswith('.wmf') else '.emf'
+        
+        with tempfile.NamedTemporaryFile(suffix=input_suffix, delete=False) as input_file:
+            input_file.write(image_data)
+            input_path = input_file.name
+            
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as output_file:
+            output_path = output_file.name
+        
+        try:
+            # Strategy 1: Inkscape (best quality for vector formats)
+            if shutil.which('inkscape'):
+                try:
+                    if debug:
+                        logger.debug(f"Trying Inkscape conversion for {filename}")
+                    
+                    cmd = [
+                        'inkscape',
+                        '--export-type=png',
+                        '--export-dpi=300',
+                        '--export-background=white',
+                        '--export-background-opacity=1.0',
+                        '--export-filename', output_path,
+                        input_path
+                    ]
+                    
+                    result = subprocess.run(
+                        cmd, 
+                        capture_output=True, 
+                        text=True, 
+                        timeout=30,
+                        check=False
+                    )
+                    
+                    if result.returncode == 0 and os.path.exists(output_path):
+                        with open(output_path, 'rb') as f:
+                            converted_data = f.read()
+                        if len(converted_data) > 100:  # Sanity check for valid PNG
+                            if debug:
+                                logger.debug(f"Inkscape conversion successful: {len(converted_data)} bytes")
+                            return converted_data
+                    elif debug:
+                        logger.debug(f"Inkscape failed: {result.stderr}")
+                        
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Inkscape conversion timed out for {filename}")
+                except Exception as e:
+                    if debug:
+                        logger.debug(f"Inkscape conversion error: {e}")
+            
+            # Strategy 2: ImageMagick/GraphicsMagick
+            magick_commands = ['magick', 'convert']  # Try both names
+            for magick_cmd in magick_commands:
+                if shutil.which(magick_cmd):
+                    try:
+                        if debug:
+                            logger.debug(f"Trying {magick_cmd} conversion for {filename}")
+                        
+                        cmd = [
+                            magick_cmd,
+                            '-density', '300',
+                            '-background', 'white',
+                            '-alpha', 'remove',
+                            input_path,
+                            output_path
+                        ]
+                        
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False
+                        )
+                        
+                        if result.returncode == 0 and os.path.exists(output_path):
+                            with open(output_path, 'rb') as f:
+                                converted_data = f.read()
+                            if len(converted_data) > 100:
+                                if debug:
+                                    logger.debug(f"{magick_cmd} conversion successful: {len(converted_data)} bytes")
+                                return converted_data
+                        elif debug:
+                            logger.debug(f"{magick_cmd} failed: {result.stderr}")
+                            
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"{magick_cmd} conversion timed out for {filename}")
+                    except Exception as e:
+                        if debug:
+                            logger.debug(f"{magick_cmd} conversion error: {e}")
+                    break  # Don't try other magick commands if one is found
+            
+            # Strategy 3: LibreOffice headless (last resort)
+            if shutil.which('libreoffice'):
+                try:
+                    if debug:
+                        logger.debug(f"Trying LibreOffice conversion for {filename}")
+                    
+                    # LibreOffice needs a directory to work in
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_input = os.path.join(temp_dir, f"input{input_suffix}")
+                        shutil.copy2(input_path, temp_input)
+                        
+                        cmd = [
+                            'libreoffice',
+                            '--headless',
+                            '--convert-to', 'png',
+                            '--outdir', temp_dir,
+                            temp_input
+                        ]
+                        
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            check=False
+                        )
+                        
+                        # LibreOffice creates input.png
+                        lo_output = os.path.join(temp_dir, "input.png")
+                        if result.returncode == 0 and os.path.exists(lo_output):
+                            with open(lo_output, 'rb') as f:
+                                converted_data = f.read()
+                            if len(converted_data) > 100:
+                                if debug:
+                                    logger.debug(f"LibreOffice conversion successful: {len(converted_data)} bytes")
+                                return converted_data
+                        elif debug:
+                            logger.debug(f"LibreOffice failed: {result.stderr}")
+                            
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"LibreOffice conversion timed out for {filename}")
+                except Exception as e:
+                    if debug:
+                        logger.debug(f"LibreOffice conversion error: {e}")
+            
+            # All external converters failed
+            raise Exception(f"All external converters failed for {filename}")
+            
+        finally:
+            # Clean up temporary files
+            try:
+                os.unlink(input_path)
+                os.unlink(output_path)
+            except OSError:
+                pass  # Ignore cleanup failures
+    
+    def _generate_vector_fallback_alt(self, image_info: PPTXImageInfo, format_name: str, debug: bool = False) -> str:
+        """
+        Generate contextual fallback ALT text for vector images (WMF/EMF) that can't be converted.
+        
+        Args:
+            image_info: Image information
+            format_name: Format name (WMF or EMF)
+            debug: Enable debug logging
+            
+        Returns:
+            Contextual ALT text describing the vector image
+        """
+        context_parts = []
+        
+        # Get slide context
+        slide_text = image_info.slide_text.strip() if image_info.slide_text else ""
+        
+        # Determine image type based on context and dimensions
+        width_px = image_info.width_px or 0
+        height_px = image_info.height_px or 0
+        
+        # Analyze context for diagram type hints
+        context_lower = slide_text.lower()
+        
+        # Scientific/technical diagram indicators
+        if any(word in context_lower for word in [
+            'diagram', 'chart', 'graph', 'plot', 'circuit', 'schematic', 
+            'flowchart', 'equation', 'formula', 'model', 'structure',
+            'membrane', 'potential', 'channel', 'protein', 'cell'
+        ]):
+            if any(word in context_lower for word in ['membrane', 'potential', 'channel', 'cell', 'protein']):
+                diagram_type = "scientific diagram"
+            elif any(word in context_lower for word in ['circuit', 'electrical', 'voltage', 'current']):
+                diagram_type = "electrical circuit diagram"  
+            elif any(word in context_lower for word in ['flow', 'process', 'step']):
+                diagram_type = "process flow diagram"
+            else:
+                diagram_type = "technical diagram"
+        else:
+            # Generic based on dimensions
+            aspect_ratio = width_px / height_px if height_px > 0 else 1
+            if aspect_ratio > 1.5:
+                diagram_type = "horizontal diagram"
+            elif aspect_ratio < 0.67:
+                diagram_type = "vertical diagram"
+            else:
+                diagram_type = "diagram"
+        
+        # Build contextual description
+        context_parts.append(f"Vector {diagram_type} ({format_name} format)")
+        
+        # Add size information
+        if width_px and height_px:
+            context_parts.append(f"({width_px}×{height_px} pixels)")
+        
+        # Add slide context if meaningful
+        if slide_text:
+            # Extract key terms from slide text (first meaningful sentence/phrase)
+            slide_words = slide_text.split()[:15]  # First 15 words
+            clean_text = ' '.join(slide_words)
+            if len(clean_text) > 100:
+                clean_text = clean_text[:97] + "..."
+            context_parts.append(f"related to: {clean_text}")
+        
+        # Add hint about format limitation
+        alt_text = ' '.join(context_parts)
+        alt_text += f". Note: Original {format_name} vector image could not be processed for detailed analysis."
+        
+        if debug:
+            logger.debug(f"Generated vector fallback ALT: {alt_text}")
+        
+        return alt_text
+    
     def _generate_alt_text_for_image_with_validation(self, image_info: PPTXImageInfo, debug: bool = False) -> Tuple[Optional[str], Optional[str]]:
         """
         Generate ALT text with comprehensive validation and detailed failure tracking.
@@ -3718,10 +4082,25 @@ class PPTXAccessibilityProcessor:
         failure_reason = None
         
         try:
-            # Save image to temporary file for ALT text generation
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
-                temp_file.write(image_info.image_data)
-                temp_image_path = temp_file.name
+            # Normalize image format before processing
+            try:
+                normalized_image_data = self._normalize_image_format(image_info.image_data, image_info.filename, debug)
+                
+                # Save normalized image to temporary file for ALT text generation
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                    temp_file.write(normalized_image_data)
+                    temp_image_path = temp_file.name
+                    
+            except Exception as norm_error:
+                # Check if this is a vector format conversion failure
+                if "Vector format conversion failed" in str(norm_error) and image_info.filename.lower().endswith(('.wmf', '.emf')):
+                    # Generate contextual fallback ALT text
+                    format_name = "WMF" if image_info.filename.lower().endswith('.wmf') else "EMF"
+                    contextual_alt = self._generate_vector_fallback_alt(image_info, format_name, debug)
+                    return contextual_alt, None  # No failure reason since we provided fallback
+                else:
+                    # For other normalization failures, re-raise
+                    raise norm_error
             
             try:
                 # Build context for better ALT text generation
