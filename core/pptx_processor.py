@@ -1567,7 +1567,9 @@ class PPTXAccessibilityProcessor:
                     'height_px': visual_element.height_px,
                     'slide_idx': visual_element.slide_idx,
                     'shape_idx': visual_element.shape_idx,
-                    'shape': visual_element.shape
+                    'shape': visual_element.shape,
+                    'image_key': visual_element.element_key,  # Use the stable element key
+                    'image_hash': visual_element.element_hash  # Include the hash too
                 })()
                 
                 return self._generate_alt_text_for_image_with_validation(temp_image_info, debug)
@@ -3682,10 +3684,14 @@ class PPTXAccessibilityProcessor:
                     temp_image_path = temp_file.name
                     
             except Exception as norm_error:
-                # Check if this is a vector format conversion failure
-                if "Vector format conversion failed" in str(norm_error) and image_info.filename.lower().endswith(('.wmf', '.emf')):
+                # Check if this is a vector format conversion failure OR any WMF/EMF processing failure
+                if (("Vector format conversion failed" in str(norm_error) or 
+                     "format normalization failed" in str(norm_error) or
+                     "Cannot process" in str(norm_error)) and 
+                    image_info.filename.lower().endswith(('.wmf', '.emf'))):
                     # Generate contextual fallback ALT text
                     format_name = "WMF" if image_info.filename.lower().endswith('.wmf') else "EMF"
+                    logger.info(f"Generating contextual fallback ALT for {image_info.filename}")
                     return self._generate_vector_fallback_alt(image_info, format_name)
                 else:
                     # For other normalization failures, re-raise
@@ -3799,9 +3805,13 @@ class PPTXAccessibilityProcessor:
                     try:
                         converted_data = self._convert_vector_image_external(image_data, filename, debug)
                         if converted_data:
+                            logger.info(f"External conversion successful for {filename}: {len(converted_data)} bytes")
                             return converted_data
+                        else:
+                            logger.warning(f"External conversion returned no data for {filename}")
                     except Exception as ext_error:
                         logger.warning(f"External conversion failed for {filename}: {ext_error}")
+                        # Continue to contextual fallback instead of failing
                 
                 # If PIL fails but it's a problematic format, we can't process it
                 if is_problematic_format:
@@ -3810,7 +3820,7 @@ class PPTXAccessibilityProcessor:
                     # For WMF/EMF, provide contextual fallback instead of failing completely
                     if filename_lower.endswith(('.wmf', '.emf')):
                         logger.info(f"Using contextual fallback for unsupported vector format {filename}")
-                        # Don't raise exception - let the calling method handle contextual fallback
+                        # Signal that contextual fallback should be used
                         raise Exception(f"Vector format conversion failed: {filename}")
                     
                     raise Exception(f"Unsupported image format: {filename}")
@@ -3860,8 +3870,7 @@ class PPTXAccessibilityProcessor:
             # Strategy 1: Inkscape (best quality for vector formats)
             if shutil.which('inkscape'):
                 try:
-                    if debug:
-                        logger.debug(f"Trying Inkscape conversion for {filename}")
+                    logger.info(f"Trying Inkscape conversion for {filename}")
                     
                     cmd = [
                         'inkscape',
@@ -3873,6 +3882,8 @@ class PPTXAccessibilityProcessor:
                         input_path
                     ]
                     
+                    logger.info(f"Running command: {' '.join(cmd)}")
+                    
                     result = subprocess.run(
                         cmd, 
                         capture_output=True, 
@@ -3881,21 +3892,28 @@ class PPTXAccessibilityProcessor:
                         check=False
                     )
                     
+                    logger.info(f"Inkscape result: returncode={result.returncode}")
+                    if result.stdout:
+                        logger.info(f"Inkscape stdout: {result.stdout}")
+                    if result.stderr:
+                        logger.info(f"Inkscape stderr: {result.stderr}")
+                    
                     if result.returncode == 0 and os.path.exists(output_path):
                         with open(output_path, 'rb') as f:
                             converted_data = f.read()
+                        logger.info(f"Inkscape output file size: {len(converted_data)} bytes")
                         if len(converted_data) > 100:  # Sanity check for valid PNG
-                            if debug:
-                                logger.debug(f"Inkscape conversion successful: {len(converted_data)} bytes")
+                            logger.info(f"Inkscape conversion successful: {len(converted_data)} bytes")
                             return converted_data
-                    elif debug:
-                        logger.debug(f"Inkscape failed: {result.stderr}")
+                    else:
+                        logger.warning(f"Inkscape failed or no output file: returncode={result.returncode}, exists={os.path.exists(output_path)}")
                         
                 except subprocess.TimeoutExpired:
                     logger.warning(f"Inkscape conversion timed out for {filename}")
                 except Exception as e:
-                    if debug:
-                        logger.debug(f"Inkscape conversion error: {e}")
+                    logger.warning(f"Inkscape conversion error: {e}")
+            else:
+                logger.info("Inkscape not available")
             
             # Strategy 2: ImageMagick/GraphicsMagick
             magick_commands = ['magick', 'convert']  # Try both names
@@ -4092,10 +4110,14 @@ class PPTXAccessibilityProcessor:
                     temp_image_path = temp_file.name
                     
             except Exception as norm_error:
-                # Check if this is a vector format conversion failure
-                if "Vector format conversion failed" in str(norm_error) and image_info.filename.lower().endswith(('.wmf', '.emf')):
+                # Check if this is a vector format conversion failure OR any WMF/EMF processing failure
+                if (("Vector format conversion failed" in str(norm_error) or 
+                     "format normalization failed" in str(norm_error) or
+                     "Cannot process" in str(norm_error)) and 
+                    image_info.filename.lower().endswith(('.wmf', '.emf'))):
                     # Generate contextual fallback ALT text
                     format_name = "WMF" if image_info.filename.lower().endswith('.wmf') else "EMF"
+                    logger.info(f"Generating contextual fallback ALT for {image_info.filename}")
                     contextual_alt = self._generate_vector_fallback_alt(image_info, format_name, debug)
                     return contextual_alt, None  # No failure reason since we provided fallback
                 else:
