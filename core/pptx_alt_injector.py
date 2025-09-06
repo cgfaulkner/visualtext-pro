@@ -422,38 +422,30 @@ class PPTXAltTextInjector:
         return n.lower() != c.lower()
     
     def _read_current_alt(self, shape) -> str:
-        """
-        PHASE 1.1 HOTFIX: Read ONLY cNvPr/@descr and @title, no roll-ups.
-        This is the single source of truth for what's currently in the shape.
-        
-        Args:
-            shape: Shape to read ALT text from
-            
-        Returns:
-            Current ALT text (trimmed), empty string if none
-        """
+        """Return existing ALT (descr) from the shape if present; '' if none."""
         try:
-            # Read description (primary ALT text)
-            descr = getattr(shape, 'descr', '') or ''
-            descr = descr.strip()
-            
-            # Also check title as secondary source
-            title = getattr(shape, 'title', '') or ''
-            title = title.strip()
-            
-            # Return the longer/more descriptive one
-            if descr and title:
-                return descr if len(descr) >= len(title) else title
-            elif descr:
-                return descr
-            elif title:
-                return title
-            else:
-                return ''
-                
-        except Exception as e:
-            logger.debug(f"Error reading current ALT text: {e}")
-            return ''
+            element = getattr(shape, "_element", None) or getattr(shape, "element", None)
+            if element is None:
+                return ""
+            ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
+            # Prefer precise nodes; fall back to any cNvPr
+            for xp in (".//p:nvPicPr/p:cNvPr", ".//p:nvSpPr/p:cNvPr", ".//p:nvCxnSpPr/p:cNvPr",
+                       ".//p:nvGraphicFramePr/p:cNvPr", ".//p:nvGrpSpPr/p:cNvPr", ".//p:cNvPr"):
+                nodes = _safe_xpath(element, xp, ns)
+                if nodes:
+                    return (nodes[0].get("descr") or "").strip()
+            return ""
+        except Exception:
+            return ""
+
+    def _has_meaningful_alt(self, shape) -> bool:
+        """True if current ALT exists and is not in skip list / not blank-ish."""
+        existing = self._read_current_alt(shape)
+        if not existing:
+            return False
+        # Respect your configured sentinel "skip" values (case-insensitive)
+        bads = {s.lower() for s in self.skip_alt_text_if}
+        return existing.lower() not in bads
     
     def _equivalent(self, text1: str, text2: str) -> bool:
         """
@@ -487,6 +479,11 @@ class PPTXAltTextInjector:
         when assigning .descr/.title, and they don't raise, so we ALWAYS
         write to XML and then verify.
         """
+        # Respect existing ALT in preserve mode
+        if getattr(self, "mode", "overwrite") == "preserve" and self._has_meaningful_alt(shape):
+            logger.debug("Preserve mode: existing ALT found; skipping reinjection for this shape.")
+            return
+            
         # Best-effort property set (harmless if ignored)
         for attr in ("descr", "title"):
             try:
@@ -505,33 +502,29 @@ class PPTXAltTextInjector:
             pass
     
     def _write_alt_via_xml_fallback(self, shape, text: str) -> None:
-        """Robust XML write to every plausible cNvPr location for this shape."""
+        """Write ALT to the correct cNvPr node. Set only 'descr' to avoid duplicates."""
         try:
             element = getattr(shape, "_element", None) or getattr(shape, "element", None)
             if element is None:
                 return
             ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
-            # Try the most specific paths first
+
+            # Try specific shape types first, then a generic fallback.
             paths = [
-                ".//p:nvPicPr/p:cNvPr",         # pictures
-                ".//p:nvSpPr/p:cNvPr",          # autoshapes
-                ".//p:nvCxnSpPr/p:cNvPr",       # connectors
-                ".//p:nvGraphicFramePr/p:cNvPr",# charts/tables
-                ".//p:nvGrpSpPr/p:cNvPr",       # groups
-                ".//p:cNvPr"                    # generic last resort
+                ".//p:nvPicPr/p:cNvPr",          # Picture
+                ".//p:nvSpPr/p:cNvPr",           # AutoShape
+                ".//p:nvCxnSpPr/p:cNvPr",        # Connector
+                ".//p:nvGraphicFramePr/p:cNvPr", # Chart/Table/SmartArt frame
+                ".//p:nvGrpSpPr/p:cNvPr",        # Group parent
+                ".//p:cNvPr"                     # Last resort
             ]
+
             wrote_any = False
             for xp in paths:
-                try:
-                    for cnvpr in _safe_xpath(element, xp, ns):
-                        cnvpr.set('descr', text)
-                        # Avoid "double read" on groups: don't set title for nvGrpSpPr
-                        if "nvGrpSpPr" not in xp:
-                            cnvpr.set('title', text)
-                        wrote_any = True
-                except Exception:
-                    # keep trying other paths
-                    continue
+                for cnvpr in _safe_xpath(element, xp, ns):
+                    # Only set 'descr' – leave 'title' empty to avoid duplicate reading in UI/AT.
+                    cnvpr.set('descr', text)
+                    wrote_any = True
             if not wrote_any:
                 logger.debug("XML fallback found no cNvPr to write ALT into for this shape.")
         except Exception as e:
@@ -664,6 +657,23 @@ class PPTXAltTextInjector:
             _nsmap["adec"] = "http://schemas.microsoft.com/office/drawing/2017/decorative"
         except Exception as e:
             logger.warning(f"Could not register XML namespaces: {e}")
+
+    def _dedupe_titles(self, presentation):
+        """Clean up pre-existing duplicates where title == descr."""
+        ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
+        for slide in presentation.slides:
+            for shp in slide.shapes:
+                el = getattr(shp, "_element", None) or getattr(shp, "element", None)
+                if el is None:
+                    continue
+                for xp in (".//p:nvPicPr/p:cNvPr", ".//p:nvSpPr/p:cNvPr",
+                           ".//p:nvCxnSpPr/p:cNvPr", ".//p:nvGraphicFramePr/p:cNvPr",
+                           ".//p:nvGrpSpPr/p:cNvPr", ".//p:cNvPr"):
+                    for cnvpr in _safe_xpath(el, xp, ns):
+                        descr = (cnvpr.get("descr") or "").strip()
+                        title = (cnvpr.get("title") or "").strip()
+                        if descr and title and title == descr:
+                            cnvpr.set("title", "")  # clear duplicate title
     
     def inject_alt_text_from_mapping(self, pptx_path: str, alt_text_mapping: Dict[str, str], 
                                    output_path: Optional[str] = None) -> Dict[str, Any]:
@@ -788,6 +798,9 @@ class PPTXAltTextInjector:
             # VERIFICATION STEP: Check what ALT texts are actually in the presentation before saving
             logger.info("🔍 DEBUG: POST-INJECTION VERIFICATION")
             self._perform_post_injection_verification(presentation, image_identifiers, alt_text_mapping)
+            
+            # Clean up any pre-existing duplicate title/descr pairs
+            self._dedupe_titles(presentation)
             
             # Save presentation
             output_path.parent.mkdir(parents=True, exist_ok=True)
