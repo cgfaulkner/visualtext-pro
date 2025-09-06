@@ -73,14 +73,16 @@ decorative_overrides:
   - chart
   - graph
 output:
+  char_limit: 125            # NEW: single source of truth
   thumbnail_max_width: 200
   include_token_count: true
   include_generation_time: true
   truncate_at_tokens: true
   smart_truncate: true
-  smart_truncate_prompt: 'Summarize the following text in one complete sentence of
-    no more than 20 words:'
-  max_summary_words: 20
+  smart_truncate_prompt: >
+    Rewrite the following as one complete sentence of at most 125 characters,
+    ending with a period:
+  max_summary_words: 30      # not critical anymore, kept as guardrail
 logging:
   level: INFO
   show_prompts: false
@@ -168,3 +170,6 @@ pptx_processing:
   # Image extraction settings
   supported_formats: ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "svg", "wmf", "emf"]
   convert_wmf_to_png: true     # Convert WMF files to PNG for better AI processing
+  
+  # Semantic analysis settings
+  enable_semantic_icon_labels: false  # Disable to avoid false positives like "lungs icon"

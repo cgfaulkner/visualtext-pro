@@ -737,6 +737,29 @@ class FlexibleAltGenerator:
         if monthly_limit > 0 and self.usage_stats['total_cost'] > monthly_limit:
             logger.warning(f"Monthly budget alert: ${self.usage_stats['total_cost']:.2f} > ${monthly_limit:.2f}")
     
+    def _ensure_terminal_period(self, text: str) -> str:
+        if not text:
+            return ""
+        t = text.strip()
+        return t if t[-1] in ".!?" else t + "."
+
+    def _shrink_to_char_limit(self, text: str, limit: int = 125) -> str:
+        t = " ".join(text.split())
+        if len(t) <= limit:
+            return t
+        # prefer cutting at sentence boundary or comma/semicolon near the limit
+        cut = limit
+        for sep in [". ", "; ", ", "]:
+            pos = t.rfind(sep, 0, limit)
+            if pos >= 60:  # don't create stubs that are too short
+                cut = pos + (1 if sep.strip() == "." else len(sep))
+                break
+        t = t[:cut].strip(" .;,")
+        # if still too long, cut at last space before limit
+        if len(t) > limit:
+            t = t[:limit].rsplit(" ", 1)[0]
+        return self._ensure_terminal_period(t)
+
     def _post_process_alt_text(self, alt_text: str) -> str:
         """Apply post-processing to generated ALT text."""
         # Apply smart truncation if configured
@@ -770,8 +793,11 @@ class FlexibleAltGenerator:
                 alt_text = clean_alt_text(alt_text)
             except ImportError:
                 logger.warning("alt_cleaner module not found, skipping text cleaning")
-        
-        return alt_text
+
+        # NEW: hard character limit + terminal punctuation
+        char_limit = self.config_manager.config.get('output', {}).get('char_limit', 125)
+        alt_text = self._shrink_to_char_limit(alt_text, char_limit)
+        return self._ensure_terminal_period(alt_text)
     
     def _summarize_text_to_sentence(self, text: str, max_words: int = 30) -> str:
         """Truncate text to a complete sentence within word limit."""

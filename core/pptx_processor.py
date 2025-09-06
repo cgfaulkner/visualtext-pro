@@ -73,35 +73,45 @@ from decorative_filter import (
 )
 
 def describe_shape_with_details(shape) -> str:
-    """Create descriptive ALT text for PowerPoint shapes with size and type info."""
+    """Return a grammatically correct phrase like:
+       'a text box. (921x195px)' or 'an unknown. (921x195px)'.
+       Caller will prepend 'This is a PowerPoint shape. It is '."""
+    import re
     from pptx.enum.shapes import MSO_SHAPE_TYPE
     
     def emu_to_px(emu_value):
         """Convert EMU (English Metric Units) to pixels. 1 px ≈ 9525 EMUs"""
         return round(emu_value / 9525)
     
-    # Get shape type description
-    shape_type_desc = "shape"
+    # Get shape type description and sanitize enum noise like 'picture (13)'
+    shape_type_desc = "unknown"
     try:
         if hasattr(shape, 'shape_type') and shape.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE:
-            # Try to get specific auto shape type
             if hasattr(shape, 'auto_shape_type'):
-                shape_type_desc = str(shape.auto_shape_type).split('.')[-1].replace('_', ' ').lower()
+                shape_type_desc = str(shape.auto_shape_type).split('.')[-1]
         elif hasattr(shape, 'shape_type'):
-            shape_type_desc = str(shape.shape_type).split('.')[-1].replace('_', ' ').lower()
+            shape_type_desc = str(shape.shape_type).split('.')[-1]
     except Exception:
         pass
+    
+    shape_type_desc = shape_type_desc.replace('_', ' ').lower()
+    shape_type_desc = re.sub(r'\s*\(\d+\)', '', shape_type_desc).strip()  # drop '(13)' etc.
+    if not shape_type_desc:
+        shape_type_desc = "unknown"
     
     # Get dimensions
     try:
         width_px = emu_to_px(shape.width) if hasattr(shape, 'width') else 0
         height_px = emu_to_px(shape.height) if hasattr(shape, 'height') else 0
-        size_info = f"({width_px}x{height_px}px)" if width_px > 0 and height_px > 0 else ""
+        size_info = f" ({width_px}x{height_px}px)" if width_px > 0 and height_px > 0 else ""
     except Exception:
         size_info = ""
     
-    # BOILERPLATE REMOVAL: Return minimal semantic description only (injector adds boilerplate if needed)
-    return f"{shape_type_desc} {size_info}".strip()
+    # Choose article; treat words that start with vowel sounds — and 'unknown' — as 'an'
+    needs_an = shape_type_desc[:1] in "aeiou" or shape_type_desc.startswith("unknown")
+    article = "an" if needs_an else "a"
+    # Return phrase to be appended after 'It is '
+    return f"{article} {shape_type_desc}.{size_info}"
 
 # Import PIL for shape-to-image rendering
 try:
@@ -334,6 +344,9 @@ class PPTXAccessibilityProcessor:
         self.include_slide_notes = self.processing_config.get('include_slide_notes', True)
         self.include_slide_text = self.processing_config.get('include_slide_text', True)
         self.max_context_length = self.processing_config.get('max_context_length', 200)
+        
+        # Semantic analysis settings
+        self.enable_semantic_icon_labels = self.processing_config.get('enable_semantic_icon_labels', False)
         
         logger.debug(f"Decorative size threshold: {self.decorative_size_threshold}px")
         logger.debug(f"Skip decorative images: {self.skip_decorative}")
@@ -964,6 +977,15 @@ class PPTXAccessibilityProcessor:
             # Don't render group shapes (they're processed recursively)
             if hasattr(shape, 'shapes'):
                 return False
+            
+            # If the shape has a picture fill, treat it as visual so we render it to an image
+            try:
+                from pptx.enum.dml import MSO_FILL_TYPE
+                if hasattr(shape, 'fill') and hasattr(shape.fill, 'type'):
+                    if shape.fill.type == MSO_FILL_TYPE.PICTURE:
+                        return True
+            except Exception:
+                pass
             
             # Render visual shape types that should be processed by LLaVa
             visual_shape_types = [
@@ -2076,6 +2098,7 @@ class PPTXAccessibilityProcessor:
     def _detect_group_semantic_type(self, group_shape, child_analysis: Dict[str, Any]) -> Optional[str]:
         """
         Detect if a group represents a semantic icon type (lightbulb, brain, etc.).
+        Disabled by default to avoid false positives.
         
         Args:
             group_shape: The group shape
@@ -2084,6 +2107,10 @@ class PPTXAccessibilityProcessor:
         Returns:
             Semantic type string if detected, None otherwise
         """
+        # Check if semantic icon labels are enabled
+        if not getattr(self, "enable_semantic_icon_labels", False):
+            return None
+            
         try:
             # Analyze shape patterns and geometry to detect common icons
             total_children = child_analysis['total_children']
@@ -5244,8 +5271,28 @@ class PPTXAccessibilityProcessor:
         if debug:
             logger.debug(f"    🔄 Handling LLaVA error for {element.element_key}")
         
-        # For now, return enhanced fallback
-        # TODO: Could add retry with simplified prompt here
+        # Prefer vector-aware fallback for image elements with WMF/EMF
+        try:
+            if getattr(element, 'element_type', '') == 'image' and getattr(element, 'filename', ''):
+                from pathlib import Path
+                ext = str(Path(element.filename).suffix).lower()
+                if ext in ('.wmf', '.emf'):
+                    # Build a minimal PPTXImageInfo to reuse vector fallback
+                    dummy = PPTXImageInfo(
+                        shape=element.shape,
+                        slide_idx=element.slide_idx,
+                        shape_idx=element.shape_idx,
+                        image_data=element.image_data or b'',
+                        filename=element.filename,
+                        slide_text=element.slide_text
+                    )
+                    fmt = 'WMF' if ext == '.wmf' else 'EMF'
+                    return self._generate_vector_fallback_alt(dummy, fmt, debug=debug)
+        except Exception as e:
+            if debug:
+                logger.debug(f"Vector-aware fallback path failed: {e}")
+
+        # default: generic shape description
         return self._create_enhanced_fallback_description(element)
     
     def _create_enhanced_fallback_description(self, element) -> str:
