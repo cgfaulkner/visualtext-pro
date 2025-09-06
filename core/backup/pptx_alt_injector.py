@@ -4,32 +4,6 @@ Injects ALT text into PowerPoint presentations using python-pptx XML manipulatio
 Integrates with existing ConfigManager, reinjection settings, and workflow patterns
 """
 
-# --- safe XPath helper for python-pptx (BaseOxmlElement) and raw lxml ---
-try:
-    from pptx.oxml.ns import nsmap as PPTX_NSMAP  # type: ignore
-except Exception:  # pragma: no cover
-    PPTX_NSMAP = {
-        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-        'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
-        'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart',
-    }
-
-def _safe_xpath(element, xpath_expr, namespaces=None):
-    """Execute an XPath on python-pptx BaseOxmlElement or plain lxml element.
-    Tries python-pptx override (no kwargs) first, then raw lxml with nsmap.
-    Accepts an optional explicit namespace map for raw lxml cases.
-    """
-    el = getattr(element, "_element", element)
-    try:
-        return el.xpath(xpath_expr)  # python-pptx injects namespaces
-    except Exception:
-        ns = namespaces or getattr(el, "nsmap", None) or PPTX_NSMAP
-        return el.xpath(xpath_expr, namespaces=ns)
-# --- end safe XPath helper ---
-
-
 import logging
 import os
 import sys
@@ -482,60 +456,38 @@ class PPTXAltTextInjector:
     
     def _write_descr_and_title(self, shape, text: str) -> None:
         """
-        Overwrite ALT text and make sure it actually lands in XML.
-        Many python-pptx shape classes (notably Picture) don't update XML
-        when assigning .descr/.title, and they don't raise, so we ALWAYS
-        write to XML and then verify.
+        PHASE 1.1 HOTFIX: Overwrite shape ALT text, NEVER append.
+        
+        Args:
+            shape: Shape to write to
+            text: Text to write (already normalized)
         """
-        # Best-effort property set (harmless if ignored)
-        for attr in ("descr", "title"):
-            try:
-                setattr(shape, attr, text)
-            except Exception:
-                pass
-        # Robust XML write (covers Picture, Shape, Connector, GraphicFrame, Group)
-        self._write_alt_via_xml_fallback(shape, text)
-        # Post-write verification; log if it didn't stick
         try:
-            after = self._read_current_alt(shape)
-            if not self._equivalent(after, text):
-                logger.debug("ALT post-write verification failed; XML write may not have stuck for this shape.")
-        except Exception:
-            # don't crash the injection flow on verification
-            pass
+            # OVERWRITE ONLY - never append
+            shape.descr = text
+            # Also set title for redundancy (some readers prefer title)
+            shape.title = text
+            
+        except Exception as e:
+            logger.debug(f"Error writing ALT text to shape: {e}")
+            # Try fallback XML approach if direct property fails
+            self._write_alt_via_xml_fallback(shape, text)
     
     def _write_alt_via_xml_fallback(self, shape, text: str) -> None:
-        """Robust XML write to every plausible cNvPr location for this shape."""
+        """Fallback XML writing if direct property access fails"""
         try:
-            element = getattr(shape, "_element", None) or getattr(shape, "element", None)
-            if element is None:
-                return
-            ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
-            # Try the most specific paths first
-            paths = [
-                ".//p:nvPicPr/p:cNvPr",         # pictures
-                ".//p:nvSpPr/p:cNvPr",          # autoshapes
-                ".//p:nvCxnSpPr/p:cNvPr",       # connectors
-                ".//p:nvGraphicFramePr/p:cNvPr",# charts/tables
-                ".//p:nvGrpSpPr/p:cNvPr",       # groups
-                ".//p:cNvPr"                    # generic last resort
-            ]
-            wrote_any = False
-            for xp in paths:
-                try:
-                    for cnvpr in _safe_xpath(element, xp, ns):
-                        cnvpr.set('descr', text)
-                        # Avoid "double read" on groups: don't set title for nvGrpSpPr
-                        if "nvGrpSpPr" not in xp:
-                            cnvpr.set('title', text)
-                        wrote_any = True
-                except Exception:
-                    # keep trying other paths
-                    continue
-            if not wrote_any:
-                logger.debug("XML fallback found no cNvPr to write ALT into for this shape.")
+            # Try to access the XML element and set descr attribute directly
+            if hasattr(shape, 'element'):
+                element = shape.element
+                # Look for cNvPr element
+                cnvpr_elements = element.xpath('.//p:cNvPr', {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'})
+                if cnvpr_elements:
+                    cnvpr = cnvpr_elements[0]
+                    cnvpr.set('descr', text)
+                    cnvpr.set('title', text)  # Set both for compatibility
+                    
         except Exception as e:
-            logger.debug(f"XML fallback failed: {e}")
+            logger.debug(f"XML fallback also failed: {e}")
     
     def _compute_text_hash(self, text: str) -> str:
         """Compute short hash of text for rerun detection"""
@@ -849,7 +801,7 @@ class PPTXAltTextInjector:
                 # Log detailed shape information
                 logger.info(f"🔍 DEBUG:   Mapped image key: {identifier.image_key}")
                 logger.info(f"🔍 DEBUG:     Shape type: {type(shape).__name__}")
-                logger.info(f"🔍 DEBUG:     Shape ID: {getattr(shape, 'shape_id', 'unknown')}")
+                logger.info(f"🔍 DEBUG:     Shape ID: {getattr(shape, 'id', 'unknown')}")
                 logger.info(f"🔍 DEBUG:     Shape name: {getattr(shape, 'name', 'unknown')}")
                 if hasattr(shape, '_element'):
                     logger.info(f"🔍 DEBUG:     XML element: {shape._element.tag if hasattr(shape._element, 'tag') else 'unknown'}")
@@ -898,7 +850,7 @@ class PPTXAltTextInjector:
         Args:
             shapes: Collection of shapes to process
             slide_idx: Slide index  
-            shape_counter: Starting counter for fallback (if no shape.shape_id)
+            shape_counter: Starting counter for fallback (if no shape.id)
             
         Returns:
             List of (identifier, shape) tuples with stable shape IDs
@@ -909,7 +861,7 @@ class PPTXAltTextInjector:
         for shape_idx, shape in enumerate(shapes):
             try:
                 # Get stable shape ID
-                shape_id = getattr(shape, 'shape_id', None)
+                shape_id = getattr(shape, 'id', None)
                 shape_name = getattr(shape, 'name', 'unnamed')
                 shape_type = getattr(shape, 'shape_type', 'unknown')
                 
@@ -1103,7 +1055,7 @@ class PPTXAltTextInjector:
         Args:
             shape: Shape object
             slide_idx: Slide index
-            shape_identifier: Shape ID (from shape.shape_id) or fallback index
+            shape_identifier: Shape ID (from shape.id) or fallback index
             
         Returns:
             PPTXImageIdentifier instance
@@ -1397,15 +1349,15 @@ class PPTXAltTextInjector:
             slide_xml = slide._element
             
             # Look for blip elements that reference this relationship
-            blip_elements = _safe_xpath(slide_xml, f'.//a:blip[@r:embed="{rel_id}"]', 
+            blip_elements = slide_xml.xpath(f'.//a:blip[@r:embed="{rel_id}"]', 
                                           {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
                                            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'})
             
             for blip_element in blip_elements:
                 # Find the parent cNvPr element where we can set the description
-                parent_elements = _safe_xpath(blip_element, 'ancestor::*')
+                parent_elements = blip_element.xpath('ancestor::*')
                 for parent in reversed(parent_elements):  # Start from closest ancestor
-                    cnvpr_elements = _safe_xpath(parent, './/pic:cNvPr | .//p:cNvPr', 
+                    cnvpr_elements = parent.xpath('.//pic:cNvPr | .//p:cNvPr', 
                                                 {'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
                                                  'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'})
                     
@@ -1473,7 +1425,7 @@ class PPTXAltTextInjector:
             slide_xml = slide._element
             
             # Look for all pic:cNvPr elements (picture non-visual properties)
-            cnvpr_elements = _safe_xpath(slide_xml, './/pic:cNvPr',
+            cnvpr_elements = slide_xml.xpath('.//pic:cNvPr',
                                            {'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'})
             
             # Try to match by position or other identifying characteristics
@@ -1814,7 +1766,7 @@ class PPTXAltTextInjector:
             
             for path in cnvpr_paths:
                 try:
-                    cnvpr_elements = _safe_xpath(element, path, namespaces)
+                    cnvpr_elements = element.xpath(path, namespaces)
                     if cnvpr_elements:
                         cnvpr_element = cnvpr_elements[0]  # Take the first match
                         logger.info(f"🔍 DEBUG:   Found cNvPr via path: {path}")
@@ -2082,7 +2034,7 @@ class PPTXAltTextInjector:
                     
                     # Additional debug info for failed injections
                     logger.info(f"🔍 DEBUG:   Shape type: {type(shape).__name__}")
-                    logger.info(f"🔍 DEBUG:   Shape ID: {getattr(shape, 'shape_id', 'unknown')}")
+                    logger.info(f"🔍 DEBUG:   Shape ID: {getattr(shape, 'id', 'unknown')}")
                     if hasattr(shape, '_element'):
                         try:
                             # Check XML attributes directly

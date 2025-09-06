@@ -3,32 +3,6 @@ PPTX Accessibility Processor - Adapted from PDF processor to work with PowerPoin
 Integrates with existing ConfigManager, FlexibleAltGenerator, medical prompts, and decorative detection.
 """
 
-# --- safe XPath helper for python-pptx (BaseOxmlElement) and raw lxml ---
-try:
-    from pptx.oxml.ns import nsmap as PPTX_NSMAP  # type: ignore
-except Exception:  # pragma: no cover
-    PPTX_NSMAP = {
-        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-        'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
-        'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart',
-    }
-
-def _safe_xpath(element, xpath_expr, namespaces=None):
-    """Execute an XPath on python-pptx BaseOxmlElement or plain lxml element.
-    Tries python-pptx override (no kwargs) first, then raw lxml with nsmap.
-    Accepts an optional explicit namespace map for raw lxml cases.
-    """
-    el = getattr(element, "_element", element)
-    try:
-        return el.xpath(xpath_expr)  # python-pptx injects namespaces
-    except Exception:
-        ns = namespaces or getattr(el, "nsmap", None) or PPTX_NSMAP
-        return el.xpath(xpath_expr, namespaces=ns)
-# --- end safe XPath helper ---
-
-
 import logging
 import os
 import sys
@@ -145,8 +119,8 @@ class PPTXImageInfo:
     
     def _create_consistent_image_key(self, slide_idx: int, shape_idx, shape: BaseShape) -> str:
         """Create stable image key using shape ID instead of enumeration index."""
-        # Use shape.shape_id for stable identification (consistent across runs)
-        shape_id = getattr(shape, 'shape_id', None)
+        # Use shape.id for stable identification (consistent across runs)
+        shape_id = getattr(shape, 'id', None)
         if shape_id is not None:
             # Use stable shape ID format: slide_X_shapeid_Y_hash_Z
             hash_value = self.image_hash[:8] if self.image_hash else f"{slide_idx}{shape_id}img"[:8]
@@ -226,7 +200,7 @@ class PPTXVisualElement:
                 self.element_hash = f"{slide_idx}{shape_idx}{element_type}"[:8]  # Keep under 8 chars
         
         # Generate stable element key using shape ID when available
-        shape_id = getattr(shape, 'shape_id', None)
+        shape_id = getattr(shape, 'id', None)
         if shape_id is not None:
             # Use stable shape ID format: slide_X_shapeid_Y_hash_Z
             self.element_key = f"slide_{slide_idx}_shapeid_{shape_id}_hash_{self.element_hash}"
@@ -1314,13 +1288,13 @@ class PPTXAccessibilityProcessor:
             # and embedded image relationships
             
             # Check for oleObj elements
-            ole_objects = _safe_xpath(element, './/p:oleObj', namespaces=element.nsmap) if element.nsmap else []
+            ole_objects = element.xpath('.//p:oleObj', namespaces=element.nsmap) if element.nsmap else []
             if ole_objects:
                 logger.debug(f"        -> Found {len(ole_objects)} OLE objects in {source_name}")
                 # OLE object image extraction would require access to embedded parts
             
             # Check for embedded pictures in alternative locations
-            embedded_pics = _safe_xpath(element, './/pic:pic', namespaces=element.nsmap) if element.nsmap else []
+            embedded_pics = element.xpath('.//pic:pic', namespaces=element.nsmap) if element.nsmap else []
             if embedded_pics:
                 logger.debug(f"        -> Found {len(embedded_pics)} embedded pictures in {source_name}")
             
@@ -1757,7 +1731,7 @@ class PPTXAccessibilityProcessor:
                 # Check if this is a group shape
                 if hasattr(shape, 'shapes') and shape.shapes:
                     groups_found += 1
-                    shape_id = getattr(shape, 'shape_id', f"group_{slide_idx}_{shape_idx}")
+                    shape_id = getattr(shape, 'id', f"group_{slide_idx}_{shape_idx}")
                     
                     # Enhanced group processing logging
                     logger.info(f"🔧 Processing group_id={shape_id}, depth={depth}, children={len(shape.shapes)}")
@@ -1822,7 +1796,7 @@ class PPTXAccessibilityProcessor:
                             existing_group_alt = ""
                             if hasattr(shape, '_element'):
                                 group_element = shape._element
-                                cnvpr_elements = _safe_xpath(group_element, './/p:nvGrpSpPr/p:cNvPr', namespaces={'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'})
+                                cnvpr_elements = group_element.xpath('.//p:nvGrpSpPr/p:cNvPr', namespaces={'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'})
                                 if cnvpr_elements:
                                     existing_group_alt = cnvpr_elements[0].get('descr', '') or ''
                             
@@ -2153,18 +2127,19 @@ class PPTXAccessibilityProcessor:
             cnvpr_xpath = ".//p:nvGrpSpPr/p:cNvPr"
             namespaces = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
             
-            cnvpr_elements = _safe_xpath(group_element, cnvpr_xpath, namespaces=namespaces)
+            cnvpr_elements = group_element.xpath(cnvpr_xpath, namespaces=namespaces)
             
             if cnvpr_elements:
                 cnvpr = cnvpr_elements[0]
                 
-                # Set only descr for groups to avoid duplicate reads in some UIs/AT
+                # Set both descr (full ALT text) and title (short version)  
                 cnvpr.set('descr', alt_text)
-                # Leave title blank for groups
-                # (we still use title for pictures/shapes elsewhere if needed)
+                title_text = self._create_title_from_alt_text(alt_text)
+                cnvpr.set('title', title_text)
                 
                 if debug:
-                    logger.debug(f"🔍 {indent}✅ Injected ALT into group cNvPr: '{alt_text}' (title omitted)")
+                    logger.debug(f"🔍 {indent}✅ Injected ALT into group cNvPr: '{alt_text}'")
+                    logger.debug(f"🔍 {indent}   Also set title: '{title_text}'")
             else:
                 if debug:
                     logger.debug(f"🔍 {indent}⚠️  Could not find group cNvPr element for ALT injection")
@@ -2208,7 +2183,7 @@ class PPTXAccessibilityProcessor:
                 
                 cnvpr_element = None
                 for xpath in cnvpr_paths:
-                    elements = _safe_xpath(child_element, xpath, namespaces=namespaces)
+                    elements = child_element.xpath(xpath, namespaces=namespaces)
                     if elements:
                         cnvpr_element = elements[0]
                         break
@@ -3605,7 +3580,7 @@ class PPTXAccessibilityProcessor:
                 # Find the cNvPr (non-visual properties) element with multiple namespace tries
                 cnvpr_elements = []
                 try:
-                    cnvpr_elements = _safe_xpath(element, './/p:cNvPr | .//pic:cNvPr | .//a:cNvPr',
+                    cnvpr_elements = element.xpath('.//p:cNvPr | .//pic:cNvPr | .//a:cNvPr',
                                                  namespaces={
                                                      'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
                                                      'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
@@ -4983,7 +4958,7 @@ class PPTXAccessibilityProcessor:
         """
         try:
             # Method 1: Standard python-pptx API
-            shape_id = getattr(shape, 'shape_id', None)
+            shape_id = getattr(shape, 'id', None)
             if shape_id is not None:
                 if debug:
                     logger.debug(f"    Extracted ID via API: {shape_id}")
@@ -5015,7 +4990,7 @@ class PPTXAccessibilityProcessor:
                 
                 for xpath, description in id_extraction_paths:
                     try:
-                        id_results = _safe_xpath(element, xpath, namespaces=namespaces)
+                        id_results = element.xpath(xpath, namespaces=namespaces)
                         if id_results:
                             extracted_id = int(id_results[0])
                             if debug:
