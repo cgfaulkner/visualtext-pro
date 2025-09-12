@@ -847,7 +847,13 @@ Examples:
                     if not args.approval_doc_only and 'result' in locals() and result.get('final_alt_map'):
                         final_alt_map = result['final_alt_map']
                     
-                    review_path = make_review_doc(input_pptx, out_dir, processor.config_manager, processor.pptx_processor.alt_generator, opts, final_alt_map)
+                    review_path = make_review_doc(
+                        input_pptx,
+                        out_dir,
+                        processor.config_manager,
+                        opts,
+                        final_alt_map,
+                    )
                     
                     if args.approval_out and args.approval_out != review_path:
                         import shutil

@@ -3,7 +3,6 @@ from pathlib import Path
 from dataclasses import dataclass
 import tempfile
 import sys
-import os
 
 # Ensure we can import from parent directories
 project_root = Path(__file__).parent.parent
@@ -66,37 +65,23 @@ def create_thumbnail(image_data: bytes, max_width: int = 600) -> str:
         print(f"Warning: Could not create thumbnail: {e}")
         return None
 
-def build_processed_images(pptx_path: str, cfg, generator, include_context=True):
+def build_processed_images(pptx_path: str, cfg, include_context: bool = True):
     """
-    Returns list[dict] shaped for generate_alt_review_doc.
-    Uses current pptx_processor to iterate images and current unified_alt_generator for proposals.
+    Gather metadata for images in the PPTX without generating new ALT text.
+
+    Returns a list of dictionaries shaped for ``generate_alt_review_doc``.
+    Suggested ALT values are left blank so the DOCX review builder can use
+    the canonical ``final_alt_map`` produced during PPT processing.
     """
-    from pptx_processor import PPTXAccessibilityProcessor
-    
+
     # Create processor instance
     processor = PPTXAccessibilityProcessor(cfg)
-    
+
     # Extract images using the existing processor
     presentation, image_infos = processor._extract_images_from_pptx(pptx_path)
-    
+
     items = []
     for idx, img_info in enumerate(image_infos):
-        # Generate ALT text proposal using current generator
-        try:
-            # Create a temporary file for the image data
-            temp_image = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-            temp_image.write(img_info.image_data)
-            temp_image.close()
-            
-            # Generate ALT text
-            proposal = generator.generate_alt_text(temp_image.name)
-            
-            # Clean up temp file
-            os.unlink(temp_image.name)
-            
-        except Exception as e:
-            print(f"Warning: Could not generate ALT text for image {idx}: {e}")
-            proposal = "[Generation failed]"
         
         # Create thumbnail
         thumbnail_path = create_thumbnail(img_info.image_data) if img_info.image_data else None
@@ -137,8 +122,8 @@ def build_processed_images(pptx_path: str, cfg, generator, include_context=True)
             "image_path": thumbnail_path,
             "slide_number": img_info.slide_idx + 1,
             "image_number": idx + 1,
-            "current_alt": existing_alt or "[No ALT text]",
-            "suggested_alt": proposal,
+            "current_alt": existing_alt or "",
+            "suggested_alt": "",
             "is_decorative": False,
             "image_key": img_info.image_key,
             "slide_title": slide_title if include_context else None,
@@ -147,9 +132,28 @@ def build_processed_images(pptx_path: str, cfg, generator, include_context=True)
     
     return items
 
-def make_review_doc(pptx_path: str, out_dir: str, cfg, generator, opts: ApprovalOptions, final_alt_map: dict = None):
-    processed = build_processed_images(pptx_path, cfg, generator, include_context=opts.include_context)
+def make_review_doc(
+    pptx_path: str,
+    out_dir: str,
+    cfg,
+    opts: ApprovalOptions,
+    final_alt_map: dict | None = None,
+):
+    """Generate a DOCX review document for a processed PPTX."""
+
+    processed = build_processed_images(
+        pptx_path,
+        cfg,
+        include_context=opts.include_context,
+    )
     from approval.docx_alt_review import generate_alt_review_doc
+
     base = Path(pptx_path).stem
     out = str(Path(out_dir) / f"{base}{opts.review_suffix}.docx")
-    return generate_alt_review_doc(processed, lecture_title=base, output_path=out, original_pptx_path=pptx_path, final_alt_map=final_alt_map)
+    return generate_alt_review_doc(
+        processed,
+        lecture_title=base,
+        output_path=out,
+        original_pptx_path=pptx_path,
+        final_alt_map=final_alt_map,
+    )
