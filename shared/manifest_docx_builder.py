@@ -27,6 +27,7 @@ from docx.oxml.ns import qn
 from alt_manifest import AltManifest
 
 logger = logging.getLogger(__name__)
+logger.info("LOG: injector_file=%s", __file__)
 
 
 def generate_review_from_manifest(manifest_path: str, out_docx: str, 
