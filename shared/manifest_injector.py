@@ -74,10 +74,46 @@ def _inject_using_robust_injector(pptx_path: str, entries, output_path: str,
     """Use the existing robust injector with manifest data."""
     try:
         # Convert manifest entries to the mapping format expected by injector
+        # Use final_alt as primary source, with suggested_alt as fallback
         alt_text_mapping = {}
+        decision_log = {}
+        
         for entry in entries:
-            if entry.suggested_alt:
-                alt_text_mapping[entry.key] = entry.suggested_alt
+            # Determine final ALT text to inject
+            alt_to_inject = ""
+            decision_reason = ""
+            
+            if mode == "preserve" and entry.had_existing_alt and entry.existing_alt.strip():
+                # Preserve mode with existing ALT - use existing
+                alt_to_inject = entry.existing_alt.strip()
+                decision_reason = "preserved_existing"
+            elif entry.final_alt.strip():
+                # Use final_alt (our normalized, processed text)
+                alt_to_inject = entry.final_alt.strip()
+                decision_reason = f"used_final_alt_from_{entry.decision_reason or entry.source}"
+            elif entry.suggested_alt.strip():
+                # Fallback to legacy suggested_alt field
+                alt_to_inject = entry.suggested_alt.strip()
+                decision_reason = f"fallback_to_suggested_alt_from_{entry.source}"
+            elif mode == "replace" and entry.existing_alt.strip():
+                # Replace mode but no new ALT generated - keep existing
+                alt_to_inject = entry.existing_alt.strip()
+                decision_reason = "replace_mode_but_no_new_alt"
+            else:
+                # No ALT text available - skip this entry
+                logger.debug(f"No ALT text available for {entry.key}, skipping")
+                continue
+            
+            if alt_to_inject:
+                alt_text_mapping[entry.key] = alt_to_inject
+                decision_log[entry.key] = {
+                    'alt_used': alt_to_inject,
+                    'decision_reason': decision_reason,
+                    'shape_type': entry.shape_type,
+                    'is_group_child': entry.is_group_child,
+                    'had_existing_alt': entry.had_existing_alt,
+                    'llava_called': entry.llava_called
+                }
         
         logger.info(f"Prepared {len(alt_text_mapping)} ALT text mappings for injection")
         
@@ -100,20 +136,27 @@ def _inject_using_robust_injector(pptx_path: str, entries, output_path: str,
         if result['success']:
             stats = result.get('statistics', {})
             
-            # Log decisions for each entry
-            for entry in entries:
-                if entry.key in alt_text_mapping:
-                    if mode == "preserve" and entry.current_alt.strip():
-                        # In preserve mode with existing ALT, log what actually happened
-                        alt_used = "current" if entry.source == "existing" else "suggested"
-                        reasoning = f"preserve mode, source: {entry.source}"
-                    else:
-                        alt_used = "suggested" 
-                        reasoning = f"source: {entry.source}, injected successfully"
-                        
-                    manifest.log_decision(entry.key, mode, alt_used, reasoning)
+            # Log detailed decisions for each entry
+            for key, decision_info in decision_log.items():
+                manifest.log_decision(
+                    key, 
+                    mode, 
+                    decision_info['alt_used'], 
+                    f"{decision_info['decision_reason']} | shape: {decision_info['shape_type']} | "
+                    f"group_child: {decision_info['is_group_child']} | "
+                    f"had_existing: {decision_info['had_existing_alt']} | "
+                    f"llava_called: {decision_info['llava_called']}"
+                )
             
-            logger.info(f"Injection completed: {stats.get('injected_successfully', 0)} images updated")
+            # Log summary statistics
+            shape_types = {}
+            for decision_info in decision_log.values():
+                shape_type = decision_info['shape_type']
+                shape_types[shape_type] = shape_types.get(shape_type, 0) + 1
+            
+            logger.info(f"Injection completed: {stats.get('injected_successfully', 0)} elements updated")
+            logger.info(f"Shape type distribution: {shape_types}")
+            logger.info(f"Decision reasons: {[d['decision_reason'] for d in decision_log.values()]}")
             
         return result
         
@@ -146,13 +189,28 @@ def validate_manifest_for_injection(manifest_path: str) -> Dict[str, Any]:
             }
         
         injectable_count = 0
-        missing_suggested_alt = 0
+        missing_alt_text = 0
+        by_shape_type = {}
+        by_decision_reason = {}
         
         for entry in entries:
-            if entry.suggested_alt and entry.suggested_alt.strip():
+            # Count by shape type
+            shape_type = entry.shape_type
+            by_shape_type[shape_type] = by_shape_type.get(shape_type, 0) + 1
+            
+            # Count by decision reason
+            decision_reason = entry.decision_reason or entry.source
+            by_decision_reason[decision_reason] = by_decision_reason.get(decision_reason, 0) + 1
+            
+            # Check if entry has injectable ALT text
+            has_alt = (entry.final_alt and entry.final_alt.strip()) or \
+                     (entry.suggested_alt and entry.suggested_alt.strip()) or \
+                     (entry.existing_alt and entry.existing_alt.strip())
+                     
+            if has_alt:
                 injectable_count += 1
             else:
-                missing_suggested_alt += 1
+                missing_alt_text += 1
         
         stats = manifest.get_statistics()
         
@@ -160,7 +218,9 @@ def validate_manifest_for_injection(manifest_path: str) -> Dict[str, Any]:
             'valid': True,
             'total_entries': len(entries),
             'injectable_entries': injectable_count,
-            'missing_suggested_alt': missing_suggested_alt,
+            'missing_alt_text': missing_alt_text,
+            'by_shape_type': by_shape_type,
+            'by_decision_reason': by_decision_reason,
             'llava_calls_in_manifest': stats['llava_calls_made'],
             'manifest_statistics': stats
         }

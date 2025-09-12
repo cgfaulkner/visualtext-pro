@@ -411,9 +411,11 @@ class FlexibleAltGenerator:
                          context: Optional[str] = None,
                          custom_prompt: Optional[str] = None,
                          force_provider: Optional[str] = None,
-                         return_metadata: bool = False) -> Optional[str]:
+                         return_metadata: bool = False,
+                         manifest: Optional['AltManifest'] = None,
+                         entry_key: Optional[str] = None) -> Optional[str]:
         """
-        Generate ALT text using the provider fallback chain.
+        Generate ALT text using the provider fallback chain with manifest integration.
         
         Args:
             image_path: Path to image file
@@ -422,6 +424,8 @@ class FlexibleAltGenerator:
             custom_prompt: Custom prompt override
             force_provider: Force use of specific provider
             return_metadata: If True, return (alt_text, metadata) tuple
+            manifest: Optional ALT manifest for normalization and caching
+            entry_key: Optional manifest entry key for recording results
             
         Returns:
             Generated ALT text or None if all providers fail
@@ -498,10 +502,31 @@ class FlexibleAltGenerator:
                     # Record success to reset failure state
                     self._record_success(provider_name)
 
-                    # Apply post-processing if configured
-                    self._last_provider = provider
-                    self._last_image_path = image_path
-                    result = self._post_process_alt_text(result)
+                    # Apply single-pass normalization with manifest integration
+                    raw_result = result
+                    if manifest and entry_key:
+                        # Use manifest for sentence-safe normalization
+                        normalized_result, was_truncated = manifest.normalize_alt_text(result)
+                        
+                        # Update manifest entry with generation details
+                        entry = manifest.get_entry(entry_key)
+                        if entry:
+                            entry.llm_raw = raw_result
+                            entry.final_alt = normalized_result
+                            entry.truncated_flag = was_truncated
+                            entry.llava_called = True
+                            entry.decision_reason = "generated"
+                            entry.duration_ms = metadata.get("generation_time", 0) * 1000
+                            entry.provider = provider_name
+                            entry.prompt_type = prompt_type or "default"
+                            manifest.add_entry(entry)
+                        
+                        result = normalized_result
+                    else:
+                        # Apply legacy post-processing if no manifest
+                        self._last_provider = provider
+                        self._last_image_path = image_path
+                        result = self._post_process_alt_text(result)
 
                     if return_metadata:
                         return result, final_metadata

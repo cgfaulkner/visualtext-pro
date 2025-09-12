@@ -153,7 +153,7 @@ def _create_review_table(doc, entries, portrait: bool):
                            key=lambda e: (e.slide_idx, e.image_number))
     
     # Create table
-    table = doc.add_table(rows=1, cols=5)
+    table = doc.add_table(rows=1, cols=6)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     
     # Set fixed table layout for portrait
@@ -162,12 +162,12 @@ def _create_review_table(doc, entries, portrait: bool):
     
     # Setup header
     header_cells = table.rows[0].cells
-    headers = ["Slide / Img", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Decorative"]
+    headers = ["Slide / Img", "Type", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Decorative"]
     
     for i, (cell, header) in enumerate(zip(header_cells, headers)):
         cell.text = header
         _format_header_cell(cell)
-        if i == 1 and portrait:  # Thumbnail column padding
+        if i == 2 and portrait:  # Thumbnail column padding (now column 2)
             _set_cell_margins(cell, right=180)
     
     _repeat_header_row(table.rows[0])
@@ -181,29 +181,42 @@ def _create_review_table(doc, entries, portrait: bool):
         cells[0].text = f"{entry.slide_number}/{entry.image_number}"
         cells[0].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
         
-        # Thumbnail
-        _add_thumbnail_to_cell(cells[1], entry, portrait)
+        # Shape Type (consistent labeling with PPT)
+        shape_type_display = _get_shape_type_display(entry.shape_type, entry.is_group_child)
+        cells[1].text = shape_type_display
+        cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        _format_shape_type_cell(cells[1], entry.shape_type)
         
-        # Current ALT Text (from manifest - what was in PPTX)
-        current_alt = entry.current_alt.strip()
-        cells[2].text = current_alt if current_alt else "[No ALT text]"
-        _format_alt_text_cell(cells[2], bool(current_alt))
+        # Thumbnail (only for pictures)
+        _add_thumbnail_to_cell(cells[2], entry, portrait)
         
-        # Suggested ALT Text (from manifest - preserve-first logic applied)
-        suggested_alt = entry.suggested_alt.strip()
-        if entry.source == "existing":
-            # In preserve mode, suggested matches current
-            cells[3].text = current_alt if current_alt else "[Generate needed]"
+        # Current ALT Text (from manifest - what was in PPTX originally)
+        current_alt = (entry.existing_alt or entry.current_alt).strip()
+        cells[3].text = current_alt if current_alt else "[No ALT text]"
+        _format_alt_text_cell(cells[3], bool(current_alt))
+        
+        # Suggested ALT Text (from manifest - final_alt is the SSOT)
+        final_alt = (entry.final_alt or entry.suggested_alt).strip()
+        
+        # Apply synchronization logic based on decision_reason
+        if entry.decision_reason == "preserved" or (entry.had_existing_alt and entry.source == "existing"):
+            # Preserve mode: Current ALT = Suggested ALT
+            suggested_label = f"{current_alt} (existing ALT preserved)" if current_alt else "[Preservation error]"
+            cells[4].text = suggested_label
+        elif entry.decision_reason in ["generated", "shape_fallback"] or final_alt:
+            # Generated ALT text
+            cells[4].text = final_alt if final_alt else "[Generation failed]"
         else:
-            # Generated or cached
-            cells[3].text = suggested_alt if suggested_alt else "[Generation failed]"
-        _format_alt_text_cell(cells[3], bool(suggested_alt))
+            # No ALT text available
+            cells[4].text = "[Generate needed]"
+        
+        _format_alt_text_cell(cells[4], bool(final_alt or current_alt))
         
         # Decorative checkbox
         is_decorative = _is_decorative_heuristic(entry)
-        cells[4].text = "☑" if is_decorative else "☐"
-        cells[4].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cells[5].text = "☑" if is_decorative else "☐"
+        cells[5].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Set row properties
         _set_row_no_break(row)
@@ -219,13 +232,14 @@ def _setup_fixed_table_layout(table):
     tblLayout.set(qn('w:type'), 'fixed')
     tblPr.append(tblLayout)
     
-    # Set column widths for portrait
+    # Set column widths for portrait (adjusted for 6 columns)
     col_widths = [
-        Inches(0.9),    # Slide/Img
-        Inches(1.55),   # Thumbnail (with right padding)
-        Inches(2.1),    # Current ALT
-        Inches(2.15),   # Suggested ALT
-        Inches(1.0)     # Decorative
+        Inches(0.7),    # Slide/Img
+        Inches(0.8),    # Type
+        Inches(1.2),    # Thumbnail
+        Inches(1.8),    # Current ALT
+        Inches(1.8),    # Suggested ALT
+        Inches(0.7)     # Decorative
     ]
     
     for i, width in enumerate(col_widths):
@@ -256,6 +270,44 @@ def _add_thumbnail_to_cell(cell, entry, portrait: bool):
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     if portrait:
         _set_cell_margins(cell, right=180)  # Match header padding
+
+
+def _get_shape_type_display(shape_type: str, is_group_child: bool) -> str:
+    """
+    Get consistent display label for shape type, matching PPT injector labels.
+    """
+    if is_group_child:
+        prefix = "Group child: "
+    else:
+        prefix = ""
+    
+    # Map internal shape types to user-friendly display names
+    type_mapping = {
+        "PICTURE": "Image",
+        "AUTO_SHAPE": "PowerPoint shape",
+        "TEXT_BOX": "Text box",
+        "LINE": "Line",
+        "CONNECTOR": "Connector line", 
+        "TABLE": "Table",
+        "GROUP": "Group parent",
+    }
+    
+    display_name = type_mapping.get(shape_type, shape_type.replace('_', ' ').title())
+    return f"{prefix}{display_name}"
+
+
+def _format_shape_type_cell(cell, shape_type: str):
+    """Format shape type cell with appropriate styling."""
+    paragraph = cell.paragraphs[0]
+    run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
+    
+    # Different styling based on shape type
+    if shape_type == "PICTURE":
+        _set_font_properties(run, size=9, bold=True, color="0066CC")
+    else:
+        _set_font_properties(run, size=9, color="666666")
+    
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
 def _is_decorative_heuristic(entry) -> bool:

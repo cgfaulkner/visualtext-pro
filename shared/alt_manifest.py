@@ -27,19 +27,28 @@ logger = logging.getLogger(__name__)
 class AltManifestEntry:
     """Single entry in the ALT text manifest representing one visual element."""
     
-    # Identity
+    # Identity and classification
     key: str                    # slide_{idx}_shapeid_{id}_hash_{hash}
     image_hash: str            # SHA-256 of normalized image bytes
+    slide_no: int = 0          # 1-based slide number for display
+    shape_type: str = "PICTURE"  # PICTURE, AUTO_SHAPE, TEXT_BOX, LINE, TABLE, GROUP, etc.
+    is_group_child: bool = False  # True if this element is part of a grouped object
     
-    # ALT text states
-    current_alt: str           # ALT that existed in PPTX before generation (may be "")
-    suggested_alt: str         # The LLaVA result or preserved current ALT
+    # ALT text states  
+    had_existing_alt: bool = False      # True if ALT existed in original PPTX
+    existing_alt: str = ""              # Original ALT from PPTX (preserved for reference)
+    llm_called: bool = False            # Whether LLaVA was actually invoked
+    llm_raw: str = ""                   # Raw LLaVA output before normalization
+    final_alt: str = ""                 # Final ALT text used (sentence-complete, length-capped)
+    decision_reason: str = ""           # preserved|generated|shape_fallback|decorative
+    truncated_flag: bool = False        # True if llm_raw was truncated to create final_alt
     
-    # Provenance
-    source: Literal["existing", "generated", "cached"]  # Where suggested_alt came from
-    llava_called: bool         # Whether LLaVA was actually invoked for this entry
+    # Provenance (legacy compatibility)
+    current_alt: str = ""               # Alias for existing_alt
+    suggested_alt: str = ""             # Alias for final_alt  
+    source: Literal["existing", "generated", "cached", "shape_fallback"] = "existing"
     
-    # Generation metadata (when source != "existing")
+    # Generation metadata
     prompt_type: Optional[str] = None
     provider: Optional[str] = None
     duration_ms: Optional[int] = None
@@ -60,6 +69,24 @@ class AltManifestEntry:
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
+        
+        # Maintain synchronization between new and legacy fields
+        self.slide_no = self.slide_number
+        
+        # Sync ALT text fields for backward compatibility
+        if not self.current_alt and self.existing_alt:
+            self.current_alt = self.existing_alt
+        elif not self.existing_alt and self.current_alt:
+            self.existing_alt = self.current_alt
+            
+        if not self.suggested_alt and self.final_alt:
+            self.suggested_alt = self.final_alt
+        elif not self.final_alt and self.suggested_alt:
+            self.final_alt = self.suggested_alt
+            
+        # Set had_existing_alt flag
+        if self.existing_alt.strip():
+            self.had_existing_alt = True
 
 
 class AltManifest:
@@ -140,18 +167,27 @@ class AltManifest:
     
     def create_entry_from_shape(self, key: str, image_hash: str, slide_idx: int, 
                                image_number: int, current_alt: str = "",
+                               shape_type: str = "PICTURE", is_group_child: bool = False,
                                **kwargs) -> AltManifestEntry:
         """
         Create a manifest entry from shape extraction data.
         
         Does not add to manifest - use add_entry() for that.
         """
+        current_cleaned = current_alt.strip()
+        
         return AltManifestEntry(
             key=key,
             image_hash=image_hash,
-            current_alt=current_alt.strip(),
+            slide_no=slide_idx + 1,
+            shape_type=shape_type,
+            is_group_child=is_group_child,
+            had_existing_alt=bool(current_cleaned),
+            existing_alt=current_cleaned,
+            current_alt=current_cleaned,  # Legacy compatibility
             suggested_alt="",  # Will be filled by generation or preservation logic
-            source="existing" if current_alt.strip() else "generated",  # Initial assumption
+            final_alt="",      # Will be filled by generation or preservation logic
+            source="existing" if current_cleaned else "generated",  # Initial assumption
             llava_called=False,
             slide_idx=slide_idx,
             slide_number=slide_idx + 1,
@@ -264,6 +300,201 @@ class AltManifest:
         }
         
         logger.info(f"DECISION: {json.dumps(decision)}")
+    
+    def normalize_alt_text(self, raw_text: str, max_chars: int = 320) -> tuple[str, bool]:
+        """
+        Normalize ALT text with sentence-safe truncation.
+        
+        Args:
+            raw_text: Raw LLaVA output or input text
+            max_chars: Maximum character limit (default 320)
+            
+        Returns:
+            Tuple of (normalized_text, was_truncated)
+        """
+        if not raw_text or not raw_text.strip():
+            return "", False
+        
+        # Clean up the text
+        text = raw_text.strip()
+        text = ' '.join(text.split())  # Normalize whitespace
+        
+        # If already short enough, just ensure proper punctuation
+        if len(text) <= max_chars:
+            return self._ensure_terminal_punctuation(text), False
+        
+        # Need to truncate - find the best place to cut
+        truncated = False
+        
+        # Look for sentence endings within the limit
+        sentence_endings = ['.', '!', '?']
+        best_cut = 0
+        
+        for i in range(max_chars, 0, -1):
+            if i < len(text) and text[i-1] in sentence_endings:
+                # Found a sentence ending within limit
+                best_cut = i
+                break
+        
+        # If no sentence ending found, look for other break points
+        if best_cut == 0:
+            # Look for clause breaks (semicolon, comma)
+            for i in range(max_chars, max(0, max_chars - 50), -1):
+                if i < len(text) and text[i-1] in [';', ',']:
+                    best_cut = i
+                    break
+        
+        # If still no good break point, cut at last space before limit
+        if best_cut == 0:
+            for i in range(max_chars, max(0, max_chars - 20), -1):
+                if i < len(text) and text[i-1] == ' ':
+                    best_cut = i
+                    break
+        
+        # Final fallback - hard cut at limit
+        if best_cut == 0:
+            best_cut = max_chars
+        
+        # Truncate and clean up
+        result = text[:best_cut].strip()
+        if result.endswith(','):
+            result = result[:-1].strip()
+        
+        truncated = len(result) < len(text)
+        
+        return self._ensure_terminal_punctuation(result), truncated
+    
+    def _ensure_terminal_punctuation(self, text: str) -> str:
+        """Ensure text ends with proper punctuation."""
+        if not text:
+            return ""
+        
+        text = text.strip()
+        if not text:
+            return ""
+        
+        # If already ends with punctuation, return as-is
+        if text[-1] in '.!?':
+            return text
+        
+        # Add period for declarative sentences
+        return text + "."
+    
+    def classify_shape_type(self, shape, shape_type_enum=None) -> tuple[str, bool]:
+        """
+        Classify shape type and determine if it's part of a group.
+        
+        Args:
+            shape: PowerPoint shape object
+            shape_type_enum: MSO_SHAPE_TYPE enum for classification
+            
+        Returns:
+            Tuple of (shape_type_string, is_group_child)
+        """
+        if not shape_type_enum:
+            try:
+                from pptx.enum.shapes import MSO_SHAPE_TYPE
+                shape_type_enum = MSO_SHAPE_TYPE
+            except ImportError:
+                logger.warning("Could not import MSO_SHAPE_TYPE, using fallback classification")
+                return "UNKNOWN", False
+        
+        # Determine basic shape type
+        shape_type = "UNKNOWN"
+        is_group_child = False
+        
+        try:
+            if shape.shape_type == shape_type_enum.PICTURE:
+                shape_type = "PICTURE"
+            elif shape.shape_type == shape_type_enum.AUTO_SHAPE:
+                shape_type = "AUTO_SHAPE"
+            elif shape.shape_type == shape_type_enum.TEXT_BOX:
+                shape_type = "TEXT_BOX"
+            elif shape.shape_type == shape_type_enum.LINE:
+                shape_type = "LINE"
+            elif shape.shape_type == shape_type_enum.TABLE:
+                shape_type = "TABLE"
+            elif shape.shape_type == shape_type_enum.GROUP:
+                shape_type = "GROUP"
+            elif shape.shape_type == shape_type_enum.CONNECTOR:
+                shape_type = "CONNECTOR"
+            else:
+                shape_type = f"SHAPE_{shape.shape_type}"
+        except Exception as e:
+            logger.debug(f"Could not classify shape type: {e}")
+        
+        # Check if part of a group (simplified check)
+        try:
+            if hasattr(shape, '_element') and shape._element is not None:
+                parent = shape._element.getparent()
+                if parent is not None and 'grpSp' in parent.tag:
+                    is_group_child = True
+        except Exception as e:
+            logger.debug(f"Could not check group membership: {e}")
+        
+        return shape_type, is_group_child
+    
+    def should_generate_for_shape_type(self, shape_type: str) -> bool:
+        """
+        Determine if a shape type should have ALT text generated.
+        
+        Args:
+            shape_type: Shape type string (PICTURE, AUTO_SHAPE, etc.)
+            
+        Returns:
+            True if ALT text should be generated, False for fallback text
+        """
+        # Only generate ALT text for actual images
+        generatable_types = {"PICTURE"}
+        
+        return shape_type in generatable_types
+    
+    def get_shape_fallback_alt(self, shape_type: str, is_group_child: bool = False,
+                              width_px: int = 0, height_px: int = 0) -> str:
+        """
+        Generate appropriate fallback ALT text for non-picture shapes.
+        
+        Args:
+            shape_type: Shape type string
+            is_group_child: Whether shape is part of a group
+            width_px: Width in pixels
+            height_px: Height in pixels
+            
+        Returns:
+            Descriptive ALT text for the shape
+        """
+        if is_group_child:
+            prefix = "Part of a grouped element: "
+        else:
+            prefix = ""
+        
+        # Generate size info if available
+        size_info = ""
+        if width_px > 0 and height_px > 0:
+            size_info = f" ({width_px}×{height_px}px)"
+        
+        # Generate description based on shape type
+        if shape_type == "TEXT_BOX":
+            return f"{prefix}Text box{size_info}."
+        elif shape_type == "AUTO_SHAPE":
+            return f"{prefix}PowerPoint shape{size_info}."
+        elif shape_type == "LINE":
+            if width_px > 0 and height_px > 0:
+                if width_px > height_px * 3:
+                    return f"{prefix}Horizontal line{size_info}."
+                elif height_px > width_px * 3:
+                    return f"{prefix}Vertical line{size_info}."
+                else:
+                    return f"{prefix}Diagonal line{size_info}."
+            return f"{prefix}Line element{size_info}."
+        elif shape_type == "CONNECTOR":
+            return f"{prefix}Connector line{size_info}."
+        elif shape_type == "TABLE":
+            return f"{prefix}Table{size_info}."
+        elif shape_type == "GROUP":
+            return f"{prefix}Grouped elements{size_info}."
+        else:
+            return f"{prefix}PowerPoint shape element{size_info}."
 
 
 def compute_image_hash(image_data: bytes) -> str:
