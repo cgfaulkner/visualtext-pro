@@ -61,6 +61,7 @@ from config_manager import ConfigManager
 from decorative_filter import is_force_decorative_by_filename
 
 logger = logging.getLogger(__name__)
+logger.info("LOG: injector_file=%s", __file__)
 
 
 class PPTXImageIdentifier:
