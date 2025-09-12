@@ -180,7 +180,7 @@ def _create_review_table(doc, entries, portrait: bool):
     _repeat_header_row(table.rows[0])
     
     # Add data rows
-    for entry in sorted_entries:
+    for idx, entry in enumerate(sorted_entries, start=1):
         row = table.add_row()
         cells = row.cells
         
@@ -198,7 +198,18 @@ def _create_review_table(doc, entries, portrait: bool):
         _add_thumbnail_to_cell(cells[2], entry, portrait)
         
         # Current ALT Text (from manifest - what was in PPTX originally)
-        current_alt = (entry.existing_alt or entry.current_alt).strip()
+        current_alt = (
+            entry.existing_alt
+            or entry.current_alt
+            or (entry.final_alt if entry.decision_reason == "preserved" else "")
+        ).strip()
+        if idx <= 5:
+            logger.debug(
+                "existing_alt=%r docx_current=%r key=%s",
+                entry.existing_alt,
+                current_alt,
+                entry.key,
+            )
         cells[3].text = current_alt if current_alt else "[No ALT text]"
         _format_alt_text_cell(cells[3], bool(current_alt))
         
@@ -447,7 +458,7 @@ def _repeat_header_row(row):
 
 
 def _set_row_no_break(row):
-    """Prevent row from breaking across pages.""" 
+    """Prevent row from breaking across pages."""
     trPr = row._tr.get_or_add_trPr()
     cantSplit = OxmlElement('w:cantSplit')
     trPr.append(cantSplit)
