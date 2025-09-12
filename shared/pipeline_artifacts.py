@@ -33,6 +33,8 @@ class RunArtifacts:
     current_alt_by_key_path: Path       # scan/current_alt_by_key.json
     visual_index_path: Path             # scan/visual_index.json
     thumbs_dir: Path                    # thumbs/
+    crops_dir: Path                     # crops/ (NEW: model input images)
+    manifest_path: Path                 # manifest.json (NEW: single source of truth)
     
     # Phase 2: Generate artifacts  
     generated_alt_by_key_path: Path     # generate/generated_alt_by_key.json
@@ -67,6 +69,7 @@ class RunArtifacts:
         (run_dir / "generate").mkdir(exist_ok=True)
         (run_dir / "resolve").mkdir(exist_ok=True)
         (run_dir / "thumbs").mkdir(exist_ok=True)
+        (run_dir / "crops").mkdir(exist_ok=True)
         
         return cls(
             run_dir=run_dir,
@@ -74,6 +77,8 @@ class RunArtifacts:
             current_alt_by_key_path=run_dir / "scan" / "current_alt_by_key.json",
             visual_index_path=run_dir / "scan" / "visual_index.json", 
             thumbs_dir=run_dir / "thumbs",
+            crops_dir=run_dir / "crops",
+            manifest_path=run_dir / "manifest.json",
             generated_alt_by_key_path=run_dir / "generate" / "generated_alt_by_key.json",
             final_alt_map_path=run_dir / "resolve" / "final_alt_map.json"
         )
@@ -129,6 +134,10 @@ class RunArtifacts:
         """Save final resolved ALT text mappings from Phase 3."""
         with open(self.final_alt_map_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    def get_manifest_path(self) -> Path:
+        """Get path to the single source of truth manifest file."""
+        return self.manifest_path
     
     def cleanup(self, keep_finals: bool = True) -> None:
         """

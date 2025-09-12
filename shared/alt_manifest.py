@@ -22,26 +22,43 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Manifest schema version for tracking compatibility
+MANIFEST_SCHEMA_VERSION = "2.0.0"
+
 
 @dataclass
 class AltManifestEntry:
     """Single entry in the ALT text manifest representing one visual element."""
     
-    # Identity and classification
-    key: str                    # slide_{idx}_shapeid_{id}_hash_{hash}
-    image_hash: str            # SHA-256 of normalized image bytes
+    # Identity and classification (NEW SCHEMA 2.0)
+    instance_key: str = ""      # slide_index + shape_id (unique per presentation instance)
+    content_key: str = ""       # hash of rendered crop or original blob (for content-based matching)
+    key: str = ""               # slide_{idx}_shapeid_{id}_hash_{hash} (legacy compatibility)
+    image_hash: str = ""        # SHA-256 of normalized image bytes (legacy compatibility)
     slide_no: int = 0          # 1-based slide number for display
     shape_type: str = "PICTURE"  # PICTURE, AUTO_SHAPE, TEXT_BOX, LINE, TABLE, GROUP, etc.
     is_group_child: bool = False  # True if this element is part of a grouped object
+    bbox: Dict[str, float] = None  # Bounding box coordinates {"left": 0, "top": 0, "width": 0, "height": 0}
+    format: str = ""            # File format: png/jpg/wmf/emf/svg/shape
     
     # ALT text states  
     had_existing_alt: bool = False      # True if ALT existed in original PPTX
     existing_alt: str = ""              # Original ALT from PPTX (preserved for reference)
-    llm_called: bool = False            # Whether LLaVA was actually invoked
+    llava_called: bool = False          # Whether LLaVA was actually invoked (NEW SCHEMA 2.0)
+    llm_called: bool = False            # Whether LLaVA was actually invoked (legacy compatibility)
     llm_raw: str = ""                   # Raw LLaVA output before normalization
     final_alt: str = ""                 # Final ALT text used (sentence-complete, length-capped)
     decision_reason: str = ""           # preserved|generated|shape_fallback|decorative
+    include_reason: str = ""            # Why this element was included for processing
+    exclude_reason: str = ""            # Why this element was excluded from processing
     truncated_flag: bool = False        # True if llm_raw was truncated to create final_alt
+    
+    # File paths (NEW SCHEMA 2.0)
+    thumb_path: str = ""                # Path to display thumbnail (for DOCX)
+    crop_path: str = ""                 # Path to model input image (cropped from slide)
+    
+    # Rasterizer information (NEW SCHEMA 2.0)
+    rasterizer_info: Dict[str, any] = None  # {"engine": "slide_render|native", "dpi": 150, "status": "success|error"}
     
     # Provenance (legacy compatibility)
     current_alt: str = ""               # Alias for existing_alt
@@ -70,8 +87,20 @@ class AltManifestEntry:
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
         
+        # Initialize dict fields
+        if self.bbox is None:
+            self.bbox = {"left": 0, "top": 0, "width": 0, "height": 0}
+        if self.rasterizer_info is None:
+            self.rasterizer_info = {"engine": "", "dpi": 0, "status": ""}
+        
         # Maintain synchronization between new and legacy fields
         self.slide_no = self.slide_number
+        
+        # Sync LLaVA call tracking
+        if self.llava_called:
+            self.llm_called = self.llava_called
+        elif self.llm_called:
+            self.llava_called = self.llm_called
         
         # Sync ALT text fields for backward compatibility
         if not self.current_alt and self.existing_alt:
@@ -87,6 +116,10 @@ class AltManifestEntry:
         # Set had_existing_alt flag
         if self.existing_alt.strip():
             self.had_existing_alt = True
+            
+        # Generate legacy key from instance_key if not present
+        if self.instance_key and not self.key:
+            self.key = self.instance_key
 
 
 class AltManifest:
@@ -99,8 +132,10 @@ class AltManifest:
     
     def __init__(self, manifest_path: Path):
         self.manifest_path = manifest_path
+        self.schema_version = MANIFEST_SCHEMA_VERSION
         self._entries: Dict[str, AltManifestEntry] = {}
         self._hash_to_key: Dict[str, str] = {}  # For cache lookups by image_hash
+        self._content_to_key: Dict[str, str] = {}  # For cache lookups by content_key
         self._load_existing()
     
     def _load_existing(self):
@@ -119,9 +154,23 @@ class AltManifest:
                         
                     try:
                         data = json.loads(line)
+                        
+                        # Handle schema version header
+                        if data.get('_type') == 'manifest_header':
+                            self.schema_version = data.get('_manifest_schema_version', '1.0.0')
+                            logger.info(f"Found manifest schema version: {self.schema_version}")
+                            continue
+                        
                         entry = AltManifestEntry(**data)
-                        self._entries[entry.key] = entry
-                        self._hash_to_key[entry.image_hash] = entry.key
+                        # Use appropriate key for indexing
+                        lookup_key = entry.instance_key if entry.instance_key else entry.key
+                        self._entries[lookup_key] = entry
+                        
+                        # Update lookup indices
+                        if entry.image_hash:
+                            self._hash_to_key[entry.image_hash] = lookup_key
+                        if entry.content_key:
+                            self._content_to_key[entry.content_key] = lookup_key
                     except Exception as e:
                         logger.warning(f"Skipping invalid manifest line {line_num}: {e}")
                         
@@ -133,13 +182,19 @@ class AltManifest:
     
     def save(self):
         """Save all entries to JSONL file."""
-        logger.info(f"Saving manifest with {len(self._entries)} entries")
+        logger.info(f"Saving manifest with {len(self._entries)} entries (schema v{self.schema_version})")
         
         # Ensure parent directory exists
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         
         try:
             with open(self.manifest_path, 'w', encoding='utf-8') as f:
+                # Write schema version header as first line
+                schema_header = {"_manifest_schema_version": self.schema_version, "_type": "manifest_header"}
+                json.dump(schema_header, f, ensure_ascii=False)
+                f.write('\n')
+                
+                # Write all entries
                 for entry in self._entries.values():
                     json.dump(asdict(entry), f, ensure_ascii=False)
                     f.write('\n')
@@ -159,11 +214,24 @@ class AltManifest:
         key = self._hash_to_key.get(image_hash)
         return self._entries.get(key) if key else None
     
+    def get_by_content_key(self, content_key: str) -> Optional[AltManifestEntry]:
+        """Get manifest entry by content key (for cache lookups)."""
+        key = self._content_to_key.get(content_key)
+        return self._entries.get(key) if key else None
+    
     def add_entry(self, entry: AltManifestEntry) -> None:
         """Add or update a manifest entry."""
-        self._entries[entry.key] = entry
-        self._hash_to_key[entry.image_hash] = entry.key
-        logger.debug(f"Added manifest entry: {entry.key} (source: {entry.source})")
+        # Use instance_key if available, fallback to legacy key
+        lookup_key = entry.instance_key if entry.instance_key else entry.key
+        self._entries[lookup_key] = entry
+        
+        # Update lookup indices
+        if entry.image_hash:
+            self._hash_to_key[entry.image_hash] = lookup_key
+        if entry.content_key:
+            self._content_to_key[entry.content_key] = lookup_key
+            
+        logger.debug(f"Added manifest entry: {lookup_key} (source: {entry.source})")
     
     def create_entry_from_shape(self, key: str, image_hash: str, slide_idx: int, 
                                image_number: int, current_alt: str = "",
@@ -256,6 +324,40 @@ class AltManifest:
                 by_slide[slide_idx] = []
             by_slide[slide_idx].append(entry)
         return by_slide
+    
+    def classify_shape_type(self, shape, MSO_SHAPE_TYPE) -> tuple[str, bool]:
+        """
+        Classify a shape and determine if it's a group child.
+        
+        Returns:
+            Tuple of (shape_type_str, is_group_child)
+        """
+        shape_type_map = {
+            MSO_SHAPE_TYPE.PICTURE: "PICTURE",
+            MSO_SHAPE_TYPE.AUTO_SHAPE: "AUTO_SHAPE", 
+            MSO_SHAPE_TYPE.TEXT_BOX: "TEXT_BOX",
+            MSO_SHAPE_TYPE.LINE: "LINE",
+            MSO_SHAPE_TYPE.CONNECTOR: "CONNECTOR",
+            MSO_SHAPE_TYPE.TABLE: "TABLE",
+            MSO_SHAPE_TYPE.GROUP: "GROUP",
+            MSO_SHAPE_TYPE.CHART: "CHART",
+            MSO_SHAPE_TYPE.MEDIA: "MEDIA"
+        }
+        
+        # Determine shape type
+        shape_type = shape_type_map.get(shape.shape_type, f"UNKNOWN_{shape.shape_type}")
+        
+        # Check if this is a group child (simplified - would need more complex logic in real implementation)
+        is_group_child = False
+        try:
+            # This is a simplified check - in reality you'd need to traverse the shape hierarchy
+            if hasattr(shape, 'part') and hasattr(shape.part, 'element'):
+                # Could check XML structure here to determine group membership
+                pass
+        except:
+            pass
+        
+        return shape_type, is_group_child
     
     def get_statistics(self) -> Dict[str, int]:
         """Get statistics about the manifest contents."""
@@ -508,5 +610,37 @@ def compute_image_hash(image_data: bytes) -> str:
 
 
 def create_stable_key(slide_idx: int, shape_id: int, image_hash: str) -> str:
-    """Create stable key for image identification."""
+    """Create stable key for image identification (legacy compatibility)."""
     return f"slide_{slide_idx}_shapeid_{shape_id}_hash_{image_hash[:8]}"
+
+def create_instance_key(slide_idx: int, shape_id: int) -> str:
+    """Create instance key for shape identification (NEW SCHEMA 2.0)."""
+    return f"slide_{slide_idx}_shape_{shape_id}"
+
+def create_content_key(content_bytes: bytes) -> str:
+    """Create content key from rendered crop or original blob bytes (NEW SCHEMA 2.0)."""
+    return hashlib.sha256(content_bytes).hexdigest()
+
+def parse_min_shape_area(area_str: str, slide_width: int = 720, slide_height: int = 540) -> int:
+    """
+    Parse minimum shape area from CLI string format.
+    
+    Args:
+        area_str: Area specification like "1%" or "100px" 
+        slide_width: Slide width in points (default: 720 = 10 inches at 72 DPI)
+        slide_height: Slide height in points (default: 540 = 7.5 inches at 72 DPI)
+        
+    Returns:
+        Minimum area in square points
+    """
+    if area_str.endswith('%'):
+        # Percentage of slide area
+        percentage = float(area_str[:-1])
+        slide_area = slide_width * slide_height
+        return int(slide_area * percentage / 100)
+    elif area_str.endswith('px'):
+        # Direct pixel area (assuming 72 DPI: 1 point = 1 pixel)
+        return int(area_str[:-2])
+    else:
+        # Assume it's already in points
+        return int(area_str)

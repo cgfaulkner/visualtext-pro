@@ -137,11 +137,15 @@ def _add_title_and_summary(doc, title: str, entries, manifest: AltManifest):
     summary_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     summary_para.space_after = Pt(16)
     
-    # Add processing mode summary
-    source_breakdown = f"Existing: {stats['source_existing']}, Generated: {stats['source_generated']}, Cached: {stats['source_cached']}"
+    # Add processing mode summary with preserved/generated/decorative counts
+    preserved_count = len([e for e in entries if e.decision_reason == "preserve_existing"])
+    generated_count = len([e for e in entries if e.decision_reason in ["generated_new", "cached"]])
+    excluded_count = len([e for e in entries if e.decision_reason in ["policy_excluded", "generation_error"]])
+    
+    summary_breakdown = f"Preserved: {preserved_count}, Generated: {generated_count}, Excluded: {excluded_count}"
     breakdown_para = doc.add_paragraph()
-    breakdown_run = breakdown_para.add_run(f"Sources: {source_breakdown}")
-    _set_font_properties(breakdown_run, size=9, italic=True, color="888888")
+    breakdown_run = breakdown_para.add_run(summary_breakdown)
+    _set_font_properties(breakdown_run, size=10, bold=True, color="0066CC")
     breakdown_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     breakdown_para.space_after = Pt(16)
 
@@ -152,23 +156,21 @@ def _create_review_table(doc, entries, portrait: bool):
     sorted_entries = sorted(entries, 
                            key=lambda e: (e.slide_idx, e.image_number))
     
-    # Create table
-    table = doc.add_table(rows=1, cols=6)
+    # Create table - NEW SCHEMA 2.0 layout: Slide/Img, Type, Decorative, Current ALT, Suggested ALT
+    table = doc.add_table(rows=1, cols=5)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     
     # Set fixed table layout for portrait
     if portrait:
         _setup_fixed_table_layout(table)
     
-    # Setup header
+    # Setup header - NEW SCHEMA 2.0 columns
     header_cells = table.rows[0].cells
-    headers = ["Slide / Img", "Type", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Decorative"]
+    headers = ["Slide / Img", "Type", "Decorative", "Current ALT", "Suggested ALT"]
     
     for i, (cell, header) in enumerate(zip(header_cells, headers)):
         cell.text = header
         _format_header_cell(cell)
-        if i == 2 and portrait:  # Thumbnail column padding (now column 2)
-            _set_cell_margins(cell, right=180)
     
     _repeat_header_row(table.rows[0])
     
@@ -187,36 +189,45 @@ def _create_review_table(doc, entries, portrait: bool):
         cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
         _format_shape_type_cell(cells[1], entry.shape_type)
         
-        # Thumbnail (only for pictures)
-        _add_thumbnail_to_cell(cells[2], entry, portrait)
+        # Decorative checkbox (moved to column 2)
+        is_decorative = _is_decorative_heuristic(entry)
+        cells[2].text = "☑" if is_decorative else "☐"
+        cells[2].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Current ALT Text (from manifest - what was in PPTX originally)
-        current_alt = (entry.existing_alt or entry.current_alt).strip()
+        # GREMLIN 2 FIX: Correct display logic for Current vs Suggested ALT
+        # Current ALT Text = existing_alt from the original PPT scan
+        current_alt = entry.existing_alt if entry.existing_alt else ""
         cells[3].text = current_alt if current_alt else "[No ALT text]"
         _format_alt_text_cell(cells[3], bool(current_alt))
         
-        # Suggested ALT Text (from manifest - final_alt is the SSOT)
-        final_alt = (entry.final_alt or entry.suggested_alt).strip()
-        
-        # Apply synchronization logic based on decision_reason
-        if entry.decision_reason == "preserved" or (entry.had_existing_alt and entry.source == "existing"):
-            # Preserve mode: Current ALT = Suggested ALT
-            suggested_label = f"{current_alt} (existing ALT preserved)" if current_alt else "[Preservation error]"
-            cells[4].text = suggested_label
-        elif entry.decision_reason in ["generated", "shape_fallback"] or final_alt:
-            # Generated ALT text
+        # Suggested ALT Text logic based on decision_reason
+        if entry.decision_reason == "preserve_existing":
+            # GREMLIN 2 FIX: For preserved ALT, leave Suggested column BLANK
+            # This lets faculty know they only need to type if they want to change it
+            cells[4].text = ""  # Blank as requested
+            # Optional: Add UX hint as faint text
+            paragraph = cells[4].paragraphs[0]
+            run = paragraph.add_run("(Leave blank to keep current, or type replacement)")
+            _set_font_properties(run, size=8, italic=True, color="BBBBBB")
+        elif entry.decision_reason in ["generated_new", "cached"]:
+            # Generated or cached ALT text - show the final_alt
+            final_alt = entry.final_alt if entry.final_alt else ""
             cells[4].text = final_alt if final_alt else "[Generation failed]"
-        else:
-            # No ALT text available
+        elif entry.decision_reason == "needs_generation":
+            # Not yet generated
             cells[4].text = "[Generate needed]"
+        elif entry.decision_reason in ["policy_excluded", "generation_error"]:
+            # Excluded from processing
+            cells[4].text = "[Excluded]"
+        else:
+            # Fallback - use final_alt or indicate missing
+            final_alt = entry.final_alt if entry.final_alt else ""
+            cells[4].text = final_alt if final_alt else "[No suggested ALT]"
         
-        _format_alt_text_cell(cells[4], bool(final_alt or current_alt))
-        
-        # Decorative checkbox
-        is_decorative = _is_decorative_heuristic(entry)
-        cells[5].text = "☑" if is_decorative else "☐"
-        cells[5].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Format suggested cell - check if it has content
+        has_suggested_content = bool(cells[4].text.strip())
+        _format_alt_text_cell(cells[4], has_suggested_content)
         
         # Set row properties
         _set_row_no_break(row)
@@ -232,14 +243,13 @@ def _setup_fixed_table_layout(table):
     tblLayout.set(qn('w:type'), 'fixed')
     tblPr.append(tblLayout)
     
-    # Set column widths for portrait (adjusted for 6 columns)
+    # Set column widths for portrait (NEW SCHEMA 2.0: 5 columns)
     col_widths = [
-        Inches(0.7),    # Slide/Img
-        Inches(0.8),    # Type
-        Inches(1.2),    # Thumbnail
-        Inches(1.8),    # Current ALT
-        Inches(1.8),    # Suggested ALT
-        Inches(0.7)     # Decorative
+        Inches(0.8),    # Slide/Img
+        Inches(1.0),    # Type
+        Inches(0.8),    # Decorative
+        Inches(2.2),    # Current ALT
+        Inches(2.2)     # Suggested ALT
     ]
     
     for i, width in enumerate(col_widths):
@@ -248,8 +258,9 @@ def _setup_fixed_table_layout(table):
 
 
 def _add_thumbnail_to_cell(cell, entry, portrait: bool):
-    """Add thumbnail image to cell if available."""
-    thumbnail_path = entry.thumbnail_path
+    """Add thumbnail image to cell if available. Use thumb_path for display (NEW SCHEMA 2.0)."""
+    # Use thumb_path from new schema 2.0, fallback to legacy thumbnail_path
+    thumbnail_path = entry.thumb_path if entry.thumb_path else entry.thumbnail_path
     
     if thumbnail_path and Path(thumbnail_path).exists():
         try:
@@ -261,11 +272,15 @@ def _add_thumbnail_to_cell(cell, entry, portrait: bool):
             run.add_picture(thumbnail_path, width=thumb_width)
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             
+            logger.debug(f"Added thumbnail from {thumbnail_path} for {entry.instance_key}")
+            
         except Exception as e:
-            logger.debug(f"Could not add thumbnail for {entry.key}: {e}")
+            logger.debug(f"Could not add thumbnail for {entry.instance_key}: {e}")
             cell.text = "[Image]"
     else:
         cell.text = "[No preview]"
+        if thumbnail_path:
+            logger.debug(f"Thumbnail not found: {thumbnail_path} for {entry.instance_key}")
     
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     if portrait:

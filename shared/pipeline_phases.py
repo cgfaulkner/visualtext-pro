@@ -20,134 +20,112 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
 from pipeline_artifacts import RunArtifacts
+from alt_manifest import AltManifest, create_instance_key, create_content_key
 
 
 logger = logging.getLogger(__name__)
 
 
 def phase1_scan(pptx_path: Path, artifacts: RunArtifacts, 
-               generate_thumbnails: bool = True) -> Dict[str, Any]:
+               generate_thumbnails: bool = True,
+               llava_include_shapes: str = "smart",
+               max_shapes_per_slide: int = 5,
+               min_shape_area: str = "1%") -> Dict[str, Any]:
     """
-    Phase 1: Scan PPTX and build visual_index + current_alt_by_key.
+    Phase 1: Scan PPTX and build visual_index + current_alt_by_key + manifest.
     
-    This phase extracts:
-    - visual_index: Complete catalog of all images with stable keys, metadata
-    - current_alt_by_key: Existing ALT text already in the deck
+    This phase extracts using NEW SCHEMA 2.0:
+    - manifest.json: Single source of truth with instance_key, shape_type, existing_alt
+    - visual_index: Complete catalog for backward compatibility  
+    - current_alt_by_key: Existing ALT text for backward compatibility
     - thumbnails: Generated for DOCX review (optional)
     
     Args:
         pptx_path: Path to PPTX file
         artifacts: RunArtifacts for managing file paths
         generate_thumbnails: Whether to generate thumbnail images
+        llava_include_shapes: Shape inclusion strategy (off/smart/all)
+        max_shapes_per_slide: Maximum shapes per slide
+        min_shape_area: Minimum shape area threshold
         
     Returns:
         Dictionary with scan results
     """
-    logger.info(f"Phase 1: Scanning {pptx_path.name}")
+    logger.info(f"Phase 1: Scanning {pptx_path.name} with new schema 2.0")
     
     try:
-        from pptx import Presentation
-        from pptx.enum.shapes import MSO_SHAPE_TYPE
-        import base64
-        from PIL import Image
-        import io
+        # Create manifest processor with configuration
+        from manifest_processor import ManifestProcessor
+        processor = ManifestProcessor(
+            config_manager=None,  # Will be passed from caller if needed
+            alt_generator=None,   # Not needed for discovery phase
+            llava_include_shapes=llava_include_shapes,
+            max_shapes_per_slide=max_shapes_per_slide,
+            min_shape_area=min_shape_area
+        )
         
-        # Load presentation
-        prs = Presentation(str(pptx_path))
+        # Initialize manifest
+        manifest = AltManifest(artifacts.get_manifest_path())
         
+        # Run discovery and classification
+        discovery_result = processor.phase1_discover_and_classify(pptx_path, manifest)
+        
+        if not discovery_result['success']:
+            return discovery_result
+        
+        # Save manifest
+        manifest.save()
+        
+        # Build backward-compatible outputs
         visual_index = {}
         current_alt_by_key = {}
         thumbnails_generated = 0
         
-        for slide_idx, slide in enumerate(prs.slides):
-            for shape_idx, shape in enumerate(slide.shapes):
-                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                    try:
-                        # Create stable key
-                        image_data = shape.image.blob if hasattr(shape, 'image') else b''
-                        hash_suffix = hashlib.sha256(image_data).hexdigest()[:8]
-                        
-                        # Try to get shape ID from cNvPr
-                        shape_id = getattr(shape, 'shape_id', shape_idx)
-                        stable_key = f"slide_{slide_idx}_shapeid_{shape_id}_hash_{hash_suffix}"
-                        
-                        # Extract current ALT text
-                        current_alt = ""
-                        try:
-                            # Try descr first (primary ALT text)
-                            if hasattr(shape, '_element'):
-                                pic_element = shape._element
-                                nvpicpr = pic_element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr')
-                                if nvpicpr is not None:
-                                    current_alt = nvpicpr.get('descr', '') or nvpicpr.get('title', '')
-                        except Exception as e:
-                            logger.debug(f"Could not extract ALT text from {stable_key}: {e}")
-                        
-                        # Clean current ALT text
-                        if current_alt:
-                            current_alt = current_alt.strip()
-                            if current_alt:
-                                current_alt_by_key[stable_key] = current_alt
-                        
-                        # Build visual index entry
-                        visual_entry = {
-                            'stable_key': stable_key,
-                            'slide_idx': slide_idx,
-                            'shape_idx': shape_idx,
-                            'shape_id': shape_id,
-                            'slide_number': slide_idx + 1,
-                            'image_number': len(visual_index) + 1,
-                            'has_current_alt': bool(current_alt),
-                            'current_alt_text': current_alt
-                        }
-                        
-                        # Add image metadata if available
-                        if hasattr(shape, 'image'):
-                            try:
-                                visual_entry.update({
-                                    'width_px': shape.image.size[0] if shape.image.size else 0,
-                                    'height_px': shape.image.size[1] if shape.image.size else 0,
-                                    'file_size': len(image_data)
-                                })
-                            except Exception as e:
-                                logger.debug(f"Could not extract image metadata: {e}")
-                        
-                        # Generate thumbnail if requested
-                        if generate_thumbnails and image_data:
-                            try:
-                                thumbnail_path = artifacts.thumbs_dir / f"{stable_key}.jpg"
-                                
-                                # Create thumbnail
-                                img = Image.open(io.BytesIO(image_data))
-                                img.thumbnail((200, 200), Image.Resampling.LANCZOS)
-                                img.save(thumbnail_path, 'JPEG', quality=85)
-                                
-                                visual_entry['thumbnail_path'] = str(thumbnail_path)
-                                thumbnails_generated += 1
-                                
-                            except Exception as e:
-                                logger.debug(f"Could not generate thumbnail for {stable_key}: {e}")
-                                visual_entry['thumbnail_error'] = str(e)
-                        
-                        visual_index[stable_key] = visual_entry
-                        
-                    except Exception as e:
-                        logger.warning(f"Error processing image at slide {slide_idx}, shape {shape_idx}: {e}")
+        for entry in manifest.get_all_entries():
+            # Build visual_index entry for backward compatibility
+            visual_entry = {
+                'stable_key': entry.key or entry.instance_key,
+                'instance_key': entry.instance_key,
+                'slide_idx': entry.slide_idx,
+                'shape_idx': 0,  # Not tracked in new schema
+                'shape_id': entry.instance_key.split('_')[-1] if '_' in entry.instance_key else '0',
+                'slide_number': entry.slide_number,
+                'image_number': entry.image_number,
+                'has_current_alt': entry.had_existing_alt,
+                'current_alt_text': entry.existing_alt,
+                'shape_type': entry.shape_type,
+                'bbox': entry.bbox,
+                'format': entry.format,
+                'width_px': entry.width_px,
+                'height_px': entry.height_px
+            }
+            visual_index[entry.instance_key] = visual_entry
+            
+            # Build current_alt_by_key for backward compatibility
+            if entry.existing_alt.strip():
+                current_alt_by_key[entry.instance_key] = entry.existing_alt
         
-        # Save artifacts
+        # Save backward-compatible artifacts
         artifacts.save_visual_index(visual_index)
         artifacts.save_current_alt_by_key(current_alt_by_key)
         
         result = {
             'success': True,
-            'total_images': len(visual_index),
+            'total_images': discovery_result['classified_elements'],
             'images_with_current_alt': len(current_alt_by_key),
-            'thumbnails_generated': thumbnails_generated,
+            'thumbnails_generated': thumbnails_generated,  # Will be generated in Step 2
             'visual_index_path': str(artifacts.visual_index_path),
-            'current_alt_by_key_path': str(artifacts.current_alt_by_key_path)
+            'current_alt_by_key_path': str(artifacts.current_alt_by_key_path),
+            'manifest_path': str(artifacts.get_manifest_path()),
+            # New schema 2.0 fields
+            'discovered_elements': discovery_result['discovered_elements'],
+            'classified_elements': discovery_result['classified_elements'],
+            'include_strategy': discovery_result['include_strategy'],
+            'min_area_threshold': discovery_result['min_area_threshold']
         }
         
-        logger.info(f"Phase 1 complete: {len(visual_index)} images, {len(current_alt_by_key)} with existing ALT")
+        logger.info(f"Phase 1 complete: {discovery_result['classified_elements']} elements classified, "
+                   f"{len(current_alt_by_key)} with existing ALT (strategy: {llava_include_shapes})")
         return result
         
     except Exception as e:

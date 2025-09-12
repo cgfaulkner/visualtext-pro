@@ -1444,9 +1444,17 @@ class PPTXAltTextInjector:
                         cnvpr_element = cnvpr_elements[0]
                         # Verify this matches our identifier if possible
                         if self._verify_element_matches_identifier(cnvpr_element, identifier):
-                            # Apply universal normalization
-                            normalized_alt_text = self._normalize_alt_universal(alt_text)
-                            cnvpr_element.set('descr', normalized_alt_text)
+                            # GREMLIN 1 FIX: Write exact final_alt without normalization
+                            cnvpr_element.set('descr', alt_text)
+                            
+                            # GREMLIN 1 FIX: Post-write read-back assertion
+                            actual_written = cnvpr_element.get('descr', '')
+                            if actual_written != alt_text:
+                                logger.error(f"POST-WRITE ASSERTION FAILED for {rel_id}:")
+                                logger.error(f"  Expected: {repr(alt_text)}")
+                                logger.error(f"  Actual:   {repr(actual_written)}")
+                                return False
+                            
                             logger.debug(f"Injected ALT text via relationship {rel_id}")
                             return True
             
@@ -1510,9 +1518,17 @@ class PPTXAltTextInjector:
             # Try to match by position or other identifying characteristics
             for i, cnvpr in enumerate(cnvpr_elements):
                 if self._element_matches_shape_index(cnvpr, identifier.shape_idx, i):
-                    # Apply universal normalization
-                    normalized_alt_text = self._normalize_alt_universal(alt_text)
-                    cnvpr.set('descr', normalized_alt_text)
+                    # GREMLIN 1 FIX: Write exact final_alt without normalization
+                    cnvpr.set('descr', alt_text)
+                    
+                    # GREMLIN 1 FIX: Post-write read-back assertion
+                    actual_written = cnvpr.get('descr', '')
+                    if actual_written != alt_text:
+                        logger.error(f"POST-WRITE ASSERTION FAILED at index {i}:")
+                        logger.error(f"  Expected: {repr(alt_text)}")
+                        logger.error(f"  Actual:   {repr(actual_written)}")
+                        return False
+                    
                     logger.debug(f"Injected ALT text via XML manipulation at index {i}")
                     return True
             

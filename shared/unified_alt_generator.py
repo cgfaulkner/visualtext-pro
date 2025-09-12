@@ -175,6 +175,20 @@ class LLaVAProvider(BaseAltProvider):
         prompt_text = _build_prompt_text(custom_prompt, context)
         img_b64 = _b64_of_file(image_path)
 
+        # Deterministic settings for reproducible results
+        deterministic_options = {
+            "temperature": 0.0,      # Deterministic generation
+            "top_p": 1.0,            # No nucleus sampling
+            "top_k": 1,              # Always pick most likely token
+            "num_predict": 100,      # Limit response length
+            "repeat_penalty": 1.0,   # No repetition penalty to avoid randomness
+        }
+        
+        # Add seed if supported (for full determinism)
+        seed = self.config.get('seed', 42)
+        if seed is not None:
+            deterministic_options["seed"] = seed
+
         # Choose payload shape based on endpoint
         if endpoint_path.endswith("/api/chat"):
             # Chat style expects messages (object), so we use chat format here
@@ -188,6 +202,7 @@ class LLaVAProvider(BaseAltProvider):
                 # if your version requires images inside message content, move it there accordingly.
                 "images": [img_b64],
                 "stream": False,
+                "options": deterministic_options
             }
         else:
             # /api/generate requires a STRING prompt; images go in a separate array
@@ -196,6 +211,7 @@ class LLaVAProvider(BaseAltProvider):
                 "prompt": prompt_text,   # <-- STRING, not object
                 "images": [img_b64],     # base64 strings
                 "stream": False,
+                "options": deterministic_options
             }
 
         headers = {"Content-Type": "application/json"}
@@ -223,9 +239,8 @@ class LLaVAProvider(BaseAltProvider):
                 if not content:
                     raise ValueError("Empty response from provider.")
 
-                # One sentence, tidy punctuation
-                if content and content[-1] not in ".!?":
-                    content += "."
+                # Apply normalization to 1-2 complete sentences (no truncation)
+                content = self._normalize_to_complete_sentences(content)
                     
                 meta = {
                     "endpoint": endpoint_path, 
@@ -261,6 +276,51 @@ class LLaVAProvider(BaseAltProvider):
             "model": model
         }
         raise RuntimeError(f"LLaVA/Ollama call failed after {retries} attempts: {last_err}")
+    
+    def _normalize_to_complete_sentences(self, text: str) -> str:
+        """
+        Normalize ALT text to 1-2 complete sentences without truncation.
+        
+        This ensures:
+        - No truncated sentences (complete thoughts only)
+        - Proper punctuation
+        - Maximum 2 sentences for conciseness
+        """
+        if not text or not text.strip():
+            return ""
+        
+        text = text.strip()
+        
+        # Split into sentences using common sentence endings
+        import re
+        sentence_pattern = r'[.!?]+(?:\s|$)'
+        sentences = re.split(sentence_pattern, text)
+        
+        # Filter out empty sentences and clean up
+        valid_sentences = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if sentence and len(sentence) > 3:  # Minimum meaningful sentence length
+                # Ensure sentence starts with capital letter
+                if sentence[0].islower():
+                    sentence = sentence[0].upper() + sentence[1:]
+                valid_sentences.append(sentence)
+        
+        # Take first 1-2 sentences only
+        if len(valid_sentences) >= 2:
+            result = valid_sentences[0] + ". " + valid_sentences[1]
+        elif len(valid_sentences) == 1:
+            result = valid_sentences[0]
+        else:
+            # Fallback: treat entire text as single sentence
+            result = text
+        
+        # Ensure proper terminal punctuation
+        result = result.strip()
+        if result and result[-1] not in '.!?':
+            result += "."
+        
+        return result
     
     def _process_image_for_retry(self, image_data: bytes, strategy: dict, image_path: str) -> bytes:
         """

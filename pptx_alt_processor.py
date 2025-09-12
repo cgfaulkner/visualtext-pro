@@ -462,6 +462,147 @@ class PPTXAltProcessor:
         
         return self.alt_injector.test_pdf_export_alt_text_survival(str(pptx_path))
     
+    def _test_new_pipeline_dry_run(self, pptx_file: str, 
+                                  llava_include_shapes: str = "smart",
+                                  max_shapes_per_slide: int = 5,
+                                  min_shape_area: str = "1%") -> dict:
+        """
+        Test the new pipeline implementation without modifying files.
+        
+        Args:
+            pptx_file: Path to PPTX file to test
+            llava_include_shapes: Shape inclusion strategy 
+            max_shapes_per_slide: Max shapes per slide
+            min_shape_area: Minimum shape area threshold
+            
+        Returns:
+            Dictionary with test results
+        """
+        pptx_path = Path(pptx_file)
+        if not pptx_path.exists():
+            raise FileNotFoundError(f"PPTX file not found: {pptx_file}")
+        
+        logger.info(f"Testing new pipeline with: {pptx_path.name}")
+        
+        try:
+            from shared.manifest_processor import ManifestProcessor
+            from shared.alt_manifest import AltManifest, MANIFEST_SCHEMA_VERSION
+            from shared.pipeline_artifacts import RunArtifacts
+            import time
+            
+            start_time = time.time()
+            
+            # Create test artifacts
+            artifacts = RunArtifacts.create_for_run(pptx_path)
+            
+            # Initialize processor with new configuration
+            processor = ManifestProcessor(
+                config_manager=self.config_manager,
+                alt_generator=None,  # Skip generation for dry run
+                llava_include_shapes=llava_include_shapes,
+                max_shapes_per_slide=max_shapes_per_slide,
+                min_shape_area=min_shape_area
+            )
+            
+            # Initialize manifest
+            manifest = AltManifest(artifacts.get_manifest_path())
+            
+            # Phase 1: Discovery and Classification
+            logger.info("Running Phase 1: Discovery and Classification")
+            phase1_result = processor.phase1_discover_and_classify(pptx_path, manifest)
+            
+            if not phase1_result['success']:
+                return {
+                    'success': False,
+                    'phase': 'discovery',
+                    'error': phase1_result.get('error', 'Unknown error'),
+                    'errors': [phase1_result.get('error', 'Unknown error')]
+                }
+            
+            # Phase 2: Rendering and Crops (for testing, we'll simulate this)
+            logger.info("Running Phase 2: Rendering and Thumbnails (simulated for dry-run)")
+            # In a real run, this would call processor.phase2_render_and_generate_crops
+            # For dry-run, we'll simulate by setting placeholder paths
+            for entry in manifest.get_all_entries():
+                entry.crop_path = f"crops/{entry.instance_key}.png"  # Placeholder
+                entry.thumb_path = f"thumbs/{entry.instance_key}.jpg"  # Placeholder
+                manifest.add_entry(entry)
+            
+            # Phase 3: Inclusion Policy and Caching
+            logger.info("Running Phase 3: Inclusion Policy and Caching")
+            phase3_result = processor.phase3_inclusion_policy_and_caching(manifest, mode="preserve")
+            
+            if not phase3_result['success']:
+                return {
+                    'success': False,
+                    'phase': 'inclusion_policy',
+                    'error': phase3_result.get('error', 'Unknown error'),
+                    'errors': [phase3_result.get('error', 'Unknown error')]
+                }
+            
+            # Phase 4: LLaVA Generation (skipped for dry-run unless explicitly requested)
+            logger.info("Phase 4: LLaVA Generation (skipped for dry-run)")
+            phase4_result = {
+                'success': True,
+                'generated_count': 0,
+                'skipped_count': phase3_result.get('needs_generation_count', 0),
+                'message': 'Skipped for dry-run mode'
+            }
+            
+            # Save manifest after all phases
+            manifest.save()
+            
+            processing_time = time.time() - start_time
+            
+            # Get manifest statistics
+            stats = manifest.get_statistics()
+            
+            result = {
+                'success': True,
+                'schema_version': MANIFEST_SCHEMA_VERSION,
+                'pptx_file': str(pptx_path),
+                'manifest_path': str(artifacts.get_manifest_path()),
+                'processing_time': processing_time,
+                # Phase 1 results
+                'discovered_elements': phase1_result['discovered_elements'],
+                'classified_elements': phase1_result['classified_elements'],
+                'include_strategy': phase1_result['include_strategy'],
+                'min_area_threshold': phase1_result['min_area_threshold'],
+                # Phase 3 results
+                'preserved_count': phase3_result['preserved_count'],
+                'cached_count': phase3_result['cached_count'],
+                'needs_generation_count': phase3_result['needs_generation_count'],
+                'excluded_count': phase3_result['excluded_count'],
+                # Phase 4 results
+                'generated_count': phase4_result['generated_count'],
+                # Manifest statistics
+                'manifest_stats': stats,
+                'total_entries': stats['total_entries'],
+                'with_existing_alt': stats['with_current_alt']
+            }
+            
+            logger.info(f"✅ Dry run completed successfully in {processing_time:.2f}s")
+            logger.info(f"   Schema version: {MANIFEST_SCHEMA_VERSION}")
+            logger.info(f"   Elements discovered: {phase1_result['discovered_elements']}")
+            logger.info(f"   Elements classified: {phase1_result['classified_elements']}")
+            logger.info(f"   Strategy: {phase1_result['include_strategy']}")
+            logger.info(f"   Threshold: {phase1_result['min_area_threshold']:.0f} sq pts")
+            logger.info(f"   With existing ALT: {stats['with_current_alt']}")
+            logger.info(f"   Manifest: {artifacts.get_manifest_path()}")
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Dry run failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                'success': False,
+                'pptx_file': str(pptx_path),
+                'processing_time': time.time() - start_time,
+                'error': error_msg,
+                'errors': [error_msg]
+            }
+    
     def _export_to_pdf(self, pptx_file: Path) -> dict:
         """
         Export PPTX to PDF with multiple fallback methods.
@@ -767,6 +908,20 @@ Examples:
     process_parser.add_argument('--approval-doc-only', action='store_true', help='Generate only the review document; skip injection')
     process_parser.add_argument('--approval-out', help='Specific path for approval document output')
     
+    # LLaVA shape processing flags
+    process_parser.add_argument('--llava-include-shapes', choices=['off', 'smart', 'all'], default='smart',
+                               help='Shape inclusion strategy: off=pictures only, smart=shapes above threshold, all=all shapes (default: smart)')
+    process_parser.add_argument('--max-shapes-per-slide', type=int, default=5,
+                               help='Maximum shapes to process per slide (default: 5)')
+    process_parser.add_argument('--min-shape-area', default='1%', 
+                               help='Minimum shape area threshold, as percentage (e.g., "1%") or pixels (e.g., "100px") (default: 1%%)')
+    
+    # Pipeline control flags  
+    process_parser.add_argument('--skip-injection', action='store_true', 
+                               help='Skip ALT text injection (generate only)')
+    process_parser.add_argument('--dry-run', action='store_true',
+                               help='Dry run mode - process and generate manifest but do not modify files')
+    
     # Batch process command
     batch_parser = subparsers.add_parser('batch-process', help='Process directory of PPTX files')
     batch_parser.add_argument('input_dir', help='Input directory')
@@ -808,8 +963,49 @@ Examples:
             input_pptx = args.input_file
             output_path = args.output
             
-            # 1) Normal injection (skip if --approval-doc-only)
-            if not args.approval_doc_only:
+            # Handle new flags
+            dry_run = getattr(args, 'dry_run', False)
+            skip_injection = getattr(args, 'skip_injection', False)
+            llava_include_shapes = getattr(args, 'llava_include_shapes', 'smart')
+            max_shapes_per_slide = getattr(args, 'max_shapes_per_slide', 5)
+            min_shape_area = getattr(args, 'min_shape_area', '1%')
+            
+            if dry_run:
+                logger.info("🔍 DRY RUN MODE: Processing manifest but not modifying files")
+            
+            # 1) Dry-run mode: test new pipeline without modifications
+            if dry_run:
+                result = processor._test_new_pipeline_dry_run(
+                    input_pptx,
+                    llava_include_shapes=llava_include_shapes,
+                    max_shapes_per_slide=max_shapes_per_slide,
+                    min_shape_area=min_shape_area
+                )
+                
+                if result['success']:
+                    print("✅ Dry run completed successfully!")
+                    print(f"Schema version: {result.get('schema_version', 'N/A')}")
+                    print(f"Elements discovered: {result.get('discovered_elements', 0)}")
+                    print(f"Elements classified: {result.get('classified_elements', 0)}")
+                    print(f"Include strategy: {result.get('include_strategy', 'N/A')}")
+                    print(f"Min area threshold: {result.get('min_area_threshold', 0):.0f} sq pts")
+                    print()
+                    print("Policy decisions:")
+                    print(f"  Preserved (existing ALT): {result.get('preserved_count', 0)}")
+                    print(f"  Cached (reused): {result.get('cached_count', 0)}")
+                    print(f"  Need generation: {result.get('needs_generation_count', 0)}")
+                    print(f"  Excluded: {result.get('excluded_count', 0)}")
+                    print(f"  Generated (dry-run): {result.get('generated_count', 0)}")
+                    print()
+                    print(f"Manifest saved to: {result.get('manifest_path', 'N/A')}")
+                else:
+                    print("❌ Dry run failed!")
+                    for error in result.get('errors', []):
+                        print(f"Error: {error}")
+                    return 1
+                    
+            # 2) Normal injection (skip if --approval-doc-only or --dry-run)
+            elif not args.approval_doc_only:
                 result = processor.process_single_file(
                     input_pptx, 
                     output_path, 
