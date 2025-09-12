@@ -936,7 +936,12 @@ class ManifestProcessor:
         
         # Save manifest
         manifest.save()
-        
+
+        if logger.isEnabledFor(logging.DEBUG):
+            entries = manifest.get_all_entries()
+            key_sample = [e.key for e in entries[:5]]
+            logger.debug("First 5 manifest entry keys: %s", key_sample)
+
         # Combine results
         stats = manifest.get_statistics()
         

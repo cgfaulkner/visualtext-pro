@@ -14,11 +14,12 @@ Consumers (decoupled):
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, Literal
 
 # Setup paths
 project_root = Path(__file__).parent
@@ -29,10 +30,63 @@ sys.path.insert(0, str(project_root / "core"))
 from pipeline_artifacts import RunArtifacts
 from pipeline_phases import run_pipeline
 from docx_review_builder import generate_alt_review_doc
-from pptx_injector import inject_from_map
 from config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
+
+
+def inject_from_map(
+    pptx_path: str,
+    final_alt_map_path: str,
+    mode: Literal["preserve", "replace"] = "preserve",
+) -> Dict[str, Any]:
+    """Inject ALT text from final_alt_map.json into the PPTX file."""
+    logger.info("Injecting ALT text into %s (mode: %s)", pptx_path, mode)
+    try:
+        with open(final_alt_map_path, "r", encoding="utf-8") as f:
+            final_alt_map = json.load(f)
+
+        if not final_alt_map:
+            logger.warning("No ALT text mappings found in final_alt_map")
+            return {
+                "success": True,
+                "injected_successfully": 0,
+                "total_mappings": 0,
+                "skipped_existing": 0,
+                "errors": [],
+            }
+
+        from core.pptx_alt_injector import PPTXAltTextInjector
+        from shared.config_manager import ConfigManager
+
+        config_manager = ConfigManager()
+        injector = PPTXAltTextInjector(config_manager)
+
+        result = injector.inject_alt_text_from_mapping(
+            pptx_path, final_alt_map, pptx_path, mode=mode
+        )
+
+        if result["success"]:
+            stats = result.get("statistics", {})
+            logger.info(
+                "Injection complete: %s images updated",
+                stats.get("injected_successfully", 0),
+            )
+        else:
+            logger.error(
+                "Injection failed: %s", result.get("error", "Unknown error")
+            )
+
+        return result
+
+    except Exception as e:  # pragma: no cover - pipeline errors
+        logger.error("ALT text injection failed: %s", e, exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "injected_successfully": 0,
+            "total_mappings": 0,
+        }
 
 
 def setup_logging(verbose: bool = False):

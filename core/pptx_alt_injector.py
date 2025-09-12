@@ -61,6 +61,7 @@ from config_manager import ConfigManager
 from decorative_filter import is_force_decorative_by_filename
 
 logger = logging.getLogger(__name__)
+logger.info("LOG: injector_file=%s", __file__)
 
 
 class PPTXImageIdentifier:
@@ -281,8 +282,18 @@ class PPTXAltTextInjector:
             r'^(A (?:shape|line|connector)\s*\([^)]*\))\s+(This is a PowerPoint (?:shape|line|connector)\b)',
             r'\2', t, flags=re.IGNORECASE
         )
+        t = self._ensure_terminal_punctuation(t)
+        return t
 
-        return t.strip()
+    @staticmethod
+    def _ensure_terminal_punctuation(text: str) -> str:
+        """Ensure text ends with a terminal punctuation mark."""
+        text = text.strip()
+        if not text:
+            return ""
+        if text[-1] in ".!?":
+            return text
+        return f"{text}."
     
     def _score_alt_text_quality(self, alt_text: str, source: str = "unknown") -> int:
         """

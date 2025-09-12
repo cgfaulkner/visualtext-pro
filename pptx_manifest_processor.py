@@ -17,6 +17,7 @@ import argparse
 import logging
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -165,8 +166,9 @@ def cmd_process(args) -> int:
     logger.info(f"Processing {input_path.name} with manifest SSOT")
     logger.info(f"Manifest: {manifest_path}")
     logger.info(f"Mode: {args.mode}")
-    
+
     start_time = time.time()
+    run_id = str(uuid.uuid4())
     
     try:
         # Load configuration and ALT generator
@@ -205,7 +207,8 @@ def cmd_process(args) -> int:
                 str(input_path),
                 str(manifest_path),
                 output_path,
-                mode=args.mode
+                mode=args.mode,
+                run_id=run_id,
             )
             
             if inject_result['success']:
@@ -232,7 +235,8 @@ def cmd_process(args) -> int:
                 str(manifest_path),
                 review_output,
                 title=title,
-                portrait=True
+                portrait=True,
+                run_id=run_id,
             )
             
             print(f"📋 Review document generated: {review_output}")
@@ -269,8 +273,9 @@ def cmd_inject(args) -> int:
         return 1
     
     output_path = args.output or str(input_path)
-    
+
     logger.info(f"Injecting from manifest: {manifest_path.name}")
+    run_id = str(uuid.uuid4())
     
     # Validate manifest first
     validation = validate_manifest_for_injection(str(manifest_path))
@@ -288,7 +293,8 @@ def cmd_inject(args) -> int:
         str(input_path),
         str(manifest_path),
         output_path,
-        mode=args.mode
+        mode=args.mode,
+        run_id=run_id,
     )
     
     if result['success']:
@@ -311,13 +317,15 @@ def cmd_review(args) -> int:
         return 1
     
     logger.info(f"Generating review document from manifest")
+    run_id = str(uuid.uuid4())
     
     try:
         generate_review_from_manifest(
             str(manifest_path),
             args.output,
             title=args.title,
-            portrait=True
+            portrait=True,
+            run_id=run_id,
         )
         
         print(f"✅ Review document generated: {args.output}")

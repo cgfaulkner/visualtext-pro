@@ -27,11 +27,16 @@ from docx.oxml.ns import qn
 from alt_manifest import AltManifest
 
 logger = logging.getLogger(__name__)
+logger.info("LOG: injector_file=%s", __file__)
 
 
-def generate_review_from_manifest(manifest_path: str, out_docx: str, 
-                                 title: Optional[str] = None,
-                                 portrait: bool = True) -> str:
+def generate_review_from_manifest(
+    manifest_path: str,
+    out_docx: str,
+    title: Optional[str] = None,
+    portrait: bool = True,
+    run_id: str | None = None,
+) -> str:
     """
     Generate ALT text review document from manifest (no LLaVA calls).
     
@@ -40,20 +45,26 @@ def generate_review_from_manifest(manifest_path: str, out_docx: str,
         out_docx: Output path for DOCX file
         title: Optional title for document
         portrait: If True, use portrait layout
+        run_id: Optional identifier for tracking pipeline runs
         
     Returns:
         Path to generated DOCX file
     """
-    logger.info(f"Building DOCX review from manifest: {out_docx}")
+    logger.info("RUN_ID=%s manifest=%s", run_id, manifest_path)
+    logger.info("Building DOCX review from manifest: %s", out_docx)
     
     # Load manifest
     try:
         manifest = AltManifest(Path(manifest_path))
         entries = manifest.get_all_entries()
-        
+
         if not entries:
             logger.warning("No entries found in manifest")
-            
+
+        if logger.isEnabledFor(logging.DEBUG):
+            key_sample = [e.key for e in entries[:5]]
+            logger.debug("First 5 DOCX entry keys: %s", key_sample)
+
     except Exception as e:
         logger.error(f"Failed to load manifest: {e}")
         raise RuntimeError(f"Could not load manifest file: {e}")
@@ -175,7 +186,7 @@ def _create_review_table(doc, entries, portrait: bool):
     _repeat_header_row(table.rows[0])
     
     # Add data rows
-    for entry in sorted_entries:
+    for idx, entry in enumerate(sorted_entries, start=1):
         row = table.add_row()
         cells = row.cells
         
@@ -189,15 +200,22 @@ def _create_review_table(doc, entries, portrait: bool):
         cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
         _format_shape_type_cell(cells[1], entry.shape_type)
         
-        # Decorative checkbox (moved to column 2)
-        is_decorative = _is_decorative_heuristic(entry)
-        cells[2].text = "☑" if is_decorative else "☐"
-        cells[2].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Thumbnail (only for pictures)
+        _add_thumbnail_to_cell(cells[2], entry, portrait)
         
-        # GREMLIN 2 FIX: Correct display logic for Current vs Suggested ALT
-        # Current ALT Text = existing_alt from the original PPT scan
-        current_alt = entry.existing_alt if entry.existing_alt else ""
+        # Current ALT Text (from manifest - what was in PPTX originally)
+        current_alt = (
+            entry.existing_alt
+            or entry.current_alt
+            or (entry.final_alt if entry.decision_reason == "preserved" else "")
+        ).strip()
+        if idx <= 5:
+            logger.debug(
+                "existing_alt=%r docx_current=%r key=%s",
+                entry.existing_alt,
+                current_alt,
+                entry.key,
+            )
         cells[3].text = current_alt if current_alt else "[No ALT text]"
         _format_alt_text_cell(cells[3], bool(current_alt))
         
@@ -455,7 +473,7 @@ def _repeat_header_row(row):
 
 
 def _set_row_no_break(row):
-    """Prevent row from breaking across pages.""" 
+    """Prevent row from breaking across pages."""
     trPr = row._tr.get_or_add_trPr()
     cantSplit = OxmlElement('w:cantSplit')
     trPr.append(cantSplit)
