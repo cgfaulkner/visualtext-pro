@@ -57,10 +57,14 @@ def generate_review_from_manifest(
     try:
         manifest = AltManifest(Path(manifest_path))
         entries = manifest.get_all_entries()
-        
+
         if not entries:
             logger.warning("No entries found in manifest")
-            
+
+        if logger.isEnabledFor(logging.DEBUG):
+            key_sample = [e.key for e in entries[:5]]
+            logger.debug("First 5 DOCX entry keys: %s", key_sample)
+
     except Exception as e:
         logger.error(f"Failed to load manifest: {e}")
         raise RuntimeError(f"Could not load manifest file: {e}")

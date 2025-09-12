@@ -121,10 +121,16 @@ def _inject_using_robust_injector(pptx_path: str, entries, output_path: str,
                     'llava_called': entry.llava_called
                 }
         
-        logger.info(f"Prepared {len(alt_text_mapping)} ALT text mappings for injection")
-        
+        logger.info(
+            f"Prepared {len(alt_text_mapping)} ALT text mappings for injection"
+        )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            sample_keys = list(alt_text_mapping.keys())[:5]
+            logger.debug("First 5 injection keys: %s", sample_keys)
+
         # Use existing robust injector
-        from core.pptx_alt_injector import PPTXAltTextInjector  
+        from core.pptx_alt_injector import PPTXAltTextInjector
         from shared.config_manager import ConfigManager
         
         config_manager = ConfigManager()
