@@ -651,11 +651,12 @@ class PPTXAccessibilityProcessor:
                     for key, info in list(alt_text_mapping.items())[:3]:  # Show first 3
                         logger.info(f"🔍 DEBUG: {key} -> '{info['alt_text'][:30]}...'")
                 
-                injection_success = self._inject_alt_text_to_pptx(
+                injection_success, final_alt_map = self._inject_alt_text_to_pptx(
                     presentation, alt_text_mapping, str(output_path), debug
                 )
                 
                 result['injection_time'] = time.time() - injection_start
+                result['final_alt_map'] = final_alt_map  # Store canonical mapping for approval docs
                 logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
                 
                 if injection_success:
@@ -5789,7 +5790,7 @@ class PPTXAccessibilityProcessor:
         return validation_result
     
     def _inject_alt_text_to_pptx(self, presentation: Presentation, 
-                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> bool:
+                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, dict]:
         """
         Inject ALT text into PPTX presentation using the dedicated injector.
         
@@ -5840,12 +5841,15 @@ class PPTXAccessibilityProcessor:
             logger.info(f"  Skipped (existing): {stats['skipped_existing']}")
             logger.info(f"  Failed: {stats['failed_injection']}")
             
-            return result['success']
+            return result['success'], simple_mapping
             
         except Exception as e:
             logger.error(f"Failed to inject ALT text via dedicated injector: {e}")
             # Fallback to original simple method
-            return self._inject_alt_text_simple(presentation, alt_text_mapping, output_path)
+            fallback_success = self._inject_alt_text_simple(presentation, alt_text_mapping, output_path)
+            # Create simple mapping for fallback compatibility
+            simple_mapping = {image_key: info['alt_text'] for image_key, info in alt_text_mapping.items()}
+            return fallback_success, simple_mapping
     
     def _inject_alt_text_simple(self, presentation: Presentation, 
                               alt_text_mapping: Dict[str, Any], output_path: str) -> bool:

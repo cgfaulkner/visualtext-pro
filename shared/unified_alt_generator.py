@@ -2,6 +2,23 @@
 Flexible ALT text generator using a local LLaVA model.
 """
 
+# --- repo/package import bootstrap (top of shared/unified_alt_generator.py) ---
+from pathlib import Path as _P
+import sys as _sys
+
+# Ensure repo root, core/, and shared/ are importable even if CWD is odd
+_REPO = _P(__file__).resolve().parents[1]
+for p in (_REPO, _REPO / "core", _REPO / "shared"):
+    ps = str(p)
+    if ps not in _sys.path:
+        _sys.path.insert(0, ps)
+
+# Prefer package-relative imports; fall back to bare for legacy callers
+try:
+    from .config_manager import ConfigManager
+except Exception:
+    from config_manager import ConfigManager  # fallback
+
 import logging
 import re
 import base64
@@ -12,10 +29,91 @@ from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 from abc import ABC, abstractmethod
 import time
-
-from config_manager import ConfigManager
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
+
+# Helper functions for Ollama request handling
+import requests
+
+def _b64_of_file(path: str) -> str:
+    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+
+def _make_safe_url(base_url: str, endpoint: str) -> str:
+    """Safely join base URL and endpoint, handling both path and full URL endpoints."""
+    # If endpoint is already a full URL, return it as-is
+    if endpoint and (endpoint.startswith('http://') or endpoint.startswith('https://')):
+        return endpoint
+    
+    # Ensure base_url ends with slash and endpoint doesn't start with slash for urljoin
+    base = base_url.rstrip('/') + '/'
+    ep = (endpoint or '/api/generate').lstrip('/')
+    return urljoin(base, ep)
+
+def _build_prompt_text(custom_prompt: str, context: str) -> str:
+    # Simple, safe text prompt. /api/generate must receive a STRING, not an object.
+    ctx = (context or "").strip()
+    if ctx:
+        return f"{custom_prompt.strip()}\n\nContext:\n{ctx}\n\nDescribe the image precisely in one concise sentence."
+    return f"{custom_prompt.strip()}\n\nDescribe the image precisely in one concise sentence."
+
+# --- compatibility shim: always call unified via a file path ---
+from pathlib import Path
+import tempfile, base64
+from typing import Any
+
+def _ensure_bytes(image_input: Any) -> bytes:
+    if image_input is None:
+        return b""
+    if isinstance(image_input, (bytes, bytearray)):
+        return bytes(image_input)
+    # If a file path was passed, read it to bytes
+    try:
+        from os import PathLike
+        if isinstance(image_input, (str, PathLike)):
+            return Path(image_input).read_bytes()
+    except Exception:
+        pass
+    # If a base64 string was passed
+    if isinstance(image_input, str):
+        try:
+            return base64.b64decode(image_input, validate=True)
+        except Exception:
+            return image_input.encode("utf-8", errors="ignore")
+    return b""
+
+def generate_alt_text(image_bytes_or_path: Any, cfg: dict, context: str = "") -> str:
+    """
+    Canonical entrypoint for both PPTX and DOCX processors.
+    Guarantees generate_alt_text_unified(...) receives a file path (str).
+    """
+    data = _ensure_bytes(image_bytes_or_path)
+
+    # Write to a temp file (png by default; your unified code only needs a path)
+    # Note: delete=False so we can pass the path and remove it after.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+        tmp.write(data)
+        tmp.flush()
+        tmp_path = tmp.name
+
+    try:
+        # Your existing function; it expects a path. If it supports context, pass it.
+        try:
+            result = generate_alt_text_unified(tmp_path, cfg, context=context)
+        except TypeError:
+            result = generate_alt_text_unified(tmp_path, cfg)
+
+        s = (str(result or "")).strip()
+        if s and s[-1] not in ".!?":
+            s += "."
+        return s
+    finally:
+        # Cleanup temp file
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+# --- end shim ---
 
 
 class BaseAltProvider(ABC):
@@ -55,217 +153,114 @@ class LLaVAProvider(BaseAltProvider):
             level_name = self.logging_config.get("level", "INFO").upper()
             logger.setLevel(getattr(logging, level_name, logging.INFO))
     
-    def generate_alt_text(self, image_path: str, prompt: str, image_data: Optional[str] = None) -> Tuple[Optional[str], Dict[str, Any]]:
-        """Generate ALT text using LLaVA with smart retry logic."""
-        import base64
-        import requests
-        import time
+    def generate_alt_text(self, image_path: str, custom_prompt: str) -> tuple[Optional[str], Dict[str, Any]]:
+        """
+        Returns (alt_text, metadata). Must NOT send chat objects to /api/generate.
+        """
+        # Extract configuration
+        base_url = self.config.get('base_url', 'http://127.0.0.1:11434')
+        model = self.config.get('model', 'llava:latest')
+        endpoint_path = self.config.get('endpoint', '/api/generate')
+        
+        # Safely build the URL
+        full = _make_safe_url(base_url, endpoint_path)
+        
+        # Log the URL once for debugging (only in debug mode)
+        if not hasattr(self, '_url_logged'):
+            logger.info(f"LLaVA generate URL: {full}")
+            self._url_logged = True
+
+        # Build a plain text prompt; /api/generate only accepts strings
+        context = getattr(self, 'context', '') or ''
+        prompt_text = _build_prompt_text(custom_prompt, context)
+        img_b64 = _b64_of_file(image_path)
+
+        # Choose payload shape based on endpoint
+        if endpoint_path.endswith("/api/chat"):
+            # Chat style expects messages (object), so we use chat format here
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are an expert accessibility captioner."},
+                    {"role": "user", "content": prompt_text}
+                ],
+                # Ollama supports images at top-level with chat as of recent versions;
+                # if your version requires images inside message content, move it there accordingly.
+                "images": [img_b64],
+                "stream": False,
+            }
+        else:
+            # /api/generate requires a STRING prompt; images go in a separate array
+            payload = {
+                "model": model,
+                "prompt": prompt_text,   # <-- STRING, not object
+                "images": [img_b64],     # base64 strings
+                "stream": False,
+            }
+
+        headers = {"Content-Type": "application/json"}
+        retries = self.config.get('retries', 5)
+        backoff = self.config.get('retry_backoff_sec', 1.0)
+        last_err = None
 
         start_time = time.time()
-        metadata = {
-            'provider': self.provider_name,
-            'model': self.config['model'],
-            'tokens_used': 0,
-            'cost_estimate': 0.0,  # Local inference is free
-            'generation_time': 0.0,
-            'success': False,
-            'retry_attempts': 0,
-            'retry_strategies_used': []
+        
+        for attempt in range(1, retries + 1):
+            try:
+                resp = requests.post(full, data=json.dumps(payload), headers=headers, timeout=60)
+                # Raise for HTTP-level errors (400, 500...)
+                resp.raise_for_status()
+                data = resp.json()
+
+                # Parse response shape: Ollama returns {'response': '...'} for generate,
+                # and {'message': {'content': '...'}} for chat.
+                if endpoint_path.endswith("/api/chat"):
+                    content = (data.get("message") or {}).get("content") or ""
+                else:
+                    content = data.get("response") or ""
+
+                content = (content or "").strip()
+                if not content:
+                    raise ValueError("Empty response from provider.")
+
+                # One sentence, tidy punctuation
+                if content and content[-1] not in ".!?":
+                    content += "."
+                    
+                meta = {
+                    "endpoint": endpoint_path, 
+                    "model": model, 
+                    "length": len(content),
+                    "success": True,
+                    "generation_time": time.time() - start_time,
+                    "provider": self.provider_name,
+                    "tokens_used": 0,
+                    "cost_estimate": 0.0
+                }
+                logger.info("✅ Generated ALT text (%.3fs): %s", meta["generation_time"], content[:100])
+                return content, meta
+
+            except requests.HTTPError as e:
+                # Log full server response for easier debugging
+                txt = e.response.text if getattr(e, "response", None) is not None else ""
+                last_err = f"{e} | body: {txt}"
+                logger.warning(f"HTTP error (attempt {attempt}/{retries}): {last_err}")
+                time.sleep(backoff)
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"Request failed (attempt {attempt}/{retries}): {last_err}")
+                time.sleep(backoff)
+
+        # All attempts failed
+        meta = {
+            "success": False,
+            "error": last_err,
+            "generation_time": time.time() - start_time,
+            "provider": self.provider_name,
+            "endpoint": endpoint_path,
+            "model": model
         }
-        response_text = None
-
-        try:
-            # Handle image data - either from file or directly provided
-            if image_data:
-                # Image data already provided (base64 encoded)
-                logger.debug("Using provided image data")
-                original_image_data = base64.b64decode(image_data)
-            else:
-                # Load image from file
-                image_file = Path(image_path)
-                if not image_file.exists():
-                    logger.error(f"Image file not found: {image_path}")
-                    return None, metadata
-
-                # Load original image data
-                with open(image_file, "rb") as f:
-                    original_image_data = f.read()
-                    
-            # Try different image formats/sizes on failure
-            retry_strategies = [
-                {'format': 'PNG', 'quality': None, 'max_size': None, 'description': 'original format'},
-                {'format': 'JPEG', 'quality': 90, 'max_size': None, 'description': 'JPEG high quality'},
-                {'format': 'PNG', 'quality': None, 'max_size': 1024, 'description': 'PNG smaller'},
-                {'format': 'JPEG', 'quality': 75, 'max_size': 800, 'description': 'JPEG medium quality, smaller'},
-                {'format': 'JPEG', 'quality': 60, 'max_size': 512, 'description': 'JPEG low quality, small'}
-            ]
-            
-            for attempt, strategy in enumerate(retry_strategies):
-                metadata['retry_attempts'] = attempt
-                if attempt > 0:
-                    logger.info(f"Retry attempt {attempt} using strategy: {strategy['description']}")
-                
-                try:
-                    # Process image according to retry strategy
-                    processed_image_data = self._process_image_for_retry(
-                        original_image_data, strategy, image_path
-                    )
-                    
-                    # Encode as base64
-                    image_data_b64 = base64.b64encode(processed_image_data).decode("utf-8")
-                    metadata['retry_strategies_used'].append(strategy['description'])
-                    
-                    logger.debug("Base64 image size: %s", len(image_data_b64))
-
-                    prompt_length = len(prompt)
-                    if self.logging_config.get('show_prompts', False):
-                        logger.debug(
-                            "Prompt length: %s; preview: %s",
-                            prompt_length,
-                            prompt[:100],
-                        )
-                    else:
-                        logger.debug("Prompt length: %s", prompt_length)
-
-                    # Build minimal payload with only required fields
-                    payload = {
-                        "model": self.config['model'],
-                        "prompt": prompt,
-                        "images": [image_data_b64],
-                        "stream": False
-                    }
-
-                    # Prepare endpoint, forcing 127.0.0.1 to avoid localhost resolution issues
-                    endpoint = self.config['endpoint'].replace('localhost', '127.0.0.1')
-                    timeout = self.config.get('timeout', 60)
-                    logger.debug("Endpoint: %s; timeout: %s", endpoint, timeout)
-                    
-                    # Enhanced logging based on configuration
-                    logging_config = self.config_manager.config.get('logging', {})
-                    
-                    if logging_config.get('log_request_details', False):
-                        # Log exact request payload being sent (truncated image data for readability)
-                        payload_debug = payload.copy()
-                        if 'images' in payload_debug and payload_debug['images']:
-                            payload_debug['images'] = [f"<base64_image_data_length:{len(payload_debug['images'][0])}>"]
-                        logger.info("🔄 REQUEST: %s", json.dumps(payload_debug, indent=2))
-                        logger.info("🌐 ENDPOINT: %s", endpoint)
-                        logger.info("⏱️ TIMEOUT: %ss", timeout)
-
-                    # Make request with performance tracking
-                    request_start = time.time()
-                    response = requests.post(
-                        endpoint,
-                        json=payload,
-                        timeout=timeout
-                    )
-                    request_duration = time.time() - request_start
-                    
-                    # Enhanced response logging
-                    response_text = response.text
-                    
-                    if logging_config.get('log_request_details', False):
-                        logger.info("📥 RESPONSE STATUS: %s", response.status_code)
-                        logger.info("📊 RESPONSE TIME: %.3fs", request_duration)
-                        logger.info("📄 RESPONSE SIZE: %d bytes", len(response_text))
-                        
-                        # Log response headers if interesting
-                        content_type = response.headers.get('content-type', 'unknown')
-                        logger.info("📋 CONTENT-TYPE: %s", content_type)
-                        
-                        # Log response preview
-                        if logging_config.get('show_responses', False):
-                            logger.info("📝 RESPONSE BODY: %s", response_text[:1000])
-                        else:
-                            logger.info("📝 RESPONSE PREVIEW: %s", response_text[:200])
-                    
-                    response.raise_for_status()
-
-                    result = response.json()
-                    alt_text = result.get("response", "").strip()
-                    
-                    total_time = time.time() - start_time
-                    metadata['generation_time'] = total_time
-                    metadata['request_time'] = request_duration
-                    metadata['processing_time'] = total_time - request_duration
-                    metadata['success'] = bool(alt_text)
-                    
-                    # Performance logging
-                    if logging_config.get('log_performance', False):
-                        logger.info("⚡ PERFORMANCE BREAKDOWN:")
-                        logger.info("  🌐 Request time: %.3fs", request_duration)
-                        logger.info("  🔄 Processing time: %.3fs", total_time - request_duration)
-                        logger.info("  📊 Total time: %.3fs", total_time)
-                        if alt_text:
-                            chars_per_sec = len(alt_text) / total_time if total_time > 0 else 0
-                            logger.info("  📝 Generation rate: %.1f chars/sec", chars_per_sec)
-                    
-                    # Log successful generation
-                    if alt_text:
-                        logger.info("✅ Generated ALT text (%.3fs): %s", total_time, alt_text[:100])
-                        return alt_text, metadata
-                    else:
-                        logger.warning("⚠️ No ALT text generated despite successful response")
-                        if attempt < len(retry_strategies) - 1:
-                            continue  # Try next strategy
-                            
-                except requests.exceptions.RequestException as e:
-                    status_code = getattr(e.response, 'status_code', None)
-                    logger.warning(f"Request failed (attempt {attempt + 1}): {e} (status: {status_code})")
-                    
-                    # For 500 errors, definitely try next strategy
-                    if status_code == 500 and attempt < len(retry_strategies) - 1:
-                        logger.info("Server error 500 - trying next format strategy")
-                        time.sleep(2)  # Brief delay before retry
-                        continue
-                    
-                    # For other request errors, only retry if we have strategies left
-                    if attempt < len(retry_strategies) - 1:
-                        time.sleep(1)  # Brief delay before retry
-                        continue
-                    else:
-                        # Last attempt failed, re-raise the exception
-                        raise e
-                        
-                except Exception as e:
-                    logger.warning(f"Processing failed (attempt {attempt + 1}): {e}")
-                    if attempt < len(retry_strategies) - 1:
-                        continue
-                    else:
-                        raise e
-            
-            # If we get here, all strategies failed
-            logger.error("All retry strategies exhausted")
-            return None, metadata
-            
-        except requests.exceptions.RequestException as e:
-            metadata['generation_time'] = time.time() - start_time
-            metadata['error'] = str(e)
-            status_code = getattr(e.response, 'status_code', None)
-            if status_code is not None:
-                metadata['status_code'] = status_code
-            text_preview = None
-            if response_text:
-                max_length = 1000
-                text_preview = response_text[:max_length]
-                if len(response_text) > max_length:
-                    text_preview += "..."
-            logger.error(
-                "HTTP request to %s failed with status %s: %s\nResponse text: %s",
-                endpoint,
-                status_code,
-                e,
-                text_preview,
-                exc_info=True,
-            )
-            return None, metadata
-        except Exception as e:
-            metadata['generation_time'] = time.time() - start_time
-            metadata['error'] = str(e)
-            logger.error(
-                "Error with %s: %s", self.provider_name, e, exc_info=True
-            )
-            return None, metadata
+        raise RuntimeError(f"LLaVA/Ollama call failed after {retries} attempts: {last_err}")
     
     def _process_image_for_retry(self, image_data: bytes, strategy: dict, image_path: str) -> bytes:
         """
@@ -789,7 +784,11 @@ class FlexibleAltGenerator:
         alt_handling = self.config_manager.config.get('alt_text_handling', {})
         if alt_handling.get('clean_generated_alt_text', True):
             try:
-                from alt_cleaner import clean_alt_text
+                # Dual-path import for alt_cleaner
+                try:
+                    from .alt_cleaner import clean_alt_text
+                except Exception:
+                    from alt_cleaner import clean_alt_text
                 alt_text = clean_alt_text(alt_text)
             except ImportError:
                 logger.warning("alt_cleaner module not found, skipping text cleaning")
@@ -935,10 +934,9 @@ class FlexibleAltGenerator:
             if not llava_config:
                 raise Exception("LLaVA provider not configured")
                 
-            # Extract base URL from endpoint
-            endpoint = llava_config['endpoint']
-            base_url = endpoint.replace('/api/generate', '')
-            tags_url = f"{base_url}/api/tags"
+            # Extract base URL properly
+            base_url = llava_config.get('base_url', 'http://127.0.0.1:11434')
+            tags_url = _make_safe_url(base_url, '/api/tags')
             
             logger.info(f"Testing Ollama connectivity at {tags_url}")
             

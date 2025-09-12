@@ -763,6 +763,9 @@ Examples:
     process_parser.add_argument('input_file', help='Input PPTX file')
     process_parser.add_argument('-o', '--output', help='Output PPTX file')
     process_parser.add_argument('--export-pdf', action='store_true', help='Export to PDF after processing')
+    process_parser.add_argument('--generate-approval-documents', action='store_true', help='Generate Word review document in addition to normal PPT injection')
+    process_parser.add_argument('--approval-doc-only', action='store_true', help='Generate only the review document; skip injection')
+    process_parser.add_argument('--approval-out', help='Specific path for approval document output')
     
     # Batch process command
     batch_parser = subparsers.add_parser('batch-process', help='Process directory of PPTX files')
@@ -802,25 +805,61 @@ Examples:
         processor = PPTXAltProcessor(args.config, args.verbose, args.debug)
         
         if args.command == 'process':
-            result = processor.process_single_file(
-                args.input_file, 
-                args.output, 
-                args.export_pdf
-            )
+            input_pptx = args.input_file
+            output_path = args.output
             
-            if result['success']:
-                print("✅ Processing completed successfully!")
-                print(f"Images processed: {result['processed_images']}")
-                print(f"Time: {result['processing_time']:.2f}s")
-                if 'pdf_export' in result:
-                    pdf_result = result['pdf_export']
-                    if pdf_result['success']:
-                        print(f"PDF exported: {pdf_result['pdf_file']}")
-            else:
-                print("❌ Processing failed!")
-                for error in result.get('errors', []):
-                    print(f"Error: {error}")
-                return 1
+            # 1) Normal injection (skip if --approval-doc-only)
+            if not args.approval_doc_only:
+                result = processor.process_single_file(
+                    input_pptx, 
+                    output_path, 
+                    args.export_pdf
+                )
+                
+                if result['success']:
+                    print("✅ Processing completed successfully!")
+                    print(f"Images processed: {result['processed_images']}")
+                    print(f"Time: {result['processing_time']:.2f}s")
+                    if 'pdf_export' in result:
+                        pdf_result = result['pdf_export']
+                        if pdf_result['success']:
+                            print(f"PDF exported: {pdf_result['pdf_file']}")
+                else:
+                    print("❌ Processing failed!")
+                    for error in result.get('errors', []):
+                        print(f"Error: {error}")
+                    if not (args.generate_approval_documents or args.approval_doc_only):
+                        return 1
+            
+            # 2) Approvals doc (if requested)
+            if args.generate_approval_documents or args.approval_doc_only:
+                try:
+                    from approval.approval_pipeline import make_review_doc, ApprovalOptions
+                    
+                    out_dir = output_path or processor.config_manager.config.get('paths', {}).get('output_folder', '.')
+                    if output_path and Path(output_path).is_file():
+                        out_dir = str(Path(output_path).parent)
+                    
+                    opts = ApprovalOptions.from_config(processor.config_manager)
+                    
+                    # Get final_alt_map from processing result if available
+                    final_alt_map = None
+                    if not args.approval_doc_only and 'result' in locals() and result.get('final_alt_map'):
+                        final_alt_map = result['final_alt_map']
+                    
+                    review_path = make_review_doc(input_pptx, out_dir, processor.config_manager, processor.pptx_processor.alt_generator, opts, final_alt_map)
+                    
+                    if args.approval_out and args.approval_out != review_path:
+                        import shutil
+                        shutil.move(review_path, args.approval_out)
+                        review_path = args.approval_out
+                    
+                    print(f"📋 Approval document generated: {review_path}")
+                    
+                except Exception as e:
+                    print(f"❌ Approval document generation failed: {e}")
+                    if args.approval_doc_only:
+                        return 1
                 
         elif args.command == 'batch-process':
             result = processor.process_directory(

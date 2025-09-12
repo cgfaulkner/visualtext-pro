@@ -1,0 +1,17 @@
+{
+  "input_file": "/Users/chrisfaulkner/Documents/ProgrammingEnvs/pdf-alt/Documents to Review/test1_llava_latest_backup test names.pptx",
+  "output_file": "alt_map.json",
+  "processing_timestamp": "2025-09-05 20:46:38",
+  "coverage_summary": {
+    "total_images": 0,
+    "descriptive_images": 0,
+    "decorative_images": 0,
+    "fallback_decorative_images": 0,
+    "failed_images": 0,
+    "descriptive_coverage_percent": 0,
+    "decorative_coverage_percent": 0,
+    "total_coverage_percent": 0,
+    "failed_generations_count": 0
+  },
+  "failed_generations": []
+}

@@ -54,12 +54,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # Config loading (config_manager -> yaml fallback)
 # -----------------------------
 def load_config(config_path: Path) -> Dict[str, Any]:
-    cfg = {}
-    # Preferred: a local config_manager module provided by the project
-    with contextlib.suppress(Exception):
-        cm = importlib.import_module("config_manager")
-        if hasattr(cm, "load_config"):
-            return cm.load_config(str(config_path))
+    for name in ("config_manager", "shared.config_manager"):
+        with contextlib.suppress(Exception):
+            cm = importlib.import_module(name)
+            if hasattr(cm, "load_config"):
+                return cm.load_config(str(config_path))
     # Fallback: PyYAML
     try:
         import yaml  # type: ignore
@@ -111,10 +110,17 @@ def is_supported(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_EXTS
 
 def discover_files(root: Path, recursive: bool) -> List[Path]:
+    def _is_real(path: Path) -> bool:
+        name = path.name
+        # Skip Office lock files and macOS dotfiles
+        if name.startswith("~$") or name.startswith("._"):
+            return False
+        return path.is_file() and is_supported(path)
+
     if recursive:
-        return [p for p in root.rglob("*") if p.is_file() and is_supported(p)]
+        return [p for p in root.rglob("*") if _is_real(p)]
     else:
-        return [p for p in root.glob("*") if p.is_file() and is_supported(p)]
+        return [p for p in root.glob("*") if _is_real(p)]
 
 def rel_output_path(infile: Path, input_root: Path, output_root: Path) -> Path:
     """
@@ -147,6 +153,18 @@ def seconds_to_hms(s: float) -> str:
     if m:
         return f"{m:d}m {sec:02d}s"
     return f"{sec:d}s"
+
+def _repo_root() -> Path:
+    # project root is the parent of 'core'
+    return Path(__file__).resolve().parents[1]
+
+def _subproc_env() -> dict:
+    env = os.environ.copy()
+    root = _repo_root()
+    # Ensure Python can import core/ and shared/
+    extra = os.pathsep.join([str(root), str(root / "core"), str(root / "shared")])
+    env["PYTHONPATH"] = (extra + os.pathsep + env.get("PYTHONPATH", "")) if env.get("PYTHONPATH") else extra
+    return env
 
 # -----------------------------
 # Processor Adaptors
@@ -195,81 +213,227 @@ def _run_subprocess(script: str, argv_variants: List[List[str]], logger: logging
         try:
             cmd = [sys.executable, script] + argv
             logger.debug("Trying subprocess: %s", " ".join(shlex.quote(a) for a in cmd))
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=_repo_root(), env=_subproc_env()
+            )
             if proc.returncode == 0:
-                # Try to detect if the script printed a JSON line with a report path or inline JSON.
                 out = proc.stdout.strip()
-                # Heuristic: if stdout is valid JSON, return it
                 with contextlib.suppress(Exception):
                     _ = json.loads(out)
                     return True, out
-                # Else, success but no JSON
                 return True, None
             else:
-                logger.debug("Subprocess failed (code=%s). stderr:\n%s", proc.returncode, proc.stderr)
+                logger.debug("Subprocess failed (code=%s) for %s.\nSTDERR:\n%s", proc.returncode, script, proc.stderr)
         except FileNotFoundError:
             logger.debug("Subprocess script not found: %s", script)
         except Exception as e:
             logger.debug("Subprocess error for %s: %s", script, e)
     return False, None
 
+def _run_module_subprocess(module_name: str, argv_variants: List[List[str]], logger: logging.Logger) -> Tuple[bool, Optional[str]]:
+    """
+    Try to run a module as a CLI: python -m <module> <argv>.
+    Returns (success, captured_json_or_none).
+    """
+    for argv in argv_variants:
+        try:
+            cmd = [sys.executable, "-m", module_name] + argv
+            logger.debug("Trying module subprocess: %s", " ".join(shlex.quote(a) for a in cmd))
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=_repo_root(), env=_subproc_env()
+            )
+            if proc.returncode == 0:
+                out = proc.stdout.strip()
+                with contextlib.suppress(Exception):
+                    _ = json.loads(out)
+                    return True, out
+                return True, None
+            else:
+                logger.debug("Module subprocess failed (code=%s) for %s.\nSTDERR:\n%s", proc.returncode, module_name, proc.stderr)
+        except Exception as e:
+            logger.debug("Module subprocess error for %s: %s", module_name, e)
+    return False, None
+
+def _module_candidates_pptx():
+    # Prefer alt processor if present, then the general one
+    return ("core.pptx_alt_processor", "pptx_alt_processor",
+            "core.pptx_processor", "pptx_processor")
+
+def _expected_pptx_outputs(input_path: Path, output_path: Path, cfg: dict) -> List[Path]:
+    """
+    Build a small set of plausible locations the PPTX processor could write to.
+    - output_path (file-level mirror that batcher passed down)
+    - output_path.parent / input_filename (folder-level output, same name)
+    - config-level output folder + mirrored path
+    """
+    outs = []
+    # exact mirror file path
+    outs.append(output_path)
+    # same name inside the intended output folder
+    outs.append(output_path.parent / input_path.name)
+
+    # config-defined output folder (if processor ignores our --output)
+    cfg_out = (cfg.get("paths") or {}).get("output_folder")
+    if cfg_out:
+        cfg_out_dir = Path(cfg_out)
+        if not cfg_out_dir.is_absolute():
+            cfg_out_dir = (_repo_root() / cfg_out).resolve()
+        outs.append(cfg_out_dir / input_path.name)
+
+    return outs
+
+def _search_by_stem(root: Path, stem: str, since_ts: float) -> Optional[Path]:
+    """Last-resort: find a fresh .pptx anywhere under output root that shares the same stem"""
+    try:
+        for p in root.rglob("*.pptx"):
+            if p.stem == stem and p.stat().st_mtime >= since_ts - 0.5:
+                return p
+    except Exception:
+        pass
+    return None
+
+def _verify_pptx_result(input_path: Path, output_path: Path, cfg: dict, start_ts: float) -> Tuple[bool, Optional[Path]]:
+    """
+    Accept success only if an expected artifact exists and is fresh.
+    """
+    # 1) Expected explicit locations
+    for candidate in _expected_pptx_outputs(input_path, output_path, cfg):
+        if candidate.exists() and candidate.stat().st_mtime >= start_ts - 0.5:
+            return True, candidate
+    # 2) In-place modification?
+    try:
+        if input_path.exists() and input_path.stat().st_mtime >= start_ts - 0.5:
+            return True, input_path
+    except Exception:
+        pass
+    # 3) Anywhere under batch output root with same stem
+    out_root = Path(cfg.get("__batch_output_root__", output_path.parent))
+    hit = _search_by_stem(out_root, input_path.stem, start_ts)
+    if hit:
+        return True, hit
+    return False, None
+
 class PPTXAdapter:
     def __init__(self, cfg: Dict[str, Any], logger: logging.Logger):
         self.cfg = cfg
         self.logger = logger
-        self.mod = _try_import("pptx_alt_processor") or _try_import("pptx_processor")
+
+        self.mod = None
+        for name in _module_candidates_pptx():
+            mod = _try_import(name)
+            if mod:
+                self.logger.debug("PPTXAdapter using import: %s", name)
+                self.mod = mod
+                break
 
     def process(self, input_path: Path, output_path: Path) -> FileResult:
         start = time.time()
-        out_json = None
+        cfg = self.cfg
         try:
+            # ---------- Tier 1: direct callable ----------
             if self.mod:
+                # Try common function names first
+                func_names = ["process_file", "process_pptx"]
                 found, result = _call_if_exists(
-                    self.mod,
-                    ["process_file", "process_pptx"],
-                    str(input_path),
-                    str(output_path),
-                    self.cfg,
-                    logger=self.logger,
+                    self.mod, func_names,
+                    str(input_path), str(output_path), cfg, logger=self.logger
                 )
                 if found:
-                    # If result looks like a dict, use it.
-                    if isinstance(result, dict):
-                        stats = result.get("stats") or {}
-                    else:
+                    ok, out_file = _verify_pptx_result(input_path, output_path, cfg, start)
+                    if ok:
                         stats = {}
-                    return FileResult(
-                        file=str(input_path),
-                        output_file=str(output_path),
-                        file_type="pptx",
-                        success=True,
-                        stats=stats,
-                        timing_sec=time.time() - start,
-                    )
-            # Fallback to CLI execution
+                        if isinstance(result, dict):
+                            stats = result.get("stats") or result
+                        return FileResult(
+                            file=str(input_path),
+                            output_file=str(out_file),
+                            file_type="pptx",
+                            success=True,
+                            stats=stats,
+                            timing_sec=time.time() - start,
+                        )
+                    else:
+                        self.logger.debug("PPTXAdapter: callable returned but no fresh artifact; falling back to CLI.")
+
+            # ---------- Tier 2a: module CLI with real command shapes ----------
+            # Many PPTX CLIs expect a 'process' subcommand; try several variants.
+            # Use a folder for --output in case the processor expects a directory, not a file path.
+            config_path = str(Path(cfg.get("__config_path__", "config.yaml")).resolve())
+            out_dir = str(output_path.parent)
+
             argv_variants = [
-                ["--input", str(input_path), "--output", str(output_path), "--config", "config.yaml"],
-                ["-i", str(input_path), "-o", str(output_path), "-c", "config.yaml"],
+                # Most common in your stack: subcommand 'process'
+                ["process", "--input", str(input_path), "--output", out_dir, "--config", config_path],
+                ["process", "-i", str(input_path), "-o", out_dir, "-c", config_path],
+
+                # Rely entirely on config paths (common & fast to type)
+                ["process", str(input_path), "--config", config_path],
+                ["--debug", "process", str(input_path), "--config", config_path],
+
+                # Legacy / alternate arg names some forks used
+                ["process", "--in", str(input_path), "--out", out_dir, "--config", config_path],
+                ["--input", str(input_path), "--output", str(output_path), "--config", config_path],
+                ["-i", str(input_path), "-o", str(output_path), "-c", config_path],
                 [str(input_path), str(output_path)],
             ]
-            ok, out_json = _run_subprocess("pptx_alt_processor.py", argv_variants, self.logger)
-            if not ok:
-                # Try alternative filename
-                ok, out_json = _run_subprocess("pptx_processor.py", argv_variants, self.logger)
-            if ok:
-                stats = {}
-                with contextlib.suppress(Exception):
-                    data = json.loads(out_json)  # inline JSON report
-                    stats = data.get("stats") or {}
-                return FileResult(
-                    file=str(input_path), output_file=str(output_path), file_type="pptx",
-                    success=True, stats=stats, timing_sec=time.time() - start
-                )
-            raise RuntimeError("No callable interface or working CLI detected for PPTX processor.")
+
+            for modname in _module_candidates_pptx():
+                ok, out_json = _run_module_subprocess(modname, argv_variants, self.logger)
+                if ok:
+                    verified, out_file = _verify_pptx_result(input_path, output_path, cfg, start)
+                    if verified:
+                        stats = {}
+                        with contextlib.suppress(Exception):
+                            data = json.loads(out_json) if out_json else {}
+                            stats = data.get("stats") or {}
+                        return FileResult(
+                            file=str(input_path),
+                            output_file=str(out_file),
+                            file_type="pptx",
+                            success=True,
+                            stats=stats,
+                            timing_sec=time.time() - start,
+                        )
+
+            # ---------- Tier 2b: direct script path fallback ----------
+            repo_root = Path(__file__).resolve().parents[1]
+            script_candidates = [
+                Path(__file__).resolve().parent / "pptx_alt_processor.py",
+                Path(__file__).resolve().parent / "pptx_processor.py",
+                repo_root / "core" / "pptx_alt_processor.py",
+                repo_root / "core" / "pptx_processor.py",
+            ]
+            script_candidates = [p for p in script_candidates if p.exists()]
+
+            for script in script_candidates:
+                ok, out_json = _run_subprocess(str(script), argv_variants, self.logger)
+                if ok:
+                    verified, out_file = _verify_pptx_result(input_path, output_path, cfg, start)
+                    if verified:
+                        stats = {}
+                        with contextlib.suppress(Exception):
+                            data = json.loads(out_json) if out_json else {}
+                            stats = data.get("stats") or {}
+                        return FileResult(
+                            file=str(input_path),
+                            output_file=str(out_file),
+                            file_type="pptx",
+                            success=True,
+                            stats=stats,
+                            timing_sec=time.time() - start,
+                        )
+
+            raise RuntimeError("No callable interface or working CLI detected for PPTX processor (or no fresh output artifact).")
         except Exception as e:
             return FileResult(
-                file=str(input_path), output_file=str(output_path), file_type="pptx",
-                success=False, error=f"{e}", timing_sec=time.time() - start
+                file=str(input_path),
+                output_file=str(output_path),
+                file_type="pptx",
+                success=False,
+                error=f"{e}",
+                timing_sec=time.time() - start,
             )
 
 class DOCXAdapter:
@@ -378,9 +542,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     input_root = Path(args.folder).expanduser().resolve()
     output_root = Path(args.output).expanduser().resolve()
-    config_path = Path(args.config).expanduser().resolve()
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        # Prefer a root-level config.yaml if present
+        candidate = Path(__file__).resolve().parents[1] / config_path.name
+        if candidate.exists():
+            config_path = candidate
+    config_path = config_path.resolve()
 
     cfg = load_config(config_path)
+
+    # Make paths discoverable to adapters
+    cfg["__config_path__"] = str(config_path)
+    cfg["__batch_output_root__"] = str(output_root)
+
     logger = setup_logging(output_root, cfg)
     logger.info("Batch start | input=%s | output=%s | recursive=%s", input_root, output_root, args.recursive)
 

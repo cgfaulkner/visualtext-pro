@@ -109,7 +109,8 @@ ai_providers:
     llava:
       type: llava
       model: llava
-      endpoint: http://127.0.0.1:11434/api/generate
+      base_url: http://127.0.0.1:11434
+      endpoint: /api/generate
       timeout: 120
       max_tokens: 200
       temperature: 0.7
@@ -173,3 +174,8 @@ pptx_processing:
   
   # Semantic analysis settings
   enable_semantic_icon_labels: false  # Disable to avoid false positives like "lungs icon"
+
+approval_docs:
+  include_context: true
+  review_suffix: "_ALT_Review"
+  image_max_width_px: 600
