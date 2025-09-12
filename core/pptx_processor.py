@@ -5138,8 +5138,18 @@ class PPTXAccessibilityProcessor:
         t = re.sub(r'\.+', '.', t)  # Multiple periods -> single period
         t = re.sub(r'\s+\.', '.', t)  # "space." -> "."
         t = re.sub(r'\s+,', ',', t)   # "space," -> ","
-        
-        return t.strip()
+        t = self._ensure_terminal_punctuation(t)
+        return t
+
+    @staticmethod
+    def _ensure_terminal_punctuation(text: str) -> str:
+        """Ensure text ends with a terminal punctuation mark."""
+        text = text.strip()
+        if not text:
+            return ""
+        if text[-1] in ".!?":
+            return text
+        return f"{text}."
     
     def _compose_alt(self, parts: list[str]) -> str:
         """
