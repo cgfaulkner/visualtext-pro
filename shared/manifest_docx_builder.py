@@ -30,9 +30,13 @@ logger = logging.getLogger(__name__)
 logger.info("LOG: injector_file=%s", __file__)
 
 
-def generate_review_from_manifest(manifest_path: str, out_docx: str, 
-                                 title: Optional[str] = None,
-                                 portrait: bool = True) -> str:
+def generate_review_from_manifest(
+    manifest_path: str,
+    out_docx: str,
+    title: Optional[str] = None,
+    portrait: bool = True,
+    run_id: str | None = None,
+) -> str:
     """
     Generate ALT text review document from manifest (no LLaVA calls).
     
@@ -41,11 +45,13 @@ def generate_review_from_manifest(manifest_path: str, out_docx: str,
         out_docx: Output path for DOCX file
         title: Optional title for document
         portrait: If True, use portrait layout
+        run_id: Optional identifier for tracking pipeline runs
         
     Returns:
         Path to generated DOCX file
     """
-    logger.info(f"Building DOCX review from manifest: {out_docx}")
+    logger.info("RUN_ID=%s manifest=%s", run_id, manifest_path)
+    logger.info("Building DOCX review from manifest: %s", out_docx)
     
     # Load manifest
     try:
