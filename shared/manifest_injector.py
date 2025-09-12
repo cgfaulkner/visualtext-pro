@@ -17,9 +17,13 @@ from alt_manifest import AltManifest
 logger = logging.getLogger(__name__)
 
 
-def inject_from_manifest(pptx_path: str, manifest_path: str, 
-                        output_path: str = None,
-                        mode: Literal["preserve", "replace"] = "preserve") -> Dict[str, Any]:
+def inject_from_manifest(
+    pptx_path: str,
+    manifest_path: str,
+    output_path: str = None,
+    mode: Literal["preserve", "replace"] = "preserve",
+    run_id: str | None = None,
+) -> Dict[str, Any]:
     """
     Inject ALT text from manifest into PPTX file.
     
@@ -28,11 +32,13 @@ def inject_from_manifest(pptx_path: str, manifest_path: str,
         manifest_path: Path to manifest JSONL file  
         output_path: Path for output PPTX (default: overwrite input)
         mode: "preserve" (keep existing) or "replace" (overwrite existing)
+        run_id: Optional identifier for tracking pipeline runs
         
     Returns:
         Injection results with statistics and decision logging
     """
-    logger.info(f"Injecting ALT text from manifest into {pptx_path} (mode: {mode})")
+    logger.info("RUN_ID=%s manifest=%s", run_id, manifest_path)
+    logger.info("Injecting ALT text from manifest into %s (mode: %s)", pptx_path, mode)
     
     if output_path is None:
         output_path = pptx_path
