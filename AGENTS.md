@@ -1,12 +1,15 @@
 # AGENTS Instructions for pdf-alt
 
-This repository contains tools for recreating PDF documents with improved accessibility and alternative text handling.
+This project provides tools to extract, clean, and rebuild presentations and PDFs with improved
+alternative text for accessibility.
 
 ## Project Layout
-- `core/`: Primary modules orchestrating PDF processing and recreation.
-- `shared/`: Utilities such as configuration management and alt-text generation.
-- `Documents to Review/`: Sample input PDFs used in tests and examples.
-- `config.yaml`: Default configuration settings.
+- `core/`: modules orchestrating PDF and PPTX processing.
+- `shared/`: utilities for configuration management and alt-text generation.
+- `Slides to Review/`: sample presentations used in tests and examples.
+- `config.yaml`: default configuration settings.
+- Command-line utilities: `pptx_alt_processor.py`, `pptx_clean_processor.py`,
+  `pptx_manifest_processor.py`.
 
 ## Coding Guidelines
 - Target Python 3.12 and follow [PEP 8](https://peps.python.org/pep-0008/) style.
@@ -15,9 +18,10 @@ This repository contains tools for recreating PDF documents with improved access
 - End files with a single newline.
 
 ## Dependency Management
-- Add new Python dependencies to `requirements.txt`.
+- Add new Python dependencies to `requirements.txt` with explicit versions when possible.
 
 ## Testing
-- Run `pytest` from the repository root to execute the available workflow test.
-- Ensure the sample PDF in `Documents to Review/test1_demo.pdf` remains available for tests.
+- Run `pytest` from the repository root to execute the available tests.
+- Ensure the sample presentation in `Slides to Review/test1_llava_latest_backup test names.pptx`
+  remains available for tests.
 
