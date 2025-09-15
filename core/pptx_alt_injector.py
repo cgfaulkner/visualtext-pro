@@ -631,6 +631,16 @@ class PPTXAltTextInjector:
         
         # 5) OVERWRITE ONLY - never append
         self._write_descr_and_title(shape, text)
+
+        # Debug log to verify the exact text written matches the final ALT text
+        written_descr = self._read_current_alt(shape)
+        final_alt = text
+        logger.debug(
+            "repr_written=%r repr_final=%r ord_last=%s",
+            written_descr,
+            final_alt,
+            ord(written_descr[-1]),
+        )
         
         # 6) RECORD the final write
         self.final_writes[element_key] = {
