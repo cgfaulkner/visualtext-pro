@@ -56,7 +56,7 @@ class PPTXAltProcessor:
     """
     
     def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False, 
-                 enable_file_logging: bool = True):
+                 enable_file_logging: bool = True, fallback_policy_override: Optional[str] = None):
         """
         Initialize the PPTX ALT text processor.
         
@@ -65,6 +65,7 @@ class PPTXAltProcessor:
             verbose: Enable verbose logging
             debug: Enable detailed debug logging for generation attempts
             enable_file_logging: Enable enhanced file logging with rotation
+            fallback_policy_override: Override fallback policy from CLI (none|doc-only|ppt-gated)
         """
         # Setup enhanced logging if available and requested
         self.log_config = None
@@ -80,6 +81,12 @@ class PPTXAltProcessor:
         
         # Initialize core components
         self.config_manager = ConfigManager(config_path)
+        
+        # Apply CLI fallback policy override if provided
+        if fallback_policy_override:
+            logger.info(f"Overriding fallback policy to: {fallback_policy_override}")
+            self.config_manager.config.setdefault('alt_text_handling', {})['fallback_policy'] = fallback_policy_override
+        
         self.pptx_processor = PPTXAccessibilityProcessor(self.config_manager, debug=debug)
         self.alt_injector = PPTXAltTextInjector(self.config_manager)
         self.debug = debug
@@ -731,52 +738,81 @@ class PPTXAltProcessor:
     
     def _generate_coverage_report(self, result: dict) -> dict:
         """
-        Generate coverage report showing descriptive vs decorative counts.
+        Generate honest coverage report with distinct buckets for each status.
         
         Args:
             result: Processing result dictionary
             
         Returns:
-            Coverage report dictionary
+            Coverage report dictionary with honest metrics
         """
-        total_images = result.get('total_images', 0)
-        processed_images = result.get('processed_images', 0)  # Descriptive
-        decorative_images = result.get('decorative_images', 0)
-        failed_images = result.get('failed_images', 0)
-        fallback_decorative = result.get('fallback_decorative', 0)
+        # Get honest stats from injector if available
+        injector_stats = result.get('injector_statistics', {})
         
-        # Calculate coverage percentages
-        descriptive_coverage = (processed_images / total_images * 100) if total_images > 0 else 0
-        decorative_coverage = ((decorative_images + fallback_decorative) / total_images * 100) if total_images > 0 else 0
-        total_coverage = ((processed_images + decorative_images + fallback_decorative) / total_images * 100) if total_images > 0 else 0
+        # Count buckets: preserved, generated, needs_alt, fallback_injected, decorative_skipped
+        preserved = injector_stats.get('skipped_existing', 0)
+        generated = injector_stats.get('injected', 0)
+        needs_alt = injector_stats.get('failed', 0)  # Failed generations without fallback
+        fallback_injected = injector_stats.get('fallback_injected', 0)
+        decorative_skipped = injector_stats.get('decorative_skipped', 0)
+        
+        # Legacy fallback for compatibility
+        if not injector_stats:
+            total_images = result.get('total_images', 0)
+            processed_images = result.get('processed_images', 0)
+            decorative_images = result.get('decorative_images', 0)
+            failed_images = result.get('failed_images', 0)
+            fallback_decorative = result.get('fallback_decorative', 0)
+            
+            # Map legacy to new structure
+            generated = processed_images
+            decorative_skipped = decorative_images + fallback_decorative
+            needs_alt = failed_images
+            preserved = 0
+            fallback_injected = 0
+        
+        total = preserved + generated + needs_alt + fallback_injected + decorative_skipped
+        
+        # Calculate honest coverage - only count generated + preserved + fallback_injected as "covered"
+        covered = preserved + generated + fallback_injected
+        coverage_percent = (covered / total * 100) if total > 0 else 0
         
         return {
-            'total_images': total_images,
-            'descriptive_images': processed_images,
-            'decorative_images': decorative_images,
-            'fallback_decorative_images': fallback_decorative,
-            'failed_images': failed_images,
-            'descriptive_coverage_percent': descriptive_coverage,
-            'decorative_coverage_percent': decorative_coverage,
-            'total_coverage_percent': total_coverage,
-            'failed_generations_count': len(self.failed_generations)
+            'total_elements': total,
+            'preserved': preserved,
+            'generated': generated,
+            'needs_alt': needs_alt,
+            'fallback_injected': fallback_injected,
+            'decorative_skipped': decorative_skipped,
+            'covered_elements': covered,
+            'coverage_percent': coverage_percent,
+            'failed_generations_count': len(getattr(self, 'failed_generations', [])),
+            
+            # Legacy fields for compatibility
+            'total_images': total,
+            'descriptive_images': generated,
+            'decorative_images': decorative_skipped,
+            'failed_images': needs_alt,
+            'descriptive_coverage_percent': (generated / total * 100) if total > 0 else 0,
+            'decorative_coverage_percent': (decorative_skipped / total * 100) if total > 0 else 0,
+            'total_coverage_percent': coverage_percent
         }
     
     def _log_coverage_report(self, coverage_report: dict):
         """
-        Log the coverage report to console.
+        Log the honest coverage report to console.
         
         Args:
             coverage_report: Coverage report dictionary
         """
-        logger.info("📊 Image Coverage Report:")
-        logger.info(f"   Total images: {coverage_report['total_images']}")
-        logger.info(f"   Descriptive ALT text: {coverage_report['descriptive_images']} ({coverage_report['descriptive_coverage_percent']:.1f}%)")
-        logger.info(f"   Decorative (heuristic): {coverage_report['decorative_images']}")
-        logger.info(f"   Decorative (fallback): {coverage_report['fallback_decorative_images']}")
-        logger.info(f"   Total decorative: {coverage_report['decorative_images'] + coverage_report['fallback_decorative_images']} ({coverage_report['decorative_coverage_percent']:.1f}%)")
-        logger.info(f"   Failed/Unprocessed: {coverage_report['failed_images']}")
-        logger.info(f"   TOTAL COVERAGE: {coverage_report['total_coverage_percent']:.1f}%")
+        logger.info("📊 Honest ALT Text Coverage Report:")
+        logger.info(f"   Total elements: {coverage_report['total_elements']}")
+        logger.info(f"   Preserved existing: {coverage_report['preserved']}")
+        logger.info(f"   Generated new: {coverage_report['generated']}")
+        logger.info(f"   Fallback injected: {coverage_report['fallback_injected']}")
+        logger.info(f"   Decorative (skipped): {coverage_report['decorative_skipped']}")
+        logger.info(f"   Needs ALT text: {coverage_report['needs_alt']}")
+        logger.info(f"   ACTUAL COVERAGE: {coverage_report['coverage_percent']:.1f}% ({coverage_report['covered_elements']}/{coverage_report['total_elements']})")
         
         if coverage_report['failed_generations_count'] > 0:
             logger.warning(f"   Failed generations logged: {coverage_report['failed_generations_count']} (see coverage report file)")
@@ -948,6 +984,8 @@ Examples:
     parser.add_argument('--config', help='Configuration file path')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     parser.add_argument('--debug', action='store_true', help='Enable detailed debug logging for generation attempts and failures')
+    parser.add_argument('--fallback-policy', choices=['none', 'doc-only', 'ppt-gated'], 
+                       help='Override fallback policy for this run (none|doc-only|ppt-gated)')
     
     args = parser.parse_args()
     
@@ -957,7 +995,12 @@ Examples:
     
     try:
         # Initialize processor
-        processor = PPTXAltProcessor(args.config, args.verbose, args.debug)
+        processor = PPTXAltProcessor(
+            args.config, 
+            args.verbose, 
+            args.debug,
+            fallback_policy_override=args.fallback_policy
+        )
         
         if args.command == 'process':
             input_pptx = args.input_file

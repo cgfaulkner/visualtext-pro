@@ -132,12 +132,14 @@ class BaseAltProvider(ABC):
         self.active_prompt_type = 'default'
         
     @abstractmethod
-    def generate_alt_text(self, image_path: str, prompt: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    def generate_alt_text(self, image_path: str, prompt: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
         Generate ALT text for an image.
         
         Returns:
-            Tuple of (alt_text, metadata) where metadata includes token usage, cost, etc.
+            Tuple of (generation_result, metadata) where:
+            - generation_result: {"status": "ok", "text": "..."} or {"status": "fail", "reason": "..."}
+            - metadata includes token usage, cost, etc.
         """
         pass
     
@@ -159,9 +161,9 @@ class LLaVAProvider(BaseAltProvider):
             level_name = self.logging_config.get("level", "INFO").upper()
             logger.setLevel(getattr(logging, level_name, logging.INFO))
     
-    def generate_alt_text(self, image_path: str, custom_prompt: str) -> tuple[Optional[str], Dict[str, Any]]:
+    def generate_alt_text(self, image_path: str, custom_prompt: str) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
-        Returns (alt_text, metadata). Must NOT send chat objects to /api/generate.
+        Returns (generation_result, metadata). Must NOT send chat objects to /api/generate.
         """
         # Extract configuration
         base_url = self.config.get('base_url', 'http://127.0.0.1:11434')
@@ -247,6 +249,8 @@ class LLaVAProvider(BaseAltProvider):
 
                 # Apply normalization to 1-2 complete sentences (no truncation)
                 content = self._normalize_to_complete_sentences(content)
+                
+                generation_result = {"status": "ok", "text": content}
                     
                 meta = {
                     "endpoint": endpoint_path, 
@@ -259,7 +263,7 @@ class LLaVAProvider(BaseAltProvider):
                     "cost_estimate": 0.0
                 }
                 logger.info("✅ Generated ALT text (%.3fs): %s", meta["generation_time"], content[:100])
-                return content, meta
+                return generation_result, meta
 
             except requests.HTTPError as e:
                 # Log full server response for easier debugging
@@ -273,6 +277,7 @@ class LLaVAProvider(BaseAltProvider):
                 time.sleep(backoff)
 
         # All attempts failed
+        generation_result = {"status": "fail", "reason": "provider_error"}
         meta = {
             "success": False,
             "error": last_err,
@@ -281,7 +286,8 @@ class LLaVAProvider(BaseAltProvider):
             "endpoint": endpoint_path,
             "model": model
         }
-        raise RuntimeError(f"LLaVA/Ollama call failed after {retries} attempts: {last_err}")
+        logger.error(f"LLaVA/Ollama call failed after {retries} attempts: {last_err}")
+        return generation_result, meta
     
     def _normalize_to_complete_sentences(self, text: str) -> str:
         """
@@ -542,7 +548,7 @@ class FlexibleAltGenerator:
             logger.info(f"Attempting ALT text generation with {provider_name} (attempt {attempts})")
 
             try:
-                result, metadata = provider.generate_alt_text(image_path, prompt)
+                generation_result, metadata = provider.generate_alt_text(image_path, prompt)
 
                 # Add attempt info to final metadata
                 final_metadata["attempts"].append({
@@ -558,7 +564,7 @@ class FlexibleAltGenerator:
                 # Update usage statistics
                 self._update_usage_stats(provider_name, metadata)
 
-                if result:
+                if generation_result and generation_result.get("status") == "ok":
                     self.usage_stats['successful_requests'] += 1
                     final_metadata["successful_provider"] = provider_name
                     final_metadata["successful_model"] = metadata.get("model", "unknown")
@@ -569,10 +575,10 @@ class FlexibleAltGenerator:
                     self._record_success(provider_name)
 
                     # Apply single-pass normalization with manifest integration
-                    raw_result = result
+                    raw_result = generation_result.get("text", "")
                     if manifest and entry_key:
                         # Use manifest for sentence-safe normalization
-                        normalized_result, was_truncated = manifest.normalize_alt_text(result)
+                        normalized_result, was_truncated = manifest.normalize_alt_text(raw_result)
                         
                         # Update manifest entry with generation details
                         entry = manifest.get_entry(entry_key)
@@ -592,20 +598,25 @@ class FlexibleAltGenerator:
                         # Apply legacy post-processing if no manifest
                         self._last_provider = provider
                         self._last_image_path = image_path
-                        result = self._post_process_alt_text(result)
+                        result = self._post_process_alt_text(raw_result)
 
                     if return_metadata:
                         return result, final_metadata
                     else:
                         return result
                 else:
-                    error_message = metadata.get("error", "No result returned")
+                    # Handle failure cases
+                    if generation_result and generation_result.get("status") == "fail":
+                        error_message = generation_result.get("reason", "Unknown failure")
+                    else:
+                        error_message = metadata.get("error", "No result returned")
+                    
                     status_code = metadata.get("status_code")
                     # Create a mock exception for failure recording
                     mock_error = Exception(error_message)
                     self._record_failure(provider_name, mock_error, status_code)
                     logger.warning(
-                        f"Provider {provider_name} returned no result: {error_message}"
+                        f"Provider {provider_name} failed: {error_message}"
                     )
 
             except Exception as e:

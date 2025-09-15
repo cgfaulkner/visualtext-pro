@@ -19,6 +19,7 @@ class ConfigManager:
     DEFAULT_CONFIG = {
         "alt_text_handling": {
             "mode": "preserve",
+            "fallback_policy": "none",
             "max_workers": 4,
             "reuse_for_identical_images": True,
             "clean_generated_alt_text": True,
@@ -242,6 +243,14 @@ class ConfigManager:
             logger.warning("timeout must be positive, setting to 60")
             llava_cfg['timeout'] = 60
         
+        # Validate fallback_policy
+        alt_handling = self.config.setdefault('alt_text_handling', {})
+        fallback_policy = alt_handling.get('fallback_policy', 'none')
+        valid_policies = {'none', 'doc-only', 'ppt-gated'}
+        if fallback_policy not in valid_policies:
+            logger.warning(f"Invalid fallback_policy '{fallback_policy}', setting to 'none'")
+            alt_handling['fallback_policy'] = 'none'
+        
         logger.info("Configuration validation passed ✓")
     
     def get_paths(self) -> Dict[str, str]:
@@ -334,6 +343,10 @@ class ConfigManager:
     def get_logging_config(self) -> Dict[str, Any]:
         """Get logging configuration."""
         return self.config['logging'].copy()
+    
+    def get_fallback_policy(self) -> str:
+        """Get fallback policy setting."""
+        return self.config.get('alt_text_handling', {}).get('fallback_policy', 'none')
     
     def update_from_cli(self, args: Dict[str, Any]):
         """

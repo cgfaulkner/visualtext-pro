@@ -239,7 +239,7 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     
     processed_images: list[dict] with keys:
       image_path, slide_number, image_number, current_alt, suggested_alt,
-      is_decorative, image_key, (optional) slide_title, slide_notes
+      is_decorative, image_key, (optional) slide_title, slide_notes, status_info
     """
     doc = Document()
     
@@ -326,19 +326,19 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     summary_para.paragraph_format.space_after = Pt(12)
     
     # Fixed table with optimized columns for portrait layout
-    table = doc.add_table(rows=1, cols=5)
+    table = doc.add_table(rows=1, cols=6)
     table.autofit = False  # Critical: let our fixed widths win
     
-    # Columns: [Slide / Img, Thumbnail, Current ALT, Suggested ALT, Decorative]  
+    # Columns: [Slide / Img, Thumbnail, Current ALT, Suggested ALT, Status, Decorative]  
     # 8.5" page - 1.0" margins = 7.5" usable width
-    col_widths = [Inches(0.90), Inches(1.45), Inches(2.10), Inches(2.15), Inches(0.90)]
+    col_widths = [Inches(0.80), Inches(1.30), Inches(1.90), Inches(1.90), Inches(1.00), Inches(0.60)]
     for i, w in enumerate(col_widths):
         table.columns[i].width = w
         for cell in table.columns[i].cells:
             cell.width = w
     
     hdr = table.rows[0].cells
-    header_names = ["Slide / Img", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Decorative"]
+    header_names = ["Slide / Img", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Status", "Decorative"]
     
     for i, name in enumerate(header_names):
         hdr[i].text = name
@@ -456,8 +456,56 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
                 current_alt_display == suggested_alt_display):
                 shade_cell(cell, "E2F0D9")
         
-        # Column 4: Decorative checkbox (single line, centered)
+        # Column 4: Status information
         cell = cells[4]
+        para = cell.paragraphs[0]
+        para.clear()
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        para.paragraph_format.space_after = Pt(6)
+        para.paragraph_format.line_spacing = 1.0
+        
+        # Get status information from fallback policies
+        status_info = item.get('status_info', {})
+        status_display = status_info.get('status', 'Generated')
+        
+        # Import fallback policies to get display helper
+        try:
+            from fallback_policies import get_review_status_display
+            status_text = get_review_status_display(status_info)
+        except ImportError:
+            # Fallback display logic
+            if status_display == 'generated':
+                status_text = 'Generated'
+            elif status_display == 'preserved':
+                status_text = 'Preserved'
+            elif status_display.startswith('NEEDS ALT'):
+                status_text = 'Needs ALT'
+            elif status_display.startswith('AUTO-LOWCONF'):
+                status_text = 'Low Confidence'
+            elif status_display == 'FALLBACK_INJECTED':
+                status_text = 'Fallback'
+            else:
+                status_text = status_display
+        
+        run = para.add_run(status_text)
+        
+        # Color code the status
+        if 'NEEDS ALT' in status_display or 'needs' in status_text.lower():
+            set_font_properties(run, size=9, color="CC0000")  # Red for needs attention
+            shade_cell(cell, "FFE6E6")
+        elif 'FALLBACK' in status_display or 'fallback' in status_text.lower():
+            set_font_properties(run, size=9, color="FF8C00")  # Orange for fallback
+            shade_cell(cell, "FFF2E6")
+        elif 'LOWCONF' in status_display or 'low confidence' in status_text.lower():
+            set_font_properties(run, size=9, color="CC8800")  # Yellow-orange for low confidence
+            shade_cell(cell, "FFFAE6")
+        elif 'preserved' in status_text.lower():
+            set_font_properties(run, size=9, color="0066CC")  # Blue for preserved
+        else:
+            set_font_properties(run, size=9, color="006600")  # Green for generated
+        
+        # Column 5: Decorative checkbox (single line, centered)
+        cell = cells[5]
         para = cell.paragraphs[0]
         para.clear()
         run = para.add_run("Yes" if item.get('is_decorative', False) else "No")

@@ -59,6 +59,7 @@ sys.path.insert(0, str(project_root / "core"))
 # Import shared modules
 from config_manager import ConfigManager
 from decorative_filter import is_force_decorative_by_filename
+from alt_text_reader import read_existing_alt
 
 logger = logging.getLogger(__name__)
 logger.info("LOG: injector_file=%s", __file__)
@@ -434,20 +435,7 @@ class PPTXAltTextInjector:
     
     def _read_current_alt(self, shape) -> str:
         """Return existing ALT (descr) from the shape if present; '' if none."""
-        try:
-            element = getattr(shape, "_element", None) or getattr(shape, "element", None)
-            if element is None:
-                return ""
-            ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
-            # Prefer precise nodes; fall back to any cNvPr
-            for xp in (".//p:nvPicPr/p:cNvPr", ".//p:nvSpPr/p:cNvPr", ".//p:nvCxnSpPr/p:cNvPr",
-                       ".//p:nvGraphicFramePr/p:cNvPr", ".//p:nvGrpSpPr/p:cNvPr", ".//p:cNvPr"):
-                nodes = _safe_xpath(element, xp, ns)
-                if nodes:
-                    return (nodes[0].get("descr") or "").strip()
-            return ""
-        except Exception:
-            return ""
+        return read_existing_alt(shape)
 
     # --- Enhanced generic placeholder detection for low-value boilerplate ---
     GENERIC_ALT_REGEXES = [
@@ -632,6 +620,13 @@ class PPTXAltTextInjector:
         
         # 2) READ current ALT text (ONLY from cNvPr/@descr and @title)
         existing = self._read_current_alt(shape)
+        
+        # 2.5) PRESERVE MODE HARD GUARD - never overwrite existing ALT text in preserve mode
+        mode = self.config_manager.config.get('alt_text_handling', {}).get('mode', 'preserve')
+        if mode == 'preserve' and existing.strip():
+            logger.debug(f"INJECT_ALT: Preserving existing ALT text for {element_key} (mode: preserve)")
+            self.statistics['skipped_existing'] += 1
+            return False
         
         # 3) IDEMPOTENT GUARD - skip if equivalent (using deterministic normalized comparison)
         if not self._should_replace_alt_text_normalized(existing, text):

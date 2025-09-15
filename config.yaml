@@ -1,5 +1,6 @@
 alt_text_handling:
   mode: preserve
+  fallback_policy: none    # none | doc-only | ppt-gated
   max_workers: 4
   reuse_for_identical_images: true
   clean_generated_alt_text: true
