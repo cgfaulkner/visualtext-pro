@@ -17,6 +17,7 @@ from alt_manifest import (
     AltManifest, AltManifestEntry, compute_image_hash, create_stable_key,
     create_instance_key, create_content_key, parse_min_shape_area, MANIFEST_SCHEMA_VERSION
 )
+from shape_utils import is_image_like, is_decorative_shape
 
 logger = logging.getLogger(__name__)
 
@@ -203,9 +204,13 @@ class ManifestProcessor:
             return True, "include all shapes", ""
             
         elif self.llava_include_shapes == "smart":
-            # Include pictures + shapes above threshold
-            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                return True, "picture in smart mode", ""
+            # Check for decorative shapes first (exclude them)
+            if is_decorative_shape(shape):
+                return False, "", "decorative shape (line/border/accent)"
+            
+            # Include image-like shapes (pictures, vectors, groups with images)
+            if is_image_like(shape):
+                return True, "image-like shape (picture/vector/group)", ""
             elif shape_area >= min_area_threshold:
                 return True, f"shape above threshold ({shape_area:.0f} >= {min_area_threshold})", ""
             else:
@@ -1087,7 +1092,7 @@ class ManifestProcessor:
             }
     
     def _extract_current_alt_text(self, shape) -> str:
-        """Extract current ALT text from PPTX shape."""
+        """Extract current ALT text from PPTX shape (all types including groups/vectors)."""
         try:
             # Try multiple methods to get ALT text
             alt_text = ""
@@ -1098,13 +1103,31 @@ class ManifestProcessor:
             except:
                 pass
             
-            # Method 2: XML cNvPr element (more reliable)
+            # Method 2: XML cNvPr element search (comprehensive for all shape types)
             if not alt_text and hasattr(shape, '_element'):
                 try:
-                    pic_element = shape._element
-                    nvpicpr = pic_element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr')
-                    if nvpicpr is not None:
-                        alt_text = nvpicpr.get('descr', '') or nvpicpr.get('title', '')
+                    element = shape._element
+                    # Try multiple XPath patterns for different shape types
+                    xpath_patterns = [
+                        ".//p:nvPicPr/p:cNvPr",          # Picture
+                        ".//p:nvSpPr/p:cNvPr",           # AutoShape 
+                        ".//p:nvCxnSpPr/p:cNvPr",        # Connector
+                        ".//p:nvGraphicFramePr/p:cNvPr", # Chart/Table/SmartArt
+                        ".//p:nvGrpSpPr/p:cNvPr",        # Group
+                        ".//p:cNvPr",                    # Generic fallback
+                        ".//{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr"  # Namespace explicit
+                    ]
+                    
+                    for xpath in xpath_patterns:
+                        try:
+                            nvpr_elements = element.xpath(xpath)
+                            if nvpr_elements:
+                                nvpr = nvpr_elements[0]
+                                alt_text = nvpr.get('descr', '') or nvpr.get('title', '')
+                                if alt_text:
+                                    break
+                        except:
+                            continue
                 except:
                     pass
             
@@ -1112,6 +1135,22 @@ class ManifestProcessor:
             if not alt_text:
                 try:
                     alt_text = getattr(shape, 'title', '') or ''
+                except:
+                    pass
+            
+            # Method 4: For groups, check if children have ALT text
+            if not alt_text and hasattr(shape, 'shapes'):
+                try:
+                    from pptx.enum.shapes import MSO_SHAPE_TYPE
+                    if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                        # For groups, collect ALT from image children
+                        child_alts = []
+                        for child_shape in shape.shapes:
+                            child_alt = self._extract_current_alt_text(child_shape)
+                            if child_alt:
+                                child_alts.append(child_alt)
+                        if child_alts:
+                            alt_text = "; ".join(child_alts[:3])  # Limit to first 3 meaningful child ALTs
                 except:
                     pass
             

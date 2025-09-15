@@ -174,8 +174,8 @@ def cmd_process(args) -> int:
         # Load configuration and ALT generator
         config_manager = ConfigManager(args.config)
         
-        from unified_alt_generator import UnifiedAltGenerator
-        alt_generator = UnifiedAltGenerator(config_manager)
+        from unified_alt_generator import FlexibleAltGenerator
+        alt_generator = FlexibleAltGenerator(config_manager)
         
         # Initialize manifest processor  
         processor = ManifestProcessor(config_manager, alt_generator)

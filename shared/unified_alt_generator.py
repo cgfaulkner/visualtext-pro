@@ -13,6 +13,12 @@ for p in (_REPO, _REPO / "core", _REPO / "shared"):
     if ps not in _sys.path:
         _sys.path.insert(0, ps)
 
+# Import perceptual hash utilities
+try:
+    from .perceptual_hash import build_cache_keys, load_pil_image_safely
+except Exception:
+    from perceptual_hash import build_cache_keys, load_pil_image_safely
+
 # Prefer package-relative imports; fall back to bare for legacy callers
 try:
     from .config_manager import ConfigManager

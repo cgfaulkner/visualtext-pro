@@ -449,12 +449,19 @@ class PPTXAltTextInjector:
         except Exception:
             return ""
 
-    # --- New helper: treat generic placeholders as NOT meaningful ---
+    # --- Enhanced generic placeholder detection for low-value boilerplate ---
     GENERIC_ALT_REGEXES = [
         __import__('re').compile(r"^\s*(a|an)\s+(picture|image|graphic|photo)\b", __import__('re').I),
         __import__('re').compile(r"^\s*screenshot\b", __import__('re').I),
         __import__('re').compile(r"^\s*(picture|image)\s*\d+\s*$", __import__('re').I),
         __import__('re').compile(r"\(\s*\d+\s*x\s*\d+\s*px\s*\)\s*$", __import__('re').I),  # trailing (WxHpx)
+        # PowerPoint boilerplate patterns
+        __import__('re').compile(r"^\s*This is a PowerPoint shape\b", __import__('re').I),
+        __import__('re').compile(r"^\s*Image of\b", __import__('re').I),
+        __import__('re').compile(r"^\s*(picture|graphic|shape|object)\s*\.?\s*$", __import__('re').I),
+        __import__('re').compile(r"\bunknown\b", __import__('re').I),
+        # Very short descriptions (often meaningless)
+        __import__('re').compile(r"^\s*\w{1,4}\s*$", __import__('re').I),
     ]
 
     def _is_generic_placeholder_alt(self, text: str) -> bool:
@@ -463,7 +470,17 @@ class PPTXAltTextInjector:
         t = text.strip()
         # strip any trailing (WxHpx) to catch "a picture. (692x556px)"
         t_no_size = __import__('re').sub(r"\(\s*\d+\s*x\s*\d+\s*px\s*\)\s*$", "", t, flags=__import__('re').I).strip()
-        return any(rx.search(t) for rx in self.GENERIC_ALT_REGEXES) or any(rx.search(t_no_size) for rx in self.GENERIC_ALT_REGEXES)
+        
+        # Check for generic patterns first
+        if any(rx.search(t) for rx in self.GENERIC_ALT_REGEXES) or any(rx.search(t_no_size) for rx in self.GENERIC_ALT_REGEXES):
+            return True
+        
+        # Require terminal punctuation for sentences longer than 6 words (quality gate)
+        words = t.split()
+        if len(words) > 6 and not t.endswith(('.', '!', '?')):
+            return True  # Treat as low-value if no proper sentence termination
+        
+        return False
 
     def _has_meaningful_alt(self, shape) -> bool:
         """True if current ALT exists and is not in skip list / not blank-ish."""

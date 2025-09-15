@@ -368,6 +368,7 @@ class AltManifest:
             'source_existing': 0,
             'source_generated': 0,
             'source_cached': 0,
+            'source_shape_fallback': 0,  # New source type for shape fallbacks
             'llava_calls_made': 0
         }
         
@@ -376,8 +377,12 @@ class AltManifest:
                 stats['with_current_alt'] += 1
             if entry.suggested_alt:
                 stats['with_suggested_alt'] += 1
-                
-            stats[f'source_{entry.source}'] += 1
+            
+            # Handle all possible source types dynamically
+            source_key = f'source_{entry.source}'
+            if source_key not in stats:
+                stats[source_key] = 0
+            stats[source_key] += 1
             
             if entry.llava_called:
                 stats['llava_calls_made'] += 1

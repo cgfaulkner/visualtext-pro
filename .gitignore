@@ -9,9 +9,10 @@ pdf-alt/
 logs/
 Documents to Review/
 tests/
-!tests/
-!tests/test_alt_normalization.py
+tests/
+tests/test_alt_normalization.py
 debug/
+Reviewed Reports/
 
 # C extensions
 *.so
