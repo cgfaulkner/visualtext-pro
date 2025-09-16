@@ -27,7 +27,7 @@ sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
 # Import clean pipeline components
-from pipeline_artifacts import RunArtifacts
+from pipeline_artifacts import RunArtifacts, normalize_final_alt_map
 from pipeline_phases import run_pipeline
 from docx_review_builder import generate_alt_review_doc
 from config_manager import ConfigManager
@@ -44,7 +44,9 @@ def inject_from_map(
     logger.info("Injecting ALT text into %s (mode: %s)", pptx_path, mode)
     try:
         with open(final_alt_map_path, "r", encoding="utf-8") as f:
-            final_alt_map = json.load(f)
+            raw_final_alt_map = json.load(f)
+
+        final_alt_map = normalize_final_alt_map(raw_final_alt_map)
 
         if not final_alt_map:
             logger.warning("No ALT text mappings found in final_alt_map")
@@ -64,8 +66,39 @@ def inject_from_map(
             config_manager.override_alt_mode(mode)
         injector = PPTXAltTextInjector(config_manager)
 
+        enriched_mapping = {}
+        available_entries = 0
+
+        for key, record in final_alt_map.items():
+            existing_alt = (record.get("existing_alt") or "").strip()
+            generated_alt = (record.get("generated_alt") or "").strip()
+            final_alt = (record.get("final_alt") or "").strip()
+
+            if existing_alt or generated_alt or final_alt:
+                available_entries += 1
+
+            enriched_mapping[key] = {
+                "existing_alt": existing_alt,
+                "generated_alt": generated_alt,
+                "final_alt": final_alt or None,
+                "decision": record.get("decision"),
+                "source_existing": record.get("source_existing"),
+                "source_generated": record.get("source_generated"),
+                "existing_meaningful": bool(existing_alt),
+            }
+
+        if available_entries == 0:
+            logger.warning("No ALT text available in final_alt_map for injection")
+            return {
+                "success": True,
+                "injected_successfully": 0,
+                "total_mappings": len(final_alt_map),
+                "skipped_existing": 0,
+                "errors": [],
+            }
+
         result = injector.inject_alt_text_from_mapping(
-            pptx_path, final_alt_map, pptx_path, mode=mode
+            pptx_path, enriched_mapping, pptx_path, mode=mode
         )
 
         if result["success"]:

@@ -15,7 +15,70 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+
+FinalAltRecord = Dict[str, Optional[str]]
+
+
+def _coerce_text(value: Any) -> str:
+    """Convert value to stripped string, returning empty string for falsy values."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _coerce_optional_text(value: Any) -> Optional[str]:
+    """Convert value to stripped string, returning None when the result is empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _coerce_source(value: Any, default: str) -> str:
+    """Coerce source identifiers to non-empty strings with a sensible default."""
+    text = _coerce_text(value)
+    return text or default
+
+
+def normalize_final_alt_map(raw_map: Dict[str, Any]) -> Dict[str, FinalAltRecord]:
+    """Normalize legacy and new final_alt_map payloads into the canonical structure."""
+    if not isinstance(raw_map, dict):
+        return {}
+
+    normalized: Dict[str, FinalAltRecord] = {}
+
+    for key, value in raw_map.items():
+        if not isinstance(key, str):
+            continue
+
+        if isinstance(value, dict):
+            existing_alt = _coerce_text(value.get('existing_alt'))
+            generated_alt = _coerce_text(value.get('generated_alt'))
+            final_alt = _coerce_optional_text(value.get('final_alt'))
+            decision = _coerce_optional_text(value.get('decision'))
+
+            normalized[key] = {
+                'existing_alt': existing_alt,
+                'generated_alt': generated_alt,
+                'source_existing': _coerce_source(value.get('source_existing'), 'pptx'),
+                'source_generated': _coerce_source(value.get('source_generated'), 'llava'),
+                'final_alt': final_alt,
+                'decision': decision,
+            }
+        else:
+            generated_alt = _coerce_text(value)
+            normalized[key] = {
+                'existing_alt': '',
+                'generated_alt': generated_alt,
+                'source_existing': 'pptx',
+                'source_generated': 'llava',
+                'final_alt': generated_alt or None,
+                'decision': None,
+            }
+
+    return normalized
 
 
 @dataclass
@@ -122,18 +185,22 @@ class RunArtifacts:
         with open(self.generated_alt_by_key_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
-    def load_final_alt_map(self) -> Dict[str, str]:
+    def load_final_alt_map(self) -> Dict[str, FinalAltRecord]:
         """Load final resolved ALT text mappings from Phase 3."""
         if not self.final_alt_map_path.exists():
             return {}
-        
+
         with open(self.final_alt_map_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    
-    def save_final_alt_map(self, data: Dict[str, str]) -> None:
+            raw_map = json.load(f)
+
+        return normalize_final_alt_map(raw_map)
+
+    def save_final_alt_map(self, data: Dict[str, Any]) -> None:
         """Save final resolved ALT text mappings from Phase 3."""
+        normalized = normalize_final_alt_map(data)
+
         with open(self.final_alt_map_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(normalized, f, indent=2, ensure_ascii=False)
     
     def get_manifest_path(self) -> Path:
         """Get path to the single source of truth manifest file."""

@@ -2,6 +2,8 @@
 from pathlib import Path
 from datetime import datetime
 import logging
+import re
+
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -10,7 +12,8 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import re
+
+from shared.pipeline_artifacts import normalize_final_alt_map
 
 def set_cell_margins(cell, left=None, right=None, top=None, bottom=None):
     """Set cell margins in twips (1/20 pt). 180 ≈ 0.125"."""
@@ -229,11 +232,19 @@ def pick_alts_for_report(key, final_alt_map, existing_alt_from_ppt):
     - If the PPT had none, Suggested = generated canonical ALT; Current = "".
     """
     existing = (existing_alt_from_ppt or "").strip()
-    generated = (final_alt_map.get(key) or "").strip()
+    record = final_alt_map.get(key, {}) if isinstance(final_alt_map, dict) else {}
+
+    if not existing and isinstance(record, dict):
+        existing = (record.get('existing_alt') or "").strip()
+
+    final_alt = (record.get('final_alt') or "").strip() if isinstance(record, dict) else ""
+    generated = (record.get('generated_alt') or "").strip() if isinstance(record, dict) else ""
+
+    suggested = final_alt or generated
 
     if existing:
         return existing, existing  # Current, Suggested
-    return "", generated
+    return "", suggested
 
 def generate_alt_review_doc(processed_images, lecture_title: str, output_path: str, original_pptx_path: str = None, final_alt_map: dict = None, status_map: dict = None):
     """
@@ -243,6 +254,9 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
       image_path, slide_number, image_number, current_alt, suggested_alt,
       is_decorative, image_key, (optional) slide_title, slide_notes, status_info
     """
+    if final_alt_map:
+        final_alt_map = normalize_final_alt_map(final_alt_map)
+
     doc = Document()
     
     # Force portrait orientation with sane geometry and print layout

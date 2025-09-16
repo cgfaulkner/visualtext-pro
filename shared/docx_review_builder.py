@@ -16,7 +16,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -25,6 +25,8 @@ from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+
+from pipeline_artifacts import normalize_final_alt_map
 
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,9 @@ def generate_alt_review_doc(
             
         with open(final_alt_map_path, 'r', encoding='utf-8') as f:
             final_alt_map = json.load(f)
-            
+
+        final_alt_map = normalize_final_alt_map(final_alt_map)
+
     except Exception as e:
         logger.error(f"Failed to load pipeline artifacts: {e}")
         raise RuntimeError(f"Could not load required JSON files: {e}")
@@ -107,7 +111,12 @@ def generate_alt_review_doc(
     summary_para = doc.add_paragraph()
     summary_text = f"Total images: {len(visual_index)} | "
     summary_text += f"With existing ALT: {len(current_alt_by_key)} | "
-    summary_text += f"Final coverage: {len(final_alt_map)}"
+    final_coverage = sum(
+        1
+        for record in final_alt_map.values()
+        if (record.get('final_alt') or record.get('existing_alt') or record.get('generated_alt'))
+    )
+    summary_text += f"Final coverage: {final_coverage}"
     summary_run = summary_para.add_run(summary_text)
     _set_font_properties(summary_run, size=10, italic=True, color="666666")
     summary_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -150,7 +159,8 @@ def _setup_landscape_layout(doc):
     section.bottom_margin = Inches(0.75)
 
 
-def _create_portrait_table(doc, visual_index: Dict, current_alt_by_key: Dict, final_alt_map: Dict):
+def _create_portrait_table(doc, visual_index: Dict, current_alt_by_key: Dict,
+                           final_alt_map: Dict[str, Dict[str, Any]]):
     """
     Create portrait-oriented table with fixed column widths as specified:
     - Slide/Img: 0.9"
@@ -235,15 +245,18 @@ def _create_portrait_table(doc, visual_index: Dict, current_alt_by_key: Dict, fi
         cells[2].text = current_alt if current_alt else "[No ALT text]"
         _format_alt_text_cell(cells[2], bool(current_alt))
         
-        # Suggested ALT Text  
-        suggested_alt = final_alt_map.get(key, "").strip()
-        # If current exists, suggested should match (preserve-first strategy)
+        # Suggested ALT Text
+        record = final_alt_map.get(key, {})
+        suggested_alt = _select_suggested_alt(record)
+
         if current_alt:
-            cells[3].text = current_alt  # Show current as suggested (preserve)
+            display_suggested = current_alt
         else:
-            cells[3].text = suggested_alt if suggested_alt else "[Generate needed]"
+            display_suggested = suggested_alt if suggested_alt else "[Generate needed]"
+
+        cells[3].text = display_suggested
         _format_alt_text_cell(cells[3], bool(suggested_alt or current_alt))
-        
+
         # Decorative checkbox
         is_decorative = _is_decorative_image(visual_info, current_alt, suggested_alt)
         cells[4].text = "☐"  # Empty checkbox for manual review
@@ -262,6 +275,17 @@ def _create_landscape_table(doc, visual_index: Dict, current_alt_by_key: Dict, f
     # Implementation would be similar but with adjusted column widths
     # For now, just use portrait as fallback
     return _create_portrait_table(doc, visual_index, current_alt_by_key, final_alt_map)
+
+
+def _select_suggested_alt(record: Dict[str, Any]) -> str:
+    """Return the preferred suggested ALT text from a final_alt_map record."""
+    if not isinstance(record, dict):
+        return ""
+
+    final_alt = (record.get('final_alt') or "").strip()
+    generated_alt = (record.get('generated_alt') or "").strip()
+
+    return final_alt or generated_alt
 
 
 def _format_header_cell(cell):

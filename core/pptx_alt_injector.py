@@ -1021,7 +1021,11 @@ class PPTXAltTextInjector:
             "is_generated": source in ["generator", "unified_alt_generator"],
             "is_fallback": source in ["fallback", "fallback_key_based", "connector-bypass"]
         }
-        
+
+        if not quality_flags["is_generated"] and not quality_flags["is_fallback"]:
+            # Treat direct/manual writes as generated so they are not blocked by strict policies
+            quality_flags["is_generated"] = True
+
         gated_text = apply_for_ppt_injection(text, "shape", quality_flags, policy, shape)
         if gated_text is None:
             logger.debug(f"INJECT_ALT: Text blocked by centralized gate for {element_key}: {text[:50]}...")
