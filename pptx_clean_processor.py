@@ -60,6 +60,8 @@ def inject_from_map(
         from shared.config_manager import ConfigManager
 
         config_manager = ConfigManager()
+        if mode != "preserve":
+            config_manager.override_alt_mode(mode)
         injector = PPTXAltTextInjector(config_manager)
 
         result = injector.inject_alt_text_from_mapping(
@@ -158,9 +160,11 @@ Examples:
     # Global options
     parser.add_argument('--config', help='Configuration file path')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
-    parser.add_argument('--force-regenerate', action='store_true', 
+    parser.add_argument('--force-regenerate', action='store_true',
                        help='Force regeneration even if cache exists')
-    
+    parser.add_argument('--mode', choices=['preserve', 'replace'],
+                       help='Whether to preserve or replace existing ALT text in PPTX (overrides config)')
+
     args = parser.parse_args()
     
     if not args.command:
@@ -201,7 +205,16 @@ def cmd_process(args) -> int:
     try:
         # Load configuration
         config_manager = ConfigManager(args.config)
-        
+
+        # Apply CLI mode override if provided
+        if args.mode:
+            config_manager.override_alt_mode(args.mode)
+            logger.info(f"🛠️ ALT mode overridden to: {args.mode}")
+
+        # Log the active ALT mode
+        active_mode = config_manager.get_alt_mode()
+        logger.info(f"🔧 Active ALT mode: {active_mode}")
+
         # Get ALT text generator
         # Import here to avoid circular dependencies
         from unified_alt_generator import UnifiedAltGenerator
@@ -254,7 +267,8 @@ def cmd_process(args) -> int:
                 str(artifacts.final_alt_map_path),
                 review_output,
                 portrait=True,
-                title=title
+                title=title,
+                config_manager=config_manager
             )
             
             print(f"📋 Review document generated: {review_output}")
@@ -315,7 +329,15 @@ def cmd_review(args) -> int:
             return 1
     
     logger.info(f"Generating review document from existing artifacts")
-    
+
+    # Load configuration for mode information
+    from shared.config_manager import ConfigManager
+    config_manager = ConfigManager(args.config)
+
+    # Apply CLI mode override if provided
+    if args.mode:
+        config_manager.override_alt_mode(args.mode)
+
     try:
         generate_alt_review_doc(
             args.visual_index,
@@ -323,7 +345,8 @@ def cmd_review(args) -> int:
             args.final_alt,
             args.output,
             portrait=True,
-            title=args.title
+            title=args.title,
+            config_manager=config_manager
         )
         
         print(f"✅ Review document generated: {args.output}")

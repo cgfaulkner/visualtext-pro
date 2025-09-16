@@ -67,12 +67,17 @@ def create_thumbnail(image_data: bytes, max_width: int = 600) -> str:
 
 def build_processed_images(pptx_path: str, cfg, include_context: bool = True):
     """
-    Gather metadata for images in the PPTX without generating new ALT text.
+    Gather metadata for images in the PPTX, reading ALT text from the post-injection file.
+    This ensures the review doc reflects the actual current state of the PPTX.
 
     Returns a list of dictionaries shaped for ``generate_alt_review_doc``.
-    Suggested ALT values are left blank so the DOCX review builder can use
-    the canonical ``final_alt_map`` produced during PPT processing.
     """
+    # Import the unified ALT reader
+    import sys
+    from pathlib import Path
+    project_root = Path(__file__).parent.parent
+    sys.path.insert(0, str(project_root / "shared"))
+    from alt_text_reader import read_existing_alt
 
     # Create processor instance
     processor = PPTXAccessibilityProcessor(cfg)
@@ -105,18 +110,14 @@ def build_processed_images(pptx_path: str, cfg, include_context: bool = True):
                 if notes_text_frame and hasattr(notes_text_frame, 'text'):
                     slide_notes = notes_text_frame.text.strip()
         
-        # Get existing alt text from shape
+        # Get existing alt text from shape using unified reader (post-injection)
         existing_alt = ""
-        if hasattr(img_info.shape, 'element'):
-            # Look for existing alt text in the shape
+        if img_info.shape:
             try:
-                pic_elements = img_info.shape.element.xpath('.//pic:cNvPr', namespaces={
-                    'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
-                })
-                if pic_elements:
-                    existing_alt = pic_elements[0].get('descr', '')
-            except Exception:
-                pass
+                existing_alt = read_existing_alt(img_info.shape)
+            except Exception as e:
+                print(f"Warning: Could not read ALT text from shape: {e}")
+                existing_alt = ""
         
         items.append({
             "image_path": thumbnail_path,
@@ -138,6 +139,7 @@ def make_review_doc(
     cfg,
     opts: ApprovalOptions,
     final_alt_map: dict | None = None,
+    status_map: dict | None = None,
 ):
     """Generate a DOCX review document for a processed PPTX."""
 
@@ -156,4 +158,5 @@ def make_review_doc(
         output_path=out,
         original_pptx_path=pptx_path,
         final_alt_map=final_alt_map,
+        status_map=status_map,
     )

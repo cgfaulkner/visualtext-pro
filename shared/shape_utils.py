@@ -9,6 +9,18 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# --- XML tag helper functions for robust shape type detection ---
+def _element_of(shape):
+    """Extract the underlying XML element from a shape object."""
+    return getattr(shape, "_element", None) or getattr(shape, "element", None)
+
+
+def is_connector(shape):
+    """Check if shape is a connector using XML tag inspection."""
+    el = _element_of(shape)
+    return bool(el is not None and el.tag.endswith('}cxnSp'))  # p:cxnSp
+
+
 def is_image_like(shape) -> bool:
     """
     Robust detector for image-like shapes in PPTX including vectors/groups.
@@ -152,9 +164,9 @@ def is_decorative_shape(shape) -> bool:
         return False
     
     shape_type = getattr(shape, 'shape_type', None)
-    
+
     # Lines and connectors are typically decorative
-    if shape_type in (MSO_SHAPE_TYPE.LINE, MSO_SHAPE_TYPE.CONNECTOR):
+    if shape_type == MSO_SHAPE_TYPE.LINE or is_connector(shape):
         return True
     
     # Check for empty rectangles/shapes (no fill, just outline)

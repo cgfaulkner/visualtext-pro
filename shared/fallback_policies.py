@@ -9,6 +9,19 @@ from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+# --- XML tag helper functions for robust shape type detection ---
+def _element_of(shape):
+    """Extract the underlying XML element from a shape object."""
+    return getattr(shape, "_element", None) or getattr(shape, "element", None)
+
+
+def is_connector(shape):
+    """Check if shape is a connector using XML tag inspection."""
+    el = _element_of(shape)
+    return bool(el is not None and el.tag.endswith('}cxnSp'))  # p:cxnSp
+
+
 # Quality gate criteria
 QUALITY_GATE_BLOCKED_WORDS = {
     'unknown', 'image', 'picture', 'graphic', 'icon', 'shape'
@@ -63,6 +76,45 @@ def passes_quality_gate(text: str) -> bool:
     if len(words) >= 3 and not has_meaningful_word:
         return False
     
+    return True
+
+
+def passes_lenient_quality_gate(text: str) -> bool:
+    """
+    Lenient quality gate for generated text - allows more patterns that are legitimate.
+
+    Args:
+        text: Text to evaluate
+
+    Returns:
+        bool: True if text passes lenient quality gate
+    """
+    if not text or not text.strip():
+        return False
+
+    text_stripped = text.strip()
+
+    # Max length check
+    if len(text_stripped) > 200:
+        return False
+
+    # Block only obviously templated/broken content
+    blocked_patterns = [
+        "unknown (",
+        "text placeholder (",
+        "shape with no specific content",
+        "[Generated description not available]",
+        "error:",
+        "failed to",
+        "could not"
+    ]
+
+    text_lower = text_stripped.lower()
+    for pattern in blocked_patterns:
+        if pattern in text_lower:
+            return False
+
+    # Allow anything else for generated content
     return True
 
 
@@ -277,3 +329,95 @@ def get_review_status_display(status_info: Dict[str, Any]) -> str:
         return "Fallback Injected"
     else:
         return status
+
+
+def apply_for_ppt_injection(
+    proposed_text: str,
+    element_kind: str,
+    quality_flags: Dict[str, Any],
+    policy: str,
+    shape=None
+) -> Optional[str]:
+    """
+    Centralized gate for any text entering PowerPoint.
+    Blocks templated strings and enforces policy rules.
+    
+    Args:
+        proposed_text: Text proposed for injection
+        element_kind: Type of element (picture, shape, etc.)
+        quality_flags: Dict with quality indicators
+        policy: Fallback policy (none, doc-only, ppt-gated)
+        
+    Returns:
+        Text to inject into PPT, or None to skip injection
+    """
+    if not proposed_text or not proposed_text.strip():
+        return None
+    
+    text = proposed_text.strip()
+    
+    # Special handling for connectors - treat as decorative by default
+    if shape and is_connector(shape):
+        # Only allow explicit authored text for connectors
+        if not quality_flags.get("is_generated", False):
+            logger.debug("Blocking connector - no explicit authored text")
+            return None
+    
+    # Group roll-up: If parent group has ALT and children are decorative, 
+    # don't backfill children with fallbacks
+    if shape and quality_flags.get("is_fallback", False):
+        try:
+            # Check if this shape is in a group that already has ALT text
+            parent_element = getattr(shape, '_element', None)
+            if parent_element is not None:
+                # Simple check - if we're in a group context, be more conservative
+                if hasattr(shape, '_parent') and quality_flags.get("is_fallback", False):
+                    logger.debug("Blocking fallback for shape in group context")
+                    return None
+        except Exception:
+            pass
+    
+    # Hard-block templated fallback strings
+    templated_patterns = [
+        "This is a PowerPoint shape",
+        "unknown (",
+        "text placeholder (",
+        "chart (",
+        "table (",
+        "group shape (",
+        "connector (",
+        "shape with no specific content",
+        "[Generated description not available]"
+    ]
+    
+    for pattern in templated_patterns:
+        if pattern in text:
+            logger.debug(f"Blocking templated string from PPT injection: {pattern}")
+            return None
+    
+    # Policy enforcement
+    if policy == "none":
+        # Only allow high-quality generated text
+        if not quality_flags.get("is_generated", False):
+            return None
+        # For generated content, use more lenient quality checks
+        if quality_flags.get("is_generated", False):
+            # Allow generated text but still block obviously bad content
+            if not passes_lenient_quality_gate(text):
+                return None
+        else:
+            if not passes_quality_gate(text):
+                return None
+    
+    elif policy == "doc-only":
+        # No fallbacks go to PPT at all
+        if quality_flags.get("is_fallback", False):
+            return None
+    
+    elif policy == "ppt-gated":
+        # Allow fallbacks but with quality gate
+        if quality_flags.get("is_fallback", False):
+            if not passes_quality_gate(text):
+                return None
+    
+    return text

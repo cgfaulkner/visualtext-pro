@@ -857,13 +857,24 @@ class FlexibleAltGenerator:
             t = t[:limit].rsplit(" ", 1)[0]
         return self._ensure_terminal_period(t)
 
-    def _post_process_alt_text(self, alt_text: str) -> str:
+    def _normalize_generated_result(self, result) -> str:
+        """Normalize generation result to text string, handling dict or str formats."""
+        if isinstance(result, dict):
+            text = result.get("text", "")
+        else:
+            text = result or ""
+        return str(text).strip()
+    
+    def _post_process_alt_text(self, alt_text) -> str:
         """Apply post-processing to generated ALT text."""
+        # Normalize result first
+        alt_text = self._normalize_generated_result(alt_text)
+        
         # Apply smart truncation if configured
         output_config = self.config_manager.get_output_config()
         if output_config.get("smart_truncate", False):
             max_words = output_config.get("max_summary_words", 30)
-            needs_summary = len(alt_text.split()) > max_words or alt_text.strip().endswith("...")
+            needs_summary = len(alt_text.split()) > max_words or alt_text.endswith("...")
             if needs_summary:
                 prompt = self.config_manager.get_smart_truncate_prompt()
                 provider = getattr(self, "_last_provider", None)
@@ -873,7 +884,7 @@ class FlexibleAltGenerator:
                         summary_prompt = f"{prompt}\n\n{alt_text}"
                         summary, _ = provider.generate_alt_text(image_path, summary_prompt)
                         if summary:
-                            alt_text = summary.strip()
+                            alt_text = self._normalize_generated_result(summary)
                         else:
                             alt_text = self._summarize_text_to_sentence(alt_text, max_words)
                     except Exception as e:
@@ -1270,8 +1281,9 @@ class FlexibleAltGenerator:
                     if hasattr(provider, 'generate_text_response'):
                         # If provider has dedicated text method, use it
                         result, metadata = provider.generate_text_response(prompt)
-                        if result and result.strip():
-                            return result.strip()
+                        normalized = self._normalize_generated_result(result)
+                        if normalized:
+                            return normalized
                     else:
                         # For LLaVA and similar vision models, we can't do text-only generation
                         # Instead, provide a basic descriptive text based on the prompt

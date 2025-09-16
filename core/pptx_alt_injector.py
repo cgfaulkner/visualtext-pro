@@ -25,7 +25,12 @@ def _safe_xpath(element, xpath_expr, namespaces=None):
     try:
         return el.xpath(xpath_expr)  # python-pptx injects namespaces
     except Exception:
-        ns = namespaces or getattr(el, "nsmap", None) or PPTX_NSMAP
+        if namespaces is not None:
+            ns = namespaces
+        elif hasattr(el, "nsmap") and el.nsmap is not None:
+            ns = el.nsmap
+        else:
+            ns = PPTX_NSMAP
         return el.xpath(xpath_expr, namespaces=ns)
 # --- end safe XPath helper ---
 
@@ -39,6 +44,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
 from hashlib import md5
 import tempfile
+from collections import Counter
 
 # Third-party imports for PPTX processing
 try:
@@ -60,9 +66,50 @@ sys.path.insert(0, str(project_root / "core"))
 from config_manager import ConfigManager
 from decorative_filter import is_force_decorative_by_filename
 from alt_text_reader import read_existing_alt
+from fallback_policies import apply_fallback_policy, apply_for_ppt_injection
 
 logger = logging.getLogger(__name__)
 logger.info("LOG: injector_file=%s", __file__)
+
+
+# --- XML tag helper functions for robust shape type detection ---
+def _element_of(shape):
+    """Extract the underlying XML element from a shape object."""
+    return getattr(shape, "_element", None) or getattr(shape, "element", None)
+
+
+def is_connector(shape):
+    """Check if shape is a connector using XML tag inspection."""
+    el = _element_of(shape)
+    return bool(el is not None and el.tag.endswith('}cxnSp'))  # p:cxnSp
+
+
+def is_picture(shape):
+    """Check if shape is a picture using XML tag inspection."""
+    el = _element_of(shape)
+    return bool(el is not None and el.tag.endswith('}pic'))    # p:pic
+
+
+def is_placeholder_or_autoshape(shape):
+    """Check if shape is a placeholder or autoshape using XML tag inspection."""
+    el = _element_of(shape)
+    # p:sp covers most shapes/placeholders; refine if needed
+    return bool(el is not None and el.tag.endswith('}sp'))
+
+
+def _set_alt_on_cNvPr(el, text):
+    """
+    Unified ALT text setter for all shape types using cNvPr node.
+    Works for p:sp, p:pic, p:cxnSp, etc. by finding the appropriate cNvPr.
+    """
+    # Find cNvPr (p:nvSpPr/p:cNvPr or p:nvPicPr/p:cNvPr or p:nvCxnSpPr/p:cNvPr)
+    cNvPr = el.find('.//{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr')
+    if cNvPr is not None:
+        cNvPr.set('descr', text or '')
+        # Optionally also set 'title' if dual-writing is desired
+        cNvPr.set('title', cNvPr.get('title', ''))
+        return True
+    return False
 
 
 class PPTXImageIdentifier:
@@ -176,6 +223,31 @@ class PPTXImageIdentifier:
         
         return cls(slide_idx, shape_idx, shape_name, image_hash, "")
 
+    @classmethod
+    def from_key(cls, key: str):
+        """
+        Parse image key to extract slide and shape indices, ignoring hash for matching.
+        Handles formats like: slide_X_shapeid_Y_hash_XXXXX or slide_X_shape_Y_hash_XXXXX
+
+        Args:
+            key: Image key string
+
+        Returns:
+            PPTXImageIdentifier instance for stable matching
+        """
+        import re
+        _KEY_RE = re.compile(r'^slide_(?P<slide>\d+)_(?:shapeid_|shape_)(?P<shape>\d+)(?:_hash_[0-9a-f]+)?')
+
+        m = _KEY_RE.match(key)
+        if not m:
+            raise ValueError(f"Bad key: {key}")
+
+        slide_idx = int(m.group('slide'))
+        shape_idx = int(m.group('shape'))
+
+        # Create identifier without hash dependency for stable matching
+        return cls(slide_idx, shape_idx, "", "", "")
+
 
 class PPTXAltTextInjector:
     """
@@ -210,12 +282,15 @@ class PPTXAltTextInjector:
         # Register XML namespaces for decorative detection
         self._register_namespaces()
         
-        # Statistics
-        self.injection_stats = {
-            'total_images': 0,
-            'injected_successfully': 0,
+        # Statistics - unified name
+        self.statistics = {
+            'success': 0,
             'skipped_existing': 0,
             'skipped_invalid': 0,
+            'failed': 0,
+            # Legacy names for compatibility
+            'total_images': 0,
+            'injected_successfully': 0,
             'failed_injection': 0,
             'validation_failures': 0
         }
@@ -295,7 +370,38 @@ class PPTXAltTextInjector:
         if text[-1] in ".!?":
             return text
         return f"{text}."
-    
+
+    @staticmethod
+    def _finalize_alt(text: str) -> str:
+        """
+        Safe finalizer for ALT text that prevents string index out of range errors.
+        Handles capitalization and punctuation without unsafe indexing.
+        """
+        if text is None:
+            return ""
+
+        s = text.strip()
+        if not s:
+            return ""
+
+        # Skip finalization for certain reserved values
+        if s.lower() in ('', 'undefined', '(none)', 'n/a', 'none'):
+            return ""
+
+        # Capitalize first alphabetic character without indexing empty strings
+        first_alpha = next((i for i, ch in enumerate(s) if ch.isalpha()), None)
+        if first_alpha is not None and s[first_alpha].islower():
+            s = s[:first_alpha] + s[first_alpha].upper() + s[first_alpha+1:]
+
+        # Append period only if last visible char is alphanumeric and not punctuation already
+        tail = s.rstrip()
+        if tail and tail[-1].isalnum():
+            s = tail + "."
+        else:
+            s = tail
+
+        return s
+
     def _score_alt_text_quality(self, alt_text: str, source: str = "unknown") -> int:
         """
         HOTPATCH FIX 1: Score ALT text quality to determine which description wins.
@@ -389,6 +495,39 @@ class PPTXAltTextInjector:
             return True, f"quality_upgrade ({candidate_score} > {existing_score})"
         else:
             return False, f"quality_downgrade ({candidate_score} <= {existing_score})"
+    
+    def _sync_legacy_statistics(self) -> None:
+        """Synchronize legacy statistics counters to ensure coverage reports show correct values."""
+        # Update legacy counters to match new counters
+        self.statistics['injected_successfully'] = self.statistics['success']
+        self.statistics['failed_injection'] = self.statistics['failed']
+        # Validation failures should match skipped + invalid
+        self.statistics['validation_failures'] = (
+            self.statistics['skipped_existing'] + 
+            self.statistics['skipped_invalid']
+        )
+    
+    def _is_blocked_fallback_pattern(self, text: str) -> bool:
+        """Check if text matches patterns that should be blocked from PPT."""
+        if not text:
+            return False
+        
+        blocked_patterns = [
+            "This is a PowerPoint shape",
+            "unknown (",
+            "text placeholder (",
+            "chart (",
+            "table (",
+            "group shape (",
+            "connector (",
+            "shape with no specific content",
+            "[Generated description not available]"
+        ]
+        
+        for pattern in blocked_patterns:
+            if pattern in text:
+                return True
+        return False
     
     def _register_write(self, element_key: str, alt_text: str, source: str) -> None:
         """
@@ -514,8 +653,11 @@ class PPTXAltTextInjector:
         write to XML and then verify.
         """
         # Respect existing ALT in preserve mode
-        if getattr(self, "mode", "overwrite") == "preserve" and self._has_meaningful_alt(shape):
-            logger.debug("Preserve mode: existing ALT found; skipping reinjection for this shape.")
+        mode = getattr(self, "mode", "overwrite")
+        has_alt = self._has_meaningful_alt(shape)
+        logger.info(f"WRITE_GUARD: mode={mode}, has_meaningful_alt={has_alt}")
+        if mode == "preserve" and has_alt:
+            logger.info("WRITE_GUARD TRIGGERED: Preserve mode: existing ALT found; skipping reinjection for this shape.")
             return
             
         # Best-effort property set (harmless if ignored)
@@ -537,7 +679,12 @@ class PPTXAltTextInjector:
     
     def _write_alt_via_xml_fallback(self, shape, text: str) -> None:
         """Write ALT to the correct cNvPr node. Set only 'descr' to avoid duplicates."""
+        logger.info(f"XML_FALLBACK: Starting write for '{text[:50]}...' to {type(shape).__name__}")
         try:
+            # SKIP REDUNDANT GATE: Quality gating already applied in _inject_alt()
+            # The centralized gate here was blocking legitimate ALT text that passed the lenient gate
+            logger.info(f"XML_FALLBACK: Proceeding with write (quality gates already applied upstream)")
+            
             element = getattr(shape, "_element", None) or getattr(shape, "element", None)
             if element is None:
                 return
@@ -554,13 +701,17 @@ class PPTXAltTextInjector:
             ]
 
             wrote_any = False
+            logger.info(f"XML_WRITE: Attempting write to shape {type(shape).__name__}")
             for xp in paths:
-                for cnvpr in _safe_xpath(element, xp, ns):
+                found_nodes = _safe_xpath(element, xp, ns)
+                logger.info(f"XML_WRITE: XPath '{xp}' found {len(found_nodes)} nodes")
+                for cnvpr in found_nodes:
                     # Only set 'descr' – leave 'title' empty to avoid duplicate reading in UI/AT.
                     cnvpr.set('descr', text)
+                    logger.info(f"XML_WRITE: Successfully wrote '{text[:50]}...' to cNvPr node")
                     wrote_any = True
             if not wrote_any:
-                logger.debug("XML fallback found no cNvPr to write ALT into for this shape.")
+                logger.info(f"XML_WRITE: ❌ FAILED - No cNvPr nodes found for {type(shape).__name__} shape")
         except Exception as e:
             logger.debug(f"XML fallback failed: {e}")
     
@@ -616,15 +767,35 @@ class PPTXAltTextInjector:
             logger.debug(f"INJECT_ALT: Skipping empty text for {element_key}")
             return False
         
-        text = text.strip()
+        # Apply safe finalization to prevent string indexing errors
+        text = self._finalize_alt(text)
+
+        if not text:
+            logger.debug(f"INJECT_ALT: Skipping text after finalization for {element_key}")
+            return False
+
+        # CENTRALIZED GATE: Block templated strings from entering PPT
+        policy = self.config_manager.get_fallback_policy()
+        quality_flags = {
+            "is_generated": source in ["generator", "unified_alt_generator"],
+            "is_fallback": source in ["fallback", "fallback_key_based", "connector-bypass"]
+        }
+        
+        gated_text = apply_for_ppt_injection(text, "shape", quality_flags, policy, shape)
+        if gated_text is None:
+            logger.debug(f"INJECT_ALT: Text blocked by centralized gate for {element_key}: {text[:50]}...")
+            return False
+        
+        text = gated_text
         
         # 2) READ current ALT text (ONLY from cNvPr/@descr and @title)
         existing = self._read_current_alt(shape)
         
         # 2.5) PRESERVE MODE HARD GUARD - never overwrite existing ALT text in preserve mode
-        mode = self.config_manager.config.get('alt_text_handling', {}).get('mode', 'preserve')
-        if mode == 'preserve' and existing.strip():
-            logger.debug(f"INJECT_ALT: Preserving existing ALT text for {element_key} (mode: preserve)")
+        # USE INJECTOR'S EFFECTIVE MODE, NOT CONFIG (fixes split-brain issue)
+        logger.info(f"PRESERVE_GUARD: mode={self.mode}, existing='{existing.strip()}'")
+        if self.mode == 'preserve' and existing.strip():
+            logger.info(f"INJECT_ALT: Preserving existing ALT text for {element_key} (mode: preserve)")
             self.statistics['skipped_existing'] += 1
             return False
         
@@ -644,14 +815,19 @@ class PPTXAltTextInjector:
         # 5) OVERWRITE ONLY - never append
         self._write_descr_and_title(shape, text)
 
-        # Debug log to verify the exact text written matches the final ALT text
+        # IMMEDIATE READBACK VERIFICATION - Force one known write path end-to-end
         written_descr = self._read_current_alt(shape)
         final_alt = text
+        logger.info(f"ONE-KEY READBACK: {element_key} -> written='{written_descr}' expected='{final_alt}'")
+        if written_descr.strip() == final_alt.strip():
+            logger.info(f"✅ READBACK SUCCESS: Write verified for {element_key}")
+        else:
+            logger.warning(f"❌ READBACK MISMATCH: {element_key} expected={final_alt!r} actual={written_descr!r}")
         logger.debug(
             "repr_written=%r repr_final=%r ord_last=%s",
             written_descr,
             final_alt,
-            ord(written_descr[-1]),
+            ord(written_descr[-1]) if written_descr else 0,
         )
         
         # 6) RECORD the final write
@@ -726,16 +902,17 @@ class PPTXAltTextInjector:
                         if descr and title and title == descr:
                             cnvpr.set("title", "")  # clear duplicate title
     
-    def inject_alt_text_from_mapping(self, pptx_path: str, alt_text_mapping: Dict[str, str], 
-                                   output_path: Optional[str] = None) -> Dict[str, Any]:
+    def inject_alt_text_from_mapping(self, pptx_path: str, alt_text_mapping: Dict[str, str],
+                                   output_path: Optional[str] = None, mode: Optional[str] = None) -> Dict[str, Any]:
         """
         Inject ALT text into PPTX file from a mapping dictionary.
-        
+
         Args:
             pptx_path: Path to input PPTX file
             alt_text_mapping: Dictionary mapping image keys to ALT text
             output_path: Optional output path (defaults to overwriting input)
-            
+            mode: ALT text handling mode ("preserve" or "replace"). If None, uses config mode.
+
         Returns:
             Dictionary with injection results and statistics
         """
@@ -754,11 +931,26 @@ class PPTXAltTextInjector:
         logger.info(f"ALT text mappings: {len(alt_text_mapping)}")
         
         # Reset statistics
-        self.injection_stats = {key: 0 for key in self.injection_stats}
-        
+        self.statistics = {key: 0 for key in self.statistics}
+
+        # Get ALT mode from parameter or config
+        alt_mode = mode or self.config_manager.get_alt_mode()
+        logger.info(f"🔧 Injector ALT mode: {alt_mode}")
+
+        # Temporarily override mode if different from current
+        original_mode = self.mode
+        self.mode = alt_mode
+
+        # Add sanity logging to catch mode desync issues
+        logger.info(f"Injector init mode: {original_mode}")
+        logger.info(f"Effective injector mode: {self.mode}")
+        assert self.mode == alt_mode, f"Injector mode desync: expected {alt_mode}, got {self.mode}"
+
         try:
             # Load presentation
             presentation = Presentation(str(pptx_path))
+            # Store for key-based writing
+            self.prs = presentation
             
             # Build image identifier mapping for matching
             image_identifiers = self._build_image_identifier_mapping(presentation)
@@ -784,7 +976,7 @@ class PPTXAltTextInjector:
             logger.info(f"VALIDATION: Mapping keys from generator ({len(alt_text_mapping)}):")
             gen_keys = sorted(alt_text_mapping.keys())
             # Log first/middle/last sample keys
-            sample_indices = [0, len(gen_keys)//2, len(gen_keys)-1] if len(gen_keys) > 1 else [0]
+            sample_indices = [0, len(gen_keys)//2, len(gen_keys)-1] if len(gen_keys) > 1 else ([0] if gen_keys else [])
             for i in sample_indices:
                 if i < len(gen_keys):
                     logger.info(f"  Expected[{i}]: {gen_keys[i]}")
@@ -810,29 +1002,72 @@ class PPTXAltTextInjector:
             # Inject ALT text for each mapping
             matched_keys = []
             unmatched_keys = []
-            
+
+            # SURGICAL LOGGING: Prove inject loop runs after mapping
+            logger.info(f"INJECT_LOOP: {len(alt_text_mapping)} keys; image_map={len(image_identifiers)}")
+            logger.info(f"PRS_ID before inject: {id(presentation)}")
+
             for image_key, alt_text in alt_text_mapping.items():
-                if image_key in image_identifiers:
-                    # Direct key match
-                    identifier, shape = image_identifiers[image_key]
-                    self._inject_alt_text_single(shape, alt_text, identifier)
-                    matched_keys.append(image_key)
+                shape = image_identifiers.get(image_key)
+                logger.info(f"WILL_WRITE key={image_key} has_shape={bool(shape)} mode={self.mode}")
+                if not shape:
+                    logger.info(f"NO_SHAPE for {image_key}, checking fallback matching...")
+                # Add explicit trace logging for all write attempts
+                if image_key not in image_identifiers:
+                    logger.debug(f"SKIP: no shape found for {image_key}")
                 else:
-                    # SURGICAL FIX A: Try multi-variant key matching (0-based/1-based, shape/shapeid)
-                    variant_match = self._try_multi_variant_key_matching(image_key, image_identifiers)
-                    if variant_match:
-                        identifier, shape = variant_match
+                    logger.debug(f"-> WILL WRITE for {image_key}: '{alt_text[:80]}...' (mode={self.mode})")
+
+                try:
+                    if image_key in image_identifiers:
+                        # Direct key match (exact hash match)
+                        identifier, shape = image_identifiers[image_key]
                         self._inject_alt_text_single(shape, alt_text, identifier)
                         matched_keys.append(image_key)
-                        logger.info(f"Successfully matched via multi-variant key matching: {image_key} -> {identifier.image_key}")
                     else:
-                        # Try general fallback injection methods for unmatched keys
-                        if self._try_fallback_injection(presentation, image_key, alt_text):
-                            matched_keys.append(image_key)
-                            logger.info(f"Successfully injected via fallback method: {image_key}")
-                        else:
-                            logger.warning(f"Could not find image for key (even with fallback): {image_key}")
-                            unmatched_keys.append(image_key)
+                        # Try robust key parsing that ignores hash for matching
+                        matched = False
+
+                        try:
+                            # Parse key to get stable slide+shape identifiers
+                            slide_idx, shape_idx = PPTXImageIdentifier.from_key(image_key).slide_idx, PPTXImageIdentifier.from_key(image_key).shape_idx
+
+                            # Find any identifier with matching slide+shape, ignoring hash
+                            for available_key, (identifier, shape) in image_identifiers.items():
+                                if identifier.slide_idx == slide_idx and identifier.shape_idx == shape_idx:
+                                    # Found a shape match by stable identifiers
+                                    self._inject_alt_text_single(shape, alt_text, identifier)
+                                    matched_keys.append(image_key)
+                                    matched = True
+                                    logger.info(f"Successfully matched via stable slide+shape ID (ignoring hash): {image_key} -> {available_key}")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Could not parse key for stable matching: {image_key}, {e}")
+
+                        if not matched:
+                            # SURGICAL FIX A: Try multi-variant key matching (0-based/1-based, shape/shapeid)
+                            variant_match = self._try_multi_variant_key_matching(image_key, image_identifiers)
+                            if variant_match:
+                                identifier, shape = variant_match
+                                self._inject_alt_text_single(shape, alt_text, identifier)
+                                matched_keys.append(image_key)
+                                logger.info(f"Successfully matched via multi-variant key matching: {image_key} -> {identifier.image_key}")
+                            else:
+                                # Try key-based fallback injection (more precise than general fallback)
+                                if self._write_alt_by_key(image_key, alt_text):
+                                    matched_keys.append(image_key)
+                                    logger.info(f"Successfully injected via key-based fallback: {image_key}")
+                                elif self._try_fallback_injection(presentation, image_key, alt_text):
+                                    matched_keys.append(image_key)
+                                    logger.info(f"Successfully injected via general fallback method: {image_key}")
+                                else:
+                                    logger.warning(f"Could not find image for key (even with fallback): {image_key}")
+                                    unmatched_keys.append(image_key)
+
+                except Exception as e:
+                    logger.error(f"Error processing key {image_key}: {e}")
+                    self.statistics['failed'] += 1
+                    unmatched_keys.append(image_key)
             
             # SURGICAL FIX A: Generated vs matched counter with unmatched examples
             generated_count = len(alt_text_mapping)
@@ -855,14 +1090,25 @@ class PPTXAltTextInjector:
             
             # Save presentation
             output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Get file size before save (if exists)
+            size_before = output_path.stat().st_size if output_path.exists() else 0
+            logger.info(f"PRS_ID saved: {id(presentation)}")
             presentation.save(str(output_path))
+            size_after = output_path.stat().st_size
+
+            logger.info(f"📁 SAVE COMPLETE: {output_path}")
+            logger.info(f"📁 File size: {size_before} -> {size_after} bytes")
             
             # Create result summary
+            # Synchronize legacy statistics before returning
+            self._sync_legacy_statistics()
+            
             result = {
                 'success': True,
                 'input_file': str(pptx_path),
                 'output_file': str(output_path),
-                'statistics': self.injection_stats.copy(),
+                'statistics': self.statistics.copy(),
                 'errors': []
             }
             
@@ -873,13 +1119,19 @@ class PPTXAltTextInjector:
             error_msg = f"Failed to inject ALT text: {str(e)}"
             logger.error(error_msg, exc_info=True)
             
+            # Synchronize statistics even in error case
+            self._sync_legacy_statistics()
+            
             return {
                 'success': False,
                 'input_file': str(pptx_path),
                 'output_file': str(output_path),
-                'statistics': self.injection_stats.copy(),
+                'statistics': self.statistics.copy(),
                 'errors': [error_msg]
             }
+        finally:
+            # Restore original mode
+            self.mode = original_mode
     
     def _build_image_identifier_mapping(self, presentation: Presentation) -> Dict[str, Tuple[PPTXImageIdentifier, Any]]:
         """
@@ -907,7 +1159,7 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   Images found on slide {slide_idx + 1}: {len(images_found)}")
             
             for identifier, shape in images_found:
-                self.injection_stats['total_images'] += 1
+                self.statistics['total_images'] += 1
                 mapping[identifier.image_key] = (identifier, shape)
                 
                 # Log detailed shape information
@@ -1407,6 +1659,84 @@ class PPTXAltTextInjector:
         logger.debug(f"All fallback methods failed for {image_key}")
         return False
     
+    def _write_alt_by_key(self, image_key: str, text: str) -> bool:
+        """
+        Write ALT text to the specific shape identified by the image key.
+        This ensures fallback text goes to the correct shape, not just any shape.
+        
+        Args:
+            image_key: Stable image key (e.g., "slide_2_shapeid_10_hash_abc123")
+            text: ALT text to write
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Parse the image key to get slide and shape info
+            identifier = PPTXImageIdentifier.from_key(image_key)
+            
+            # Get the presentation (should be available in current context)
+            if not hasattr(self, 'prs') or self.prs is None:
+                logger.error(f"No presentation available for key-based writing: {image_key}")
+                self.statistics['failed'] += 1
+                return False
+            
+            # Get the slide
+            if identifier.slide_idx >= len(self.prs.slides):
+                logger.error(f"Slide index {identifier.slide_idx} out of range for {image_key}")
+                self.statistics['failed'] += 1
+                return False
+                
+            slide = self.prs.slides[identifier.slide_idx]
+            
+            # Find the target shape by shape_id
+            target = None
+            shape_id = identifier.shape_idx
+            
+            # Try to find by shape_id first
+            for shp in slide.shapes:
+                if hasattr(shp, 'shape_id') and shp.shape_id == shape_id:
+                    target = shp
+                    break
+            
+            # If not found by shape_id, try XML-based matching
+            if not target:
+                for shp in slide.shapes:
+                    try:
+                        el = getattr(shp, "_element", None)
+                        if el is not None:
+                            # Look for cNvPr with matching id
+                            cnvpr_nodes = _safe_xpath(el, ".//p:cNvPr", PPTX_NSMAP)
+                            for cnvpr in cnvpr_nodes:
+                                cnvpr_id = cnvpr.get("id")
+                                if cnvpr_id and int(cnvpr_id) == shape_id:
+                                    target = shp
+                                    break
+                            if target:
+                                break
+                    except Exception:
+                        continue
+            
+            if not target:
+                logger.warning(f"Could not find target shape for {image_key} (shape_id: {shape_id})")
+                self.statistics['failed'] += 1
+                return False
+            
+            # Write the ALT text using the unified writer
+            success = self._inject_alt(target, text, image_key, source="fallback_key_based")
+            if success:
+                logger.info(f"✅ Successfully wrote ALT text via key-based targeting: {image_key}")
+                self.statistics['success'] += 1
+                return True
+            else:
+                logger.warning(f"❌ Key-based ALT writing was skipped for {image_key}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in key-based ALT writing for {image_key}: {e}")
+            self.statistics['failed'] += 1
+            return False
+    
     def _try_relationship_based_injection(self, presentation: Presentation, identifier: PPTXImageIdentifier, alt_text: str) -> bool:
         """
         Try to inject ALT text by finding images through presentation relationships.
@@ -1457,6 +1787,19 @@ class PPTXAltTextInjector:
             bool: True if successful
         """
         try:
+            # APPLY CENTRALIZED GATE - block templated strings
+            policy = self.config_manager.get_fallback_policy()
+            quality_flags = {
+                "is_generated": False,
+                "is_fallback": True  # Relationship injection is typically a fallback
+            }
+            
+            gated_text = apply_for_ppt_injection(alt_text, "shape", quality_flags, policy, None)
+            if gated_text is None:
+                logger.debug(f"Relationship injection blocked by centralized gate: {alt_text[:50]}...")
+                return False
+            
+            alt_text = gated_text
             # Access the slide's XML and look for elements with this relationship ID
             slide_xml = slide._element
             
@@ -1469,16 +1812,17 @@ class PPTXAltTextInjector:
                 # Find the parent cNvPr element where we can set the description
                 parent_elements = _safe_xpath(blip_element, 'ancestor::*')
                 for parent in reversed(parent_elements):  # Start from closest ancestor
-                    cnvpr_elements = _safe_xpath(parent, './/pic:cNvPr | .//p:cNvPr', 
-                                                {'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
+                    cnvpr_elements = _safe_xpath(parent, './/a:cNvPr | .//p:cNvPr',
+                                                {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
                                                  'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'})
                     
                     if cnvpr_elements:
                         cnvpr_element = cnvpr_elements[0]
                         # Verify this matches our identifier if possible
                         if self._verify_element_matches_identifier(cnvpr_element, identifier):
-                            # GREMLIN 1 FIX: Write exact final_alt without normalization
-                            cnvpr_element.set('descr', alt_text)
+                            # GREMLIN 1 FIX: Write exact final_alt with safe finalization
+                            finalized_text = self._finalize_alt(alt_text)
+                            cnvpr_element.set('descr', finalized_text)
                             
                             # GREMLIN 1 FIX: Post-write read-back assertion
                             actual_written = cnvpr_element.get('descr', '')
@@ -1536,6 +1880,19 @@ class PPTXAltTextInjector:
             bool: True if successful
         """
         try:
+            # APPLY CENTRALIZED GATE - block templated strings
+            policy = self.config_manager.get_fallback_policy()
+            quality_flags = {
+                "is_generated": False,
+                "is_fallback": True  # XML injection is typically a fallback
+            }
+            
+            gated_text = apply_for_ppt_injection(alt_text, "shape", quality_flags, policy, None)
+            if gated_text is None:
+                logger.debug(f"XML injection blocked by centralized gate: {alt_text[:50]}...")
+                return False
+            
+            alt_text = gated_text
             logger.debug(f"Trying XML-based injection for slide {identifier.slide_idx}")
             
             if identifier.slide_idx >= len(presentation.slides):
@@ -1544,15 +1901,16 @@ class PPTXAltTextInjector:
             slide = presentation.slides[identifier.slide_idx]
             slide_xml = slide._element
             
-            # Look for all pic:cNvPr elements (picture non-visual properties)
-            cnvpr_elements = _safe_xpath(slide_xml, './/pic:cNvPr',
-                                           {'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'})
+            # Look for all a:cNvPr elements (drawingML non-visual properties)
+            cnvpr_elements = _safe_xpath(slide_xml, './/a:cNvPr',
+                                           {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
             
             # Try to match by position or other identifying characteristics
             for i, cnvpr in enumerate(cnvpr_elements):
                 if self._element_matches_shape_index(cnvpr, identifier.shape_idx, i):
-                    # GREMLIN 1 FIX: Write exact final_alt without normalization
-                    cnvpr.set('descr', alt_text)
+                    # GREMLIN 1 FIX: Write exact final_alt with safe finalization
+                    finalized_text = self._finalize_alt(alt_text)
+                    cnvpr.set('descr', finalized_text)
                     
                     # GREMLIN 1 FIX: Post-write read-back assertion
                     actual_written = cnvpr.get('descr', '')
@@ -1592,8 +1950,9 @@ class PPTXAltTextInjector:
             # Parse the complex index and try to match the last component
             parts = target_shape_idx.split('_')
             try:
-                last_index = int(parts[-1])
-                return current_index == last_index
+                if parts:  # Ensure parts is not empty
+                    last_index = int(parts[-1])
+                    return current_index == last_index
             except ValueError:
                 pass
         
@@ -1638,15 +1997,20 @@ class PPTXAltTextInjector:
         """
         PHASE 1.1 HOTFIX: Route all injection through single source of truth.
         This function is now just a wrapper around _inject_alt().
-        
+
         Args:
             shape: Picture shape to inject ALT text into
             alt_text: ALT text to inject
             identifier: Image identifier for logging
-            
+
         Returns:
             bool: True if injection was successful
         """
+        # Belt-and-suspenders: skip injection entirely if the post-gate ALT is empty
+        if not alt_text or not alt_text.strip():
+            logger.info(f"ALT is empty after gating; skipping injection for {identifier.image_key}")
+            return False
+
         try:
             logger.debug(f"🔍 Processing injection for {identifier.image_key}")
             logger.debug(f"   Raw ALT text: '{alt_text}'")
@@ -1655,28 +2019,31 @@ class PPTXAltTextInjector:
             is_processed, processed_by = self._is_element_processed(identifier.image_key)
             if is_processed:
                 logger.debug(f"FENCE: {identifier.image_key} already processed by {processed_by}, skipping")
-                self.injection_stats['skipped_existing'] += 1
+                self.statistics['skipped_existing'] += 1
                 return False
             
-            # Classify this element 
-            element_type = getattr(identifier, 'element_type', 'generic')
-            self._classify_element(identifier.image_key, element_type)
-            
             # Check if we should skip this ALT text (before going to single source of truth)
-            if self._should_skip_alt_text(alt_text):
+            gate_allowed = not self._should_skip_alt_text(alt_text)
+            logger.info(f"GATE key={identifier.image_key} allowed={gate_allowed}")
+            if not gate_allowed:
                 logger.debug(f"❌ DECISION: Skipping invalid ALT text for {identifier.image_key}: '{alt_text}'")
                 logger.debug(f"   Reason: ALT text matches skip patterns")
-                self.injection_stats['skipped_invalid'] += 1
+                self.statistics['skipped_invalid'] += 1
                 return False
             
             # PHASE 1.1 HOTFIX: Use single source of truth for ALL injection
             # This replaces all the old logic with the idempotent injector
+            logger.debug(f"ATTEMPTING WRITE for {identifier.image_key} via _inject_alt() (mode={self.mode})")
             success = self._inject_alt(shape, alt_text, identifier.image_key, "generator")
             
             # Update stats based on result
             if success:
                 logger.debug(f"✅ Successfully injected via single source of truth")
-                self.injection_stats['injected_successfully'] += 1
+                self.statistics['injected_successfully'] += 1
+
+                # ONLY classify element as processed after successful write
+                element_type = getattr(identifier, 'element_type', 'generic')
+                self._classify_element(identifier.image_key, element_type)
             else:
                 logger.debug(f"➡️  Skipped by idempotent guard (already equivalent or processed)")
                 # Note: _inject_alt logs the specific reason for skipping
@@ -1685,7 +2052,7 @@ class PPTXAltTextInjector:
                 
         except Exception as e:
             logger.error(f"💥 Error injecting ALT text for {identifier.image_key}: {e}")
-            self.injection_stats['failed_injection'] += 1
+            self.statistics['failed_injection'] += 1
             return False
     
     def _should_inject_alt_text(self, existing_alt_text: str, new_alt_text: str, image_key: str) -> Tuple[bool, str]:
@@ -1796,12 +2163,22 @@ class PPTXAltTextInjector:
             logger.info(f"🔍 DEBUG:   Using shape.descr property (modern approach)")
             logger.info(f"🔍 DEBUG:   Setting ALT text: '{alt_text}'")
             
-            # Set description (full ALT text) - normalization already applied in _inject_alt_text_single
-            shape.descr = alt_text
+            # DUAL WRITE: Set both descr and alternative_text for Office compatibility
+            # Apply safe finalization
+            finalized_text = self._finalize_alt(alt_text)
+            shape.descr = finalized_text
+
+            # Also set alternative_text property if available (covers various Office readers)
+            if hasattr(shape, 'alternative_text'):
+                shape.alternative_text = finalized_text
+                logger.info(f"🔍 DEBUG:   Also set alternative_text property")
+            elif hasattr(shape, 'alt_text'):
+                shape.alt_text = finalized_text
+                logger.info(f"🔍 DEBUG:   Also set alt_text property")
             
             # Set title (short version for Reading Order)
             title_text = self._create_title_from_alt_text(alt_text)
-            if hasattr(shape, 'title'):
+            if title_text and hasattr(shape, 'title'):
                 shape.title = title_text
                 logger.info(f"🔍 DEBUG:   Setting title: '{title_text}'")
             
@@ -1817,19 +2194,34 @@ class PPTXAltTextInjector:
         """Inject via direct XML cNvPr element manipulation."""
         logger.info(f"🔍 DEBUG: XML PATH - cNvPr element injection")
         try:
+            # APPLY CENTRALIZED GATE - block templated strings
+            policy = self.config_manager.get_fallback_policy()
+            quality_flags = {
+                "is_generated": False,
+                "is_fallback": True  # XML cNvPr injection is typically a fallback
+            }
+            
+            gated_text = apply_for_ppt_injection(alt_text, "shape", quality_flags, policy, shape)
+            if gated_text is None:
+                logger.debug(f"XML cNvPr injection blocked by centralized gate: {alt_text[:50]}...")
+                return False
+            
+            alt_text = gated_text
             logger.info(f"🔍 DEBUG:   Accessing shape._element._nvXxPr.cNvPr")
             cNvPr = shape._element._nvXxPr.cNvPr
             logger.info(f"🔍 DEBUG:   cNvPr element found: {cNvPr}")
             logger.info(f"🔍 DEBUG:   cNvPr tag: {getattr(cNvPr, 'tag', 'unknown')}")
             logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
             
-            # Set description (full ALT text)
-            cNvPr.set('descr', alt_text)
+            # Set description (full ALT text) - apply safe finalization
+            finalized_text = self._finalize_alt(alt_text)
+            cNvPr.set('descr', finalized_text)
             
             # Set title (short version for Reading Order)
             title_text = self._create_title_from_alt_text(alt_text)
-            cNvPr.set('title', title_text)
-            logger.info(f"🔍 DEBUG:   Setting title attribute: '{title_text}'")
+            if title_text:
+                cNvPr.set('title', title_text)
+                logger.info(f"🔍 DEBUG:   Setting title attribute: '{title_text}'")
             
             # Verify it was set
             actual_value = cNvPr.get('descr', '')
@@ -1843,11 +2235,26 @@ class PPTXAltTextInjector:
         """Inject via XML element attribute (current approach)."""
         logger.info(f"🔍 DEBUG: XML PATH - Direct element injection")
         try:
+            # APPLY CENTRALIZED GATE - block templated strings
+            policy = self.config_manager.get_fallback_policy()
+            quality_flags = {
+                "is_generated": False,
+                "is_fallback": True  # XML element injection is typically a fallback
+            }
+            
+            gated_text = apply_for_ppt_injection(alt_text, "shape", quality_flags, policy, shape)
+            if gated_text is None:
+                logger.debug(f"XML element injection blocked by centralized gate: {alt_text[:50]}...")
+                return False
+            
+            alt_text = gated_text
             logger.info(f"🔍 DEBUG:   Accessing shape._element")
             logger.info(f"🔍 DEBUG:   Element: {shape._element}")
             logger.info(f"🔍 DEBUG:   Element tag: {getattr(shape._element, 'tag', 'unknown')}")
             logger.info(f"🔍 DEBUG:   Setting descr attribute: '{alt_text}'")
-            shape._element.set('descr', alt_text)
+            # Apply safe finalization
+            finalized_text = self._finalize_alt(alt_text)
+            shape._element.set('descr', finalized_text)
             
             # Verify it was set
             actual_value = shape._element.get('descr', '')
@@ -1861,6 +2268,20 @@ class PPTXAltTextInjector:
         """Inject via XML cNvPr element for general shapes (not just pictures)."""
         logger.info(f"🔍 DEBUG: XML PATH - Shape cNvPr element injection")
         try:
+            # APPLY CENTRALIZED GATE - block templated strings
+            policy = self.config_manager.get_fallback_policy()
+            quality_flags = {
+                "is_generated": False,
+                "is_fallback": True  # XML shape cNvPr injection is typically a fallback
+            }
+            
+            gated_text = apply_for_ppt_injection(alt_text, "shape", quality_flags, policy, shape)
+            if gated_text is None:
+                logger.debug(f"XML shape cNvPr injection blocked by centralized gate: {alt_text[:50]}...")
+                return False
+            
+            alt_text = gated_text
+            
             # Look for cNvPr elements in the shape's XML structure
             if not hasattr(shape, '_element'):
                 logger.info(f"🔍 DEBUG:   Shape has no _element attribute")
@@ -1879,13 +2300,14 @@ class PPTXAltTextInjector:
             
             namespaces = {
                 'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+                'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
                 'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
             }
             
             # Try different cNvPr paths for different shape types
             cnvpr_paths = [
                 './/p:cNvPr',           # Most general - any cNvPr element
-                './/pic:cNvPr',         # Picture-specific
+                './/a:cNvPr',           # DrawingML cNvPr (most common for shapes/pictures)
                 './p:nvSpPr/p:cNvPr',   # Shape-specific
                 './p:nvPicPr/p:cNvPr',  # Picture-specific
                 './p:nvCxnSpPr/p:cNvPr', # Connector-specific
@@ -1910,14 +2332,16 @@ class PPTXAltTextInjector:
                         normalized_existing = self._normalize_for_comparison(existing_descr)
                         
                         if normalized_new != normalized_existing or not existing_descr:
-                            # Set description (full ALT text)
-                            cnvpr_element.set('descr', alt_text)
+                            # Set description (full ALT text) with safe finalization
+                            finalized_text = self._finalize_alt(alt_text)
+                            cnvpr_element.set('descr', finalized_text)
                             logger.info(f"🔍 DEBUG:   Updated descr: '{existing_descr}' -> '{alt_text}'")
                             
                             # Set title (short version for Reading Order)
                             title_text = self._create_title_from_alt_text(alt_text)
-                            cnvpr_element.set('title', title_text)
-                            logger.info(f"🔍 DEBUG:   Updated title: '{existing_title}' -> '{title_text}'")
+                            if title_text:
+                                cnvpr_element.set('title', title_text)
+                                logger.info(f"🔍 DEBUG:   Updated title: '{existing_title}' -> '{title_text}'")
                         else:
                             logger.info(f"🔍 DEBUG:   Skipping update - ALT text unchanged: '{existing_descr}'")
                         
@@ -1943,6 +2367,20 @@ class PPTXAltTextInjector:
     
     def _inject_via_xml_fallback(self, shape, alt_text: str) -> bool:
         """Fallback XML injection method."""
+        # APPLY CENTRALIZED GATE - block templated strings
+        policy = self.config_manager.get_fallback_policy()
+        quality_flags = {
+            "is_generated": False,
+            "is_fallback": True  # XML fallback injection is always a fallback
+        }
+        
+        gated_text = apply_for_ppt_injection(alt_text, "shape", quality_flags, policy, shape)
+        if gated_text is None:
+            logger.debug(f"XML fallback injection blocked by centralized gate: {alt_text[:50]}...")
+            return False
+        
+        alt_text = gated_text
+        
         elements_to_try = [
             ('shape._element', lambda: shape._element),
             ('shape._element._nvXxPr', lambda: shape._element._nvXxPr),
@@ -2158,6 +2596,23 @@ class PPTXAltTextInjector:
                     logger.info(f"🔍 DEBUG: ❌ FAILED: {image_key}")
                     logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
                     logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
+                    
+                    # REPAIR PASS: Check if actual text matches blocked fallback patterns
+                    if self._is_blocked_fallback_pattern(current_alt_text):
+                        logger.info(f"🔧 REPAIR: Detected blocked fallback pattern, attempting repair...")
+                        repair_success = self._inject_alt(shape, expected_alt_text, image_key, "repair_injected")
+                        if repair_success:
+                            # Re-verify after repair
+                            repaired_text = self._get_existing_alt_text(shape)
+                            if repaired_text == expected_alt_text:
+                                logger.info(f"🔧 REPAIR: ✅ Successfully repaired {image_key}")
+                                successful_injections += 1
+                                continue
+                            else:
+                                logger.warning(f"🔧 REPAIR: ❌ Repair verification failed for {image_key}")
+                        else:
+                            logger.warning(f"🔧 REPAIR: ❌ Repair injection failed for {image_key}")
+                    
                     failed_injections += 1
                     
                     # Additional debug info for failed injections
@@ -2236,18 +2691,30 @@ class PPTXAltTextInjector:
     def _create_title_from_alt_text(self, alt_text: str) -> str:
         """
         Create a short title from the full ALT text for PowerPoint Reading Order.
-        
+
         Args:
             alt_text: Full ALT text
-            
+
         Returns:
             Shortened title (60-80 characters)
         """
-        if not alt_text or not alt_text.strip():
-            return ""
-        
-        # Remove common prefixes to make title more concise
+        if not alt_text:
+            return ""  # guard 1
+
         clean_text = alt_text.strip()
+        if not clean_text:
+            return ""  # guard 2
+
+        # Optionally strip known prefixes your gate might leave behind
+        for prefix in ("FALLBACK:",):
+            if clean_text.upper().startswith(prefix):
+                clean_text = clean_text[len(prefix):].strip(" .:-–—")
+                break
+
+        if not clean_text:
+            return ""  # guard 3
+
+        # Remove common prefixes to make title more concise
         prefixes_to_remove = [
             "This is a PowerPoint shape. It is ",
             "This is a PowerPoint ",
@@ -2255,15 +2722,17 @@ class PPTXAltTextInjector:
             "A PowerPoint ",
             "PowerPoint "
         ]
-        
+
         for prefix in prefixes_to_remove:
             if clean_text.startswith(prefix):
-                clean_text = clean_text[len(prefix):]
+                clean_text = clean_text[len(prefix):].strip()
                 break
-        
-        # Capitalize first letter
-        if clean_text:
-            clean_text = clean_text[0].upper() + clean_text[1:]
+
+        if not clean_text:
+            return ""  # guard 4 after prefix removal
+
+        # Safe capitalization using _finalize_alt
+        clean_text = self._finalize_alt(clean_text)
         
         # Truncate to reasonable title length (60-80 chars)
         max_title_length = 70

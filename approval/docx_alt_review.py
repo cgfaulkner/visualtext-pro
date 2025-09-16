@@ -1,6 +1,7 @@
 # approval/docx_alt_review.py
 from pathlib import Path
 from datetime import datetime
+import logging
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -9,6 +10,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+import re
 
 def set_cell_margins(cell, left=None, right=None, top=None, bottom=None):
     """Set cell margins in twips (1/20 pt). 180 ≈ 0.125"."""
@@ -171,8 +173,8 @@ def get_current_alt_from_shape(shape):
     try:
         if hasattr(shape, '_element'):
             # Look for cNvPr in picture elements
-            cNvPr_elements = shape._element.xpath('.//pic:cNvPr', namespaces={
-                'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+            cNvPr_elements = shape._element.xpath('.//a:cNvPr', namespaces={
+                'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'
             })
             if cNvPr_elements:
                 cNvPr = cNvPr_elements[0]
@@ -233,7 +235,7 @@ def pick_alts_for_report(key, final_alt_map, existing_alt_from_ppt):
         return existing, existing  # Current, Suggested
     return "", generated
 
-def generate_alt_review_doc(processed_images, lecture_title: str, output_path: str, original_pptx_path: str = None, final_alt_map: dict = None):
+def generate_alt_review_doc(processed_images, lecture_title: str, output_path: str, original_pptx_path: str = None, final_alt_map: dict = None, status_map: dict = None):
     """
     Generate a professional matrix-style accessibility review document.
     
@@ -266,7 +268,28 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     title_run = title_para.add_run(f"{lecture_title} – Accessibility ALT Review")
     set_font_properties(title_run, size=16, bold=True)
     title_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    title_para.paragraph_format.space_after = Pt(12)
+    title_para.paragraph_format.space_after = Pt(8)
+    
+    # Add fallback policy info to header
+    try:
+        # Try to get policy from config or status_map
+        fallback_policy = "none"  # default
+        if status_map:
+            # Look for policy info in status_map
+            for status_info in status_map.values():
+                if isinstance(status_info, dict) and 'policy' in status_info:
+                    fallback_policy = status_info['policy']
+                    break
+        
+        policy_para = doc.add_paragraph()
+        policy_run = policy_para.add_run(f"Fallback Policy: {fallback_policy}")
+        set_font_properties(policy_run, size=10, italic=True, color="666666")
+        policy_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        policy_para.paragraph_format.space_after = Pt(12)
+    except Exception:
+        # Just add a small spacer if policy info not available
+        spacer_para = doc.add_paragraph()
+        spacer_para.paragraph_format.space_after = Pt(4)
     
     # Intro paragraph
     intro_para = doc.add_paragraph()
@@ -282,10 +305,23 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     identical_count = 0
     missing_current = 0
     
+    # Debug: Log key mappings to help with alignment
+    logger = logging.getLogger(__name__)
+    logger.info(f"Processing {len(processed_images)} images for review document")
+    if final_alt_map:
+        logger.info(f"final_alt_map contains {len(final_alt_map)} entries")
+        logger.debug(f"final_alt_map keys: {list(final_alt_map.keys())[:5]}...")  # Show first 5 keys
+    if status_map:
+        logger.info(f"status_map contains {len(status_map)} entries")
+        logger.debug(f"status_map keys: {list(status_map.keys())[:5]}...")  # Show first 5 keys
+    
     for item in processed_images:
         # Get the image key and look up original ALT text
         image_key = item.get('image_key', '')
         original_alt = original_alt_cache.get(image_key, '').strip() if image_key else ''
+        
+        # Debug: Log key for troubleshooting
+        logger.debug(f"Processing image_key: {image_key}")
         
         # Use canonical final_alt_map if provided, otherwise fall back to processed_images
         if final_alt_map:
@@ -316,11 +352,36 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     
     total_images = len(processed_images)
     
+    # Calculate bucket totals for honest reporting
+    bucket_counts = {
+        'preserved': 0, 'generated': 0, 'needs_alt': 0, 
+        'fallback_injected': 0, 'decorative': 0
+    }
+    
+    for item in processed_alt_data:
+        current_alt = item.get('current_alt_display', '')
+        suggested_alt = item.get('suggested_alt_display', '')
+        
+        # Derive status for counting based on same logic as status derivation
+        if item.get('is_decorative', False):
+            bucket_counts['decorative'] += 1
+        elif current_alt != "[No ALT text]":
+            if suggested_alt not in ["[No suggestion]", "[No ALT text]", ""] and current_alt == suggested_alt:
+                bucket_counts['generated'] += 1
+            else:
+                bucket_counts['preserved'] += 1
+        elif suggested_alt.startswith("FALLBACK:"):
+            bucket_counts['fallback_injected'] += 1
+        else:
+            bucket_counts['needs_alt'] += 1
+    
+    # Summary with bucket totals
     summary_para = doc.add_paragraph()
+    bucket_text = (f"Preserved: {bucket_counts['preserved']} • Generated: {bucket_counts['generated']} • "
+                  f"Fallback: {bucket_counts['fallback_injected']} • Needs ALT: {bucket_counts['needs_alt']} • "
+                  f"Decorative: {bucket_counts['decorative']}")
     summary_run = summary_para.add_run(
-        f"Total images: {total_images}   •   "
-        f"Identical current/suggested: {identical_count}   •   "
-        f"Missing current ALT: {missing_current}"
+        f"Total elements: {total_images}   |   {bucket_text}"
     )
     set_font_properties(summary_run, size=10, color="666666")
     summary_para.paragraph_format.space_after = Pt(12)
@@ -329,16 +390,17 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     table = doc.add_table(rows=1, cols=6)
     table.autofit = False  # Critical: let our fixed widths win
     
-    # Columns: [Slide / Img, Thumbnail, Current ALT, Suggested ALT, Status, Decorative]  
-    # 8.5" page - 1.0" margins = 7.5" usable width
-    col_widths = [Inches(0.80), Inches(1.30), Inches(1.90), Inches(1.90), Inches(1.00), Inches(0.60)]
+    # Columns: [Slide / ID, Thumbnail, Current, Suggested, Status, Decor.]  
+    # 8.5" page - 1.0" margins = 7.5" usable width, optimized for shorter headers
+    col_widths = [Inches(0.8), Inches(0.8), Inches(2.2), Inches(2.2), Inches(1.0), Inches(0.5)]
     for i, w in enumerate(col_widths):
         table.columns[i].width = w
         for cell in table.columns[i].cells:
             cell.width = w
     
     hdr = table.rows[0].cells
-    header_names = ["Slide / Img", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Status", "Decorative"]
+    # Shortened labels to prevent wrap
+    header_names = ["Slide / ID", "Thumbnail", "Current", "Suggested", "Status", "Decor."]
     
     for i, name in enumerate(header_names):
         hdr[i].text = name
@@ -346,6 +408,9 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
         p = hdr[i].paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         hdr[i].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        # Tighten header font to prevent wrapping
+        for run in p.runs:
+            run.font.size = Pt(10)
         p.paragraph_format.keep_together = True
         p.paragraph_format.keep_with_next = True
         
@@ -464,45 +529,43 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
         para.paragraph_format.space_after = Pt(6)
         para.paragraph_format.line_spacing = 1.0
         
-        # Get status information from fallback policies
+        # Get status information from item, status_map, or derive it
         status_info = item.get('status_info', {})
-        status_display = status_info.get('status', 'Generated')
+        status_display = status_info.get('status', '')
         
-        # Import fallback policies to get display helper
-        try:
-            from fallback_policies import get_review_status_display
-            status_text = get_review_status_display(status_info)
-        except ImportError:
-            # Fallback display logic
-            if status_display == 'generated':
-                status_text = 'Generated'
-            elif status_display == 'preserved':
-                status_text = 'Preserved'
-            elif status_display.startswith('NEEDS ALT'):
-                status_text = 'Needs ALT'
-            elif status_display.startswith('AUTO-LOWCONF'):
-                status_text = 'Low Confidence'
-            elif status_display == 'FALLBACK_INJECTED':
-                status_text = 'Fallback'
-            else:
-                status_text = status_display
+        # Try to get status from status_map using image_key
+        if not status_display and status_map and image_key:
+            status_info = status_map.get(image_key, {})
+            status_display = status_info.get('status', '')
+        
+        # If no status provided, derive it from current state
+        if not status_display:
+            status_display, status_text = _derive_status_from_current_state(
+                current_alt_display, suggested_alt_display, item
+            )
+        else:
+            # Map provided status to user-friendly text
+            status_text = _map_status_to_display(status_display)
         
         run = para.add_run(status_text)
         
-        # Color code the status
-        if 'NEEDS ALT' in status_display or 'needs' in status_text.lower():
+        # Color code the status based on mapped display text
+        status_lower = status_text.lower()
+        if 'needs alt' in status_lower:
             set_font_properties(run, size=9, color="CC0000")  # Red for needs attention
             shade_cell(cell, "FFE6E6")
-        elif 'FALLBACK' in status_display or 'fallback' in status_text.lower():
+        elif 'fallback' in status_lower:
             set_font_properties(run, size=9, color="FF8C00")  # Orange for fallback
             shade_cell(cell, "FFF2E6")
-        elif 'LOWCONF' in status_display or 'low confidence' in status_text.lower():
-            set_font_properties(run, size=9, color="CC8800")  # Yellow-orange for low confidence
-            shade_cell(cell, "FFFAE6")
-        elif 'preserved' in status_text.lower():
+        elif 'decorative' in status_lower:
+            set_font_properties(run, size=9, color="888888")  # Gray for decorative
+            shade_cell(cell, "F0F0F0")
+        elif 'preserved' in status_lower:
             set_font_properties(run, size=9, color="0066CC")  # Blue for preserved
-        else:
+        elif 'generated' in status_lower:
             set_font_properties(run, size=9, color="006600")  # Green for generated
+        else:
+            set_font_properties(run, size=9, color="000000")  # Black for unknown
         
         # Column 5: Decorative checkbox (single line, centered)
         cell = cells[5]
@@ -521,3 +584,69 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
     return output_path
+
+
+def _map_status_to_display(status_display: str) -> str:
+    """Map internal status codes to user-friendly display text."""
+    status_mapping = {
+        'preserved': 'Preserved',
+        'generated': 'Generated', 
+        'fallback_injected': 'Fallback (PPT-gated)',
+        'needs_alt': 'Needs ALT',
+        'decorative_skipped': 'Decorative'
+    }
+    
+    # Handle various status formats
+    if status_display in status_mapping:
+        return status_mapping[status_display]
+    elif status_display.startswith('NEEDS ALT'):
+        return 'Needs ALT'
+    elif status_display.startswith('AUTO-LOWCONF'):
+        return 'Fallback (doc-only)'
+    elif status_display == 'FALLBACK_INJECTED':
+        return 'Fallback (PPT-gated)'
+    else:
+        return status_display.replace('_', ' ').title()
+
+
+def _derive_status_from_current_state(current_alt_display: str, suggested_alt_display: str, item: dict) -> tuple[str, str]:
+    """
+    Derive status when not provided by examining current ALT state.
+    Returns (internal_status, display_text)
+    """
+    # Check if decorative
+    if item.get('is_decorative', False):
+        return 'decorative_skipped', 'Decorative'
+    
+    # Check if current ALT exists
+    has_current = current_alt_display != "[No ALT text]"
+    has_suggested = suggested_alt_display not in ["[No suggestion]", "[No ALT text]", ""]
+    
+    if has_current:
+        # Check if it's a generic PowerPoint fallback
+        current_text = current_alt_display.lower()
+        if any(phrase in current_text for phrase in [
+            "this is a powerpoint shape", 
+            "image of", 
+            "picture", 
+            "graphic",
+            "unknown"
+        ]):
+            return 'fallback_injected', 'Fallback (PPT-gated)'
+        
+        # Check if suggested matches current (generated) or different (preserved)
+        if has_suggested and current_alt_display == suggested_alt_display:
+            return 'generated', 'Generated'
+        else:
+            return 'preserved', 'Preserved'
+    
+    elif has_suggested:
+        # Current is empty but suggestion exists
+        if suggested_alt_display.startswith("FALLBACK:"):
+            return 'needs_alt', 'Fallback (doc-only)'
+        else:
+            return 'needs_alt', 'Needs ALT'
+    
+    else:
+        # No current ALT and no suggestion
+        return 'needs_alt', 'Needs ALT'

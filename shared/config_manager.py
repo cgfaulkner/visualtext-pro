@@ -12,6 +12,9 @@ from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
+# Validator constants
+_VALID_ALT_MODES = {"preserve", "replace"}
+
 
 class ConfigManager:
     """Manages configuration for the accessibility auditor tool."""
@@ -347,7 +350,21 @@ class ConfigManager:
     def get_fallback_policy(self) -> str:
         """Get fallback policy setting."""
         return self.config.get('alt_text_handling', {}).get('fallback_policy', 'none')
-    
+
+    def get_alt_mode(self) -> str:
+        """Get ALT text handling mode (preserve or replace)."""
+        # read from YAML like: alt: { mode: preserve }
+        mode = (self.config.get("alt", {}) or {}).get("mode", "preserve")
+        if mode not in _VALID_ALT_MODES:
+            raise ValueError(f"Invalid alt.mode '{mode}'. Must be one of: {_VALID_ALT_MODES}")
+        return mode
+
+    def override_alt_mode(self, mode: str):
+        """Override ALT text handling mode."""
+        if mode not in _VALID_ALT_MODES:
+            raise ValueError(f"Invalid alt.mode '{mode}'. Must be one of: {_VALID_ALT_MODES}")
+        self.config.setdefault("alt", {})["mode"] = mode
+
     def update_from_cli(self, args: Dict[str, Any]):
         """
         Update configuration from CLI arguments.

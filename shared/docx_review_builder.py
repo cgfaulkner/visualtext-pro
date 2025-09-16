@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 
 def generate_alt_review_doc(
     visual_index_path: str,
-    current_alt_by_key_path: str, 
+    current_alt_by_key_path: str,
     final_alt_map_path: str,
     out_docx: str,
     portrait: bool = True,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    config_manager = None
 ) -> str:
     """
     Generate ALT text review document from clean pipeline artifacts.
@@ -83,7 +84,17 @@ def generate_alt_review_doc(
     
     # Add header and title
     doc_title = title or "ALT Text Review"
-    _add_header_footer(doc, doc_title, Path(out_docx).name)
+
+    # Get mode from config manager if available
+    mode_info = ""
+    if config_manager:
+        try:
+            mode = config_manager.get_alt_mode()
+            mode_info = f" (Mode: {mode})"
+        except:
+            pass
+
+    _add_header_footer(doc, doc_title + mode_info, Path(out_docx).name)
     
     # Add document title
     title_para = doc.add_paragraph()

@@ -23,7 +23,12 @@ def _safe_xpath(element, xpath_expr, namespaces=None):
     try:
         return el.xpath(xpath_expr)  # python-pptx injects namespaces
     except Exception:
-        ns = namespaces or getattr(el, "nsmap", None) or PPTX_NSMAP
+        if namespaces is not None:
+            ns = namespaces
+        elif hasattr(el, "nsmap") and el.nsmap is not None:
+            ns = el.nsmap
+        else:
+            ns = PPTX_NSMAP
         return el.xpath(xpath_expr, namespaces=ns)
 
 
@@ -39,7 +44,9 @@ def read_existing_alt(shape) -> str:
     Prefers @descr, falls back to @title, returns empty string if none.
     """
     try:
-        element = getattr(shape, "_element", None) or getattr(shape, "element", None)
+        element = getattr(shape, "_element", None)
+        if element is None:
+            element = getattr(shape, "element", None)
         if element is None:
             return ""
 

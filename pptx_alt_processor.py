@@ -55,8 +55,9 @@ class PPTXAltProcessor:
     Provides an easy-to-use interface for complete PPTX accessibility processing.
     """
     
-    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False, 
-                 enable_file_logging: bool = True, fallback_policy_override: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False,
+                 enable_file_logging: bool = True, fallback_policy_override: Optional[str] = None,
+                 mode_override: Optional[str] = None):
         """
         Initialize the PPTX ALT text processor.
         
@@ -86,6 +87,19 @@ class PPTXAltProcessor:
         if fallback_policy_override:
             logger.info(f"Overriding fallback policy to: {fallback_policy_override}")
             self.config_manager.config.setdefault('alt_text_handling', {})['fallback_policy'] = fallback_policy_override
+
+        # Apply CLI mode override if provided
+        if mode_override:
+            self.config_manager.override_alt_mode(mode_override)
+            logger.info(f"🛠️ ALT mode overridden to: {mode_override}")
+
+        # Log the active fallback policy at startup
+        active_policy = self.config_manager.get_fallback_policy()
+        logger.info(f"🔧 Active fallback policy: {active_policy}")
+
+        # Log the active ALT mode
+        active_mode = self.config_manager.get_alt_mode()
+        logger.info(f"🔧 Active ALT mode: {active_mode}")
         
         self.pptx_processor = PPTXAccessibilityProcessor(self.config_manager, debug=debug)
         self.alt_injector = PPTXAltTextInjector(self.config_manager)
@@ -984,9 +998,11 @@ Examples:
     parser.add_argument('--config', help='Configuration file path')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     parser.add_argument('--debug', action='store_true', help='Enable detailed debug logging for generation attempts and failures')
-    parser.add_argument('--fallback-policy', choices=['none', 'doc-only', 'ppt-gated'], 
+    parser.add_argument('--fallback-policy', choices=['none', 'doc-only', 'ppt-gated'],
                        help='Override fallback policy for this run (none|doc-only|ppt-gated)')
-    
+    parser.add_argument('--mode', choices=['preserve', 'replace'],
+                       help='Whether to preserve or replace existing ALT text in PPTX (overrides config)')
+
     args = parser.parse_args()
     
     if not args.command:
@@ -996,10 +1012,11 @@ Examples:
     try:
         # Initialize processor
         processor = PPTXAltProcessor(
-            args.config, 
-            args.verbose, 
+            args.config,
+            args.verbose,
             args.debug,
-            fallback_policy_override=args.fallback_policy
+            fallback_policy_override=args.fallback_policy,
+            mode_override=args.mode
         )
         
         if args.command == 'process':
@@ -1086,8 +1103,11 @@ Examples:
                     if not args.approval_doc_only and 'result' in locals() and result.get('final_alt_map'):
                         final_alt_map = result['final_alt_map']
                     
+                    # Use the output PPTX (post-injection) for review doc generation
+                    pptx_for_review = output_path if output_path and not args.approval_doc_only else input_pptx
+                    
                     review_path = make_review_doc(
-                        input_pptx,
+                        pptx_for_review,
                         out_dir,
                         processor.config_manager,
                         opts,

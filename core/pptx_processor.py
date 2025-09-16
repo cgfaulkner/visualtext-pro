@@ -5836,7 +5836,7 @@ class PPTXAccessibilityProcessor:
             presentation.save(temp_path)
             
             # Use injector to perform robust ALT text injection
-            result = injector.inject_alt_text_from_mapping(temp_path, simple_mapping, output_path)
+            result = injector.inject_alt_text_from_mapping(temp_path, simple_mapping, output_path, mode="replace")
             
             # Clean up temp file
             try:
