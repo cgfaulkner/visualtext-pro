@@ -22,6 +22,29 @@ from typing import Dict, Any, Optional, List, Tuple
 from pipeline_artifacts import RunArtifacts
 from alt_manifest import AltManifest, create_instance_key, create_content_key
 
+try:  # Prefer shared helper from dedicated injector module when available
+    from core.pptx_alt_injector import _is_meaningful
+except ImportError:  # pragma: no cover - fallback for environments without core package
+    def _is_meaningful(value: Optional[str]) -> bool:
+        """Return True when the provided ALT text contains meaningful content."""
+        if value is None:
+            return False
+
+        text = value.strip()
+        if not text:
+            return False
+
+        skip_tokens = {
+            "(none)",
+            "n/a",
+            "not reviewed",
+            "undefined",
+            "image.png",
+            "picture",
+            "",
+        }
+        return text.lower() not in skip_tokens
+
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +296,7 @@ def phase3_resolve(artifacts: RunArtifacts) -> Dict[str, Any]:
             logger.warning("No visual_index found - Phase 1 may not have run")
             return {'success': False, 'error': 'No visual index available'}
         
-        # Build final mappings using preserve-first strategy
+        # Build final mappings using preserve-first strategy with meaningfulness checks
         final_alt_map = {}
 
         # Stats tracking
@@ -282,24 +305,33 @@ def phase3_resolve(artifacts: RunArtifacts) -> Dict[str, Any]:
         missing_count = 0
 
         for key in visual_index.keys():
-            existing_alt = current_alt_by_key.get(key, "").strip()
-            generated_alt = generated_alt_by_key.get(key, "").strip()
+            existing_alt = (current_alt_by_key.get(key) or "").strip()
+            generated_alt = (generated_alt_by_key.get(key) or "").strip()
+
+            existing_meaningful = _is_meaningful(existing_alt)
+            generated_meaningful = _is_meaningful(generated_alt)
+
+            if existing_meaningful:
+                final_alt = existing_alt
+                decision = "preserve_existing"
+                preserved_count += 1
+            elif generated_meaningful:
+                final_alt = generated_alt
+                decision = "use_generated"
+                generated_count += 1
+            else:
+                final_alt = ""
+                decision = "no_alt_available"
+                missing_count += 1
 
             final_alt_map[key] = {
                 "existing_alt": existing_alt,
                 "generated_alt": generated_alt,
-                "source_existing": "pptx",
-                "source_generated": "llava",
-                "final_alt": None,
-                "decision": None,
+                "source_existing": "pptx" if existing_meaningful else None,
+                "source_generated": "llava" if generated_meaningful else None,
+                "final_alt": final_alt or None,
+                "decision": decision,
             }
-
-            if existing_alt:
-                preserved_count += 1
-            elif generated_alt:
-                generated_count += 1
-            else:
-                missing_count += 1
 
         # Save final mappings
         artifacts.save_final_alt_map(final_alt_map)
