@@ -498,14 +498,27 @@ class PPTXAltTextInjector:
     
     def _sync_legacy_statistics(self) -> None:
         """Synchronize legacy statistics counters to ensure coverage reports show correct values."""
-        # Update legacy counters to match new counters
-        self.statistics['injected_successfully'] = self.statistics['success']
-        self.statistics['failed_injection'] = self.statistics['failed']
+        # Calculate new enriched statistics
+        preserved_count = self.statistics.get('preserved_existing', 0)
+        generated_count = self.statistics.get('wrote_generated', 0)
+        total_successful = preserved_count + generated_count
+
+        # Update legacy counters to match new enriched counters
+        self.statistics['injected_successfully'] = total_successful
+        self.statistics['success'] = total_successful
+        self.statistics['failed_injection'] = self.statistics.get('failed', 0)
+
         # Validation failures should match skipped + invalid
         self.statistics['validation_failures'] = (
-            self.statistics['skipped_existing'] + 
-            self.statistics['skipped_invalid']
+            self.statistics.get('skipped_existing', 0) +
+            self.statistics.get('skipped_invalid', 0)
         )
+
+        # Log the enriched statistics
+        logger.info(f"📊 ENRICHED STATISTICS:")
+        logger.info(f"   Preserved existing ALT: {preserved_count}")
+        logger.info(f"   Wrote generated ALT: {generated_count}")
+        logger.info(f"   Total successful: {total_successful}")
     
     def _is_blocked_fallback_pattern(self, text: str) -> bool:
         """Check if text matches patterns that should be blocked from PPT."""
@@ -719,7 +732,235 @@ class PPTXAltTextInjector:
         """Compute short hash of text for rerun detection"""
         import hashlib
         return hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]
-    
+
+    def _add_geometric_backfill(self, alt_text_mapping: Dict[str, Any], image_identifiers: Dict[str, Tuple[PPTXImageIdentifier, Any]]) -> Dict[str, Any]:
+        """
+        Add synthesized ALT text for auto-shapes, lines, and geometric elements missing from mapping.
+
+        Args:
+            alt_text_mapping: Existing mapping of image keys to ALT text
+            image_identifiers: All discovered shapes with their identifiers
+
+        Returns:
+            Enhanced mapping with geometric backfill added
+        """
+        enhanced_mapping = alt_text_mapping.copy()
+
+        for image_key, (identifier, shape) in image_identifiers.items():
+            # Skip if already has ALT text mapping
+            if image_key in alt_text_mapping:
+                continue
+
+            # Skip text placeholders - these shouldn't have ALT text
+            shape_type = type(shape).__name__
+            if shape_type in ['SlidePlaceholder', 'TextBox']:
+                continue
+
+            # Generate geometric description for auto-shapes, lines, etc.
+            geometric_alt = self._generate_geometric_description(shape, identifier)
+            if geometric_alt:
+                # Create enriched record for geometric backfill
+                enhanced_mapping[image_key] = {
+                    "existing_alt": "",
+                    "generated_alt": geometric_alt,
+                    "source_existing": None,
+                    "source_generated": "geometric_backfill",
+                    "final_alt": None,
+                    "decision": None,
+                    "existing_meaningful": False
+                }
+                logger.info(f"BACKFILL: {image_key} -> '{geometric_alt}'")
+
+        return enhanced_mapping
+
+    def _generate_geometric_description(self, shape, identifier: PPTXImageIdentifier) -> str:
+        """
+        Generate basic ALT text for geometric shapes based on type and metadata.
+
+        Args:
+            shape: The shape object
+            identifier: Shape identifier with metadata
+
+        Returns:
+            Synthesized ALT text or empty string if not applicable
+        """
+        try:
+            shape_type = type(shape).__name__
+            shape_name = getattr(shape, 'name', '')
+
+            # Handle different shape types
+            if 'Picture' in shape_type:
+                # Should have been handled by model generation, but fallback
+                return f"Image: {shape_name}" if shape_name else "Image"
+
+            elif 'Oval' in shape_name or 'Circle' in shape_name:
+                color = self._extract_shape_color(shape)
+                return f"{color}circle" if color else "Circle"
+
+            elif 'Rectangle' in shape_name or 'Square' in shape_name:
+                color = self._extract_shape_color(shape)
+                return f"{color}rectangle" if color else "Rectangle"
+
+            elif 'Line' in shape_name or 'Connector' in shape_type:
+                orientation = self._get_line_orientation(shape)
+                return f"{orientation}line" if orientation else "Line"
+
+            elif 'Arrow' in shape_name:
+                direction = self._get_arrow_direction(shape)
+                color = self._extract_shape_color(shape)
+                parts = [p for p in [color, direction, "arrow"] if p]
+                return " ".join(parts).capitalize() if parts else "Arrow"
+
+            elif 'Hexagon' in shape_name:
+                color = self._extract_shape_color(shape)
+                return f"{color}hexagon" if color else "Hexagon"
+
+            elif 'Triangle' in shape_name:
+                color = self._extract_shape_color(shape)
+                return f"{color}triangle" if color else "Triangle"
+
+            else:
+                # Generic shape fallback
+                if shape_name and shape_name != shape_type:
+                    return f"Shape: {shape_name}"
+                else:
+                    return f"Geometric shape ({shape_type})"
+
+        except Exception as e:
+            logger.debug(f"Error generating geometric description for {identifier.image_key}: {e}")
+            return "Geometric shape"
+
+    def _extract_shape_color(self, shape) -> str:
+        """Extract dominant color from shape fill/stroke for description."""
+        try:
+            # Try to get fill color
+            if hasattr(shape, 'fill') and hasattr(shape.fill, 'fore_color'):
+                if hasattr(shape.fill.fore_color, 'rgb'):
+                    rgb = shape.fill.fore_color.rgb
+                    return self._rgb_to_color_name(rgb.r, rgb.g, rgb.b) + " "
+
+            # Try stroke/line color
+            if hasattr(shape, 'line') and hasattr(shape.line, 'color'):
+                if hasattr(shape.line.color, 'rgb'):
+                    rgb = shape.line.color.rgb
+                    return self._rgb_to_color_name(rgb.r, rgb.g, rgb.b) + " "
+
+        except Exception:
+            pass
+        return ""
+
+    def _rgb_to_color_name(self, r: int, g: int, b: int) -> str:
+        """Convert RGB values to basic color name."""
+        # Simple color mapping for common colors
+        if r > 200 and g < 100 and b < 100:
+            return "red"
+        elif r < 100 and g > 200 and b < 100:
+            return "green"
+        elif r < 100 and g < 100 and b > 200:
+            return "blue"
+        elif r > 200 and g > 200 and b < 100:
+            return "yellow"
+        elif r > 200 and g < 150 and b > 200:
+            return "purple"
+        elif r > 200 and g > 150 and b < 100:
+            return "orange"
+        elif r < 100 and g < 100 and b < 100:
+            return "black"
+        elif r > 200 and g > 200 and b > 200:
+            return "white"
+        elif r > 100 and g > 100 and b > 100:
+            return "gray"
+        else:
+            return ""
+
+    def _get_line_orientation(self, shape) -> str:
+        """Determine line orientation (horizontal, vertical, diagonal)."""
+        try:
+            if hasattr(shape, 'left') and hasattr(shape, 'top') and hasattr(shape, 'width') and hasattr(shape, 'height'):
+                width = getattr(shape, 'width', 0)
+                height = getattr(shape, 'height', 0)
+
+                # Convert to pixel-like units for comparison
+                w = width // 12700 if width else 0  # EMUs to approximate pixels
+                h = height // 12700 if height else 0
+
+                if h < 10 and w > h * 3:  # Mostly horizontal
+                    return "horizontal "
+                elif w < 10 and h > w * 3:  # Mostly vertical
+                    return "vertical "
+                else:
+                    return "diagonal "
+        except Exception:
+            pass
+        return ""
+
+    def _get_arrow_direction(self, shape) -> str:
+        """Determine arrow direction based on shape orientation."""
+        # This is a simplified version - could be enhanced with actual arrow head detection
+        orientation = self._get_line_orientation(shape)
+        if "horizontal" in orientation:
+            return "horizontal"
+        elif "vertical" in orientation:
+            return "vertical"
+        else:
+            return ""
+
+    def _decide_final_alt_text(self, image_key: str, alt_record: Dict[str, Any], mode: str) -> str:
+        """
+        Decide final ALT text based on mode and available existing/generated content.
+
+        Args:
+            image_key: Shape identifier
+            alt_record: Enriched ALT record with existing_alt, generated_alt, etc.
+            mode: ALT text handling mode (preserve/replace)
+
+        Returns:
+            Final ALT text to inject, or empty string to skip
+        """
+        existing_alt = alt_record.get('existing_alt', '').strip()
+        generated_alt = alt_record.get('generated_alt', '').strip()
+        existing_meaningful = alt_record.get('existing_meaningful', False)
+
+        if mode == 'preserve':
+            if existing_meaningful:
+                logger.info(f"PRESERVE: keeping existing ALT for {image_key}: '{existing_alt[:50]}...'")
+                alt_record['decision'] = 'preserved_existing'
+                alt_record['final_alt'] = existing_alt
+                self.statistics['preserved_existing'] = self.statistics.get('preserved_existing', 0) + 1
+                return existing_alt
+            elif generated_alt:
+                logger.info(f"PRESERVE: using generated ALT for {image_key} (existing empty): '{generated_alt[:50]}...'")
+                alt_record['decision'] = 'wrote_generated'
+                alt_record['final_alt'] = generated_alt
+                self.statistics['wrote_generated'] = self.statistics.get('wrote_generated', 0) + 1
+                return generated_alt
+            else:
+                logger.info(f"PRESERVE: no ALT available for {image_key}")
+                alt_record['decision'] = 'skipped_no_content'
+                return ""
+
+        elif mode == 'replace':
+            if generated_alt:
+                logger.info(f"REPLACE: using generated ALT for {image_key}: '{generated_alt[:50]}...'")
+                alt_record['decision'] = 'replaced_with_generated'
+                alt_record['final_alt'] = generated_alt
+                self.statistics['wrote_generated'] = self.statistics.get('wrote_generated', 0) + 1
+                return generated_alt
+            elif existing_meaningful:
+                logger.info(f"REPLACE: fallback to existing ALT for {image_key}: '{existing_alt[:50]}...'")
+                alt_record['decision'] = 'fallback_to_existing'
+                alt_record['final_alt'] = existing_alt
+                self.statistics['preserved_existing'] = self.statistics.get('preserved_existing', 0) + 1
+                return existing_alt
+            else:
+                logger.info(f"REPLACE: no ALT available for {image_key}")
+                alt_record['decision'] = 'skipped_no_content'
+                return ""
+
+        else:
+            logger.warning(f"Unknown mode '{mode}', defaulting to replace behavior")
+            return self._decide_final_alt_text(image_key, alt_record, 'replace')
+
     def _apply_final_normalization_gate(self, raw_text: str, element_key: str, source: str) -> str:
         """
         SURGICAL FIX C: Single normalization gate of last resort before any write.
@@ -999,6 +1240,13 @@ class PPTXAltTextInjector:
                 if len(keys_per_slide[slide_num]) > 3:
                     logger.info(f"    ... and {len(keys_per_slide[slide_num]) - 3} more")
             
+            # GEOMETRIC BACKFILL: Add synthesized ALT for auto-shapes and lines missing from mapping
+            original_mapping_count = len(alt_text_mapping)
+            alt_text_mapping = self._add_geometric_backfill(alt_text_mapping, image_identifiers)
+            backfill_count = len(alt_text_mapping) - original_mapping_count
+            if backfill_count > 0:
+                logger.info(f"GEOMETRIC_BACKFILL: Added {backfill_count} synthesized descriptions for geometric shapes")
+
             # Inject ALT text for each mapping
             matched_keys = []
             unmatched_keys = []
@@ -1007,22 +1255,32 @@ class PPTXAltTextInjector:
             logger.info(f"INJECT_LOOP: {len(alt_text_mapping)} keys; image_map={len(image_identifiers)}")
             logger.info(f"PRS_ID before inject: {id(presentation)}")
 
-            for image_key, alt_text in alt_text_mapping.items():
+            for image_key, alt_record in alt_text_mapping.items():
+                # Handle both old string format and new enriched format for backward compatibility
+                if isinstance(alt_record, str):
+                    # Legacy format - convert to enriched format
+                    alt_record = {"final_alt": alt_record, "existing_alt": "", "generated_alt": alt_record}
+
+                # Decide final ALT text based on mode and available content
+                final_alt_text = self._decide_final_alt_text(image_key, alt_record, self.mode)
+                if not final_alt_text:
+                    continue
+
                 shape = image_identifiers.get(image_key)
-                logger.info(f"WILL_WRITE key={image_key} has_shape={bool(shape)} mode={self.mode}")
+                logger.info(f"WILL_WRITE key={image_key} has_shape={bool(shape)} mode={self.mode} final='{final_alt_text[:50]}...'")
                 if not shape:
                     logger.info(f"NO_SHAPE for {image_key}, checking fallback matching...")
                 # Add explicit trace logging for all write attempts
                 if image_key not in image_identifiers:
                     logger.debug(f"SKIP: no shape found for {image_key}")
                 else:
-                    logger.debug(f"-> WILL WRITE for {image_key}: '{alt_text[:80]}...' (mode={self.mode})")
+                    logger.debug(f"-> WILL WRITE for {image_key}: '{final_alt_text[:80]}...' (mode={self.mode})")
 
                 try:
                     if image_key in image_identifiers:
                         # Direct key match (exact hash match)
                         identifier, shape = image_identifiers[image_key]
-                        self._inject_alt_text_single(shape, alt_text, identifier)
+                        self._inject_alt_text_single(shape, final_alt_text, identifier)
                         matched_keys.append(image_key)
                     else:
                         # Try robust key parsing that ignores hash for matching
@@ -1036,7 +1294,7 @@ class PPTXAltTextInjector:
                             for available_key, (identifier, shape) in image_identifiers.items():
                                 if identifier.slide_idx == slide_idx and identifier.shape_idx == shape_idx:
                                     # Found a shape match by stable identifiers
-                                    self._inject_alt_text_single(shape, alt_text, identifier)
+                                    self._inject_alt_text_single(shape, final_alt_text, identifier)
                                     matched_keys.append(image_key)
                                     matched = True
                                     logger.info(f"Successfully matched via stable slide+shape ID (ignoring hash): {image_key} -> {available_key}")
@@ -2580,10 +2838,16 @@ class PPTXAltTextInjector:
         failed_injections = 0
         
         # Check each image that we tried to inject
-        for image_key, expected_alt_text in alt_text_mapping.items():
+        for image_key, alt_record in alt_text_mapping.items():
+            # Handle both old string format and new enriched format
+            if isinstance(alt_record, str):
+                expected_alt_text = alt_record
+            else:
+                expected_alt_text = alt_record.get('final_alt', '') or alt_record.get('generated_alt', '')
+
             if image_key in image_identifiers:
                 identifier, shape = image_identifiers[image_key]
-                
+
                 # Get current ALT text using all available methods
                 current_alt_text = self._get_existing_alt_text(shape)
                 
@@ -2941,28 +3205,62 @@ class PPTXAltTextInjector:
             }
 
 
-def create_alt_text_mapping(image_data: Dict[str, Dict[str, Any]], 
-                          alt_text_results: Dict[str, str]) -> Dict[str, str]:
+def create_alt_text_mapping(image_data: Dict[str, Dict[str, Any]],
+                          alt_text_results: Dict[str, str]) -> Dict[str, Any]:
     """
-    Create ALT text mapping from extracted image data and generation results.
-    
+    Create enriched ALT text mapping with provenance for existing + generated ALT text.
+
     Args:
         image_data: Dictionary from extract_images_with_identifiers()
         alt_text_results: Dictionary mapping image keys to generated ALT text
-        
+
     Returns:
-        Dictionary mapping image keys to ALT text for injection
+        Dictionary mapping image keys to enriched ALT text objects with provenance
     """
     mapping = {}
-    
+
     for image_key, image_info in image_data.items():
-        if image_key in alt_text_results:
-            alt_text = alt_text_results[image_key]
-            mapping[image_key] = alt_text
-            logger.debug(f"Mapped ALT text for {image_key}: {alt_text[:50]}...")
-    
-    logger.info(f"Created ALT text mapping for {len(mapping)} images")
+        # Extract existing ALT text from the shape data
+        existing_alt = image_info.get('existing_alt_text', '').strip()
+
+        # Check if existing ALT is meaningful (not empty/placeholder)
+        existing_is_meaningful = existing_alt and not _is_skip_token(existing_alt)
+
+        # Get generated ALT text if available
+        generated_alt = alt_text_results.get(image_key, '').strip()
+
+        # Create enriched record with provenance
+        enriched_record = {
+            "existing_alt": existing_alt,
+            "generated_alt": generated_alt,
+            "source_existing": "pptx" if existing_is_meaningful else None,
+            "source_generated": "llava" if generated_alt else None,
+            "final_alt": None,  # Will be decided at inject time
+            "decision": None,   # Will be set based on mode
+            "existing_meaningful": existing_is_meaningful
+        }
+
+        mapping[image_key] = enriched_record
+        logger.debug(f"Enriched mapping for {image_key}: existing='{existing_alt[:30]}...' generated='{generated_alt[:30]}...'")
+
+    # Count different types of content
+    existing_count = sum(1 for r in mapping.values() if r['existing_meaningful'])
+    generated_count = sum(1 for r in mapping.values() if r['generated_alt'])
+
+    logger.info(f"Created enriched ALT text mapping:")
+    logger.info(f"  Total shapes: {len(mapping)}")
+    logger.info(f"  With existing ALT: {existing_count}")
+    logger.info(f"  With generated ALT: {generated_count}")
+
     return mapping
+
+def _is_skip_token(alt_text: str) -> bool:
+    """Check if ALT text is a placeholder/skip token that should be treated as empty."""
+    if not alt_text:
+        return True
+
+    skip_tokens = {'(none)', 'n/a', 'not reviewed', 'undefined', 'image.png', 'picture', ''}
+    return alt_text.lower().strip() in skip_tokens
 
 
 def main():
