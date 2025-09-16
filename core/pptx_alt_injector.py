@@ -1525,11 +1525,20 @@ class PPTXAltTextInjector:
                                             f"{identifier.image_key}"
                                         )
                             if not matched:
-                                if self._write_alt_by_key(image_key, candidate_text):
+                                if self._write_alt_by_key(
+                                    image_key,
+                                    candidate_text,
+                                    preserve_override=preserve_override,
+                                ):
                                     matched_keys.append(image_key)
                                     self._record_written_stat(decision)
                                     logger.info(f"Successfully injected via key-based fallback: {image_key}")
-                                elif self._try_fallback_injection(presentation, image_key, candidate_text):
+                                elif self._try_fallback_injection(
+                                    presentation,
+                                    image_key,
+                                    candidate_text,
+                                    preserve_override=preserve_override,
+                                ):
                                     matched_keys.append(image_key)
                                     self._record_written_stat(decision)
                                     logger.info(f"Successfully injected via general fallback method: {image_key}")
@@ -2098,16 +2107,23 @@ class PPTXAltTextInjector:
             logger.debug(f"Error in fallback key matching for {target_key}: {e}")
             return None
     
-    def _try_fallback_injection(self, presentation: Presentation, image_key: str, alt_text: str) -> bool:
+    def _try_fallback_injection(
+        self,
+        presentation: Presentation,
+        image_key: str,
+        alt_text: str,
+        preserve_override: bool = False,
+    ) -> bool:
         """
         Try fallback injection methods for images that weren't found through normal shape traversal.
         This handles images accessible through relationships but not the shape API.
-        
+
         Args:
             presentation: PowerPoint presentation
             image_key: Image key that wasn't matched
             alt_text: ALT text to inject
-            
+            preserve_override: Allow writing even when preserve mode would normally skip
+
         Returns:
             bool: True if injection succeeded via fallback method
         """
@@ -2136,15 +2152,21 @@ class PPTXAltTextInjector:
         logger.debug(f"All fallback methods failed for {image_key}")
         return False
     
-    def _write_alt_by_key(self, image_key: str, text: str) -> bool:
+    def _write_alt_by_key(
+        self,
+        image_key: str,
+        text: str,
+        preserve_override: bool = False,
+    ) -> bool:
         """
         Write ALT text to the specific shape identified by the image key.
         This ensures fallback text goes to the correct shape, not just any shape.
-        
+
         Args:
             image_key: Stable image key (e.g., "slide_2_shapeid_10_hash_abc123")
             text: ALT text to write
-            
+            preserve_override: Allow writing even when preserve mode would normally skip
+
         Returns:
             bool: True if successful
         """
@@ -2200,7 +2222,13 @@ class PPTXAltTextInjector:
                 return False
             
             # Write the ALT text using the unified writer
-            success = self._inject_alt(target, text, image_key, source="fallback_key_based")
+            success = self._inject_alt(
+                target,
+                text,
+                image_key,
+                source="fallback_key_based",
+                preserve_override=preserve_override,
+            )
             if success:
                 logger.info(f"✅ Successfully wrote ALT text via key-based targeting: {image_key}")
                 self.statistics['success'] += 1
