@@ -5799,8 +5799,8 @@ class PPTXAccessibilityProcessor:
         
         return validation_result
     
-    def _inject_alt_text_to_pptx(self, presentation: Presentation, 
-                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, dict]:
+    def _inject_alt_text_to_pptx(self, presentation: Presentation,
+                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, Dict[str, Dict[str, Any]]]:
         """
         Inject ALT text into PPTX presentation using the dedicated injector.
         
@@ -5810,7 +5810,7 @@ class PPTXAccessibilityProcessor:
             output_path: Path to save modified PPTX
             
         Returns:
-            bool: True if injection succeeded
+            Tuple containing success flag and enriched final ALT mapping
         """
         try:
             # Import the dedicated ALT text injector
@@ -5819,14 +5819,40 @@ class PPTXAccessibilityProcessor:
             # Create injector instance
             injector = PPTXAltTextInjector(self.config_manager)
             
-            # Convert mapping format to match injector expectations
-            simple_mapping = {}
+            # Convert mapping format to match injector expectations (enriched records)
+            enriched_mapping = {}
             logger.debug("Converting ALT text mapping from processor format:")
             for image_key, info in alt_text_mapping.items():
-                simple_mapping[image_key] = info['alt_text']
-                logger.debug(f"  Processor key: {image_key} -> ALT: '{info['alt_text'][:50]}...'")
-            
-            logger.debug(f"Created simple mapping with {len(simple_mapping)} entries for injector")
+                generated_alt = (info.get('alt_text') or '').strip()
+                existing_alt = ''
+
+                shape = info.get('shape')
+                if shape is not None:
+                    try:
+                        existing_alt = injector._get_existing_alt_text(shape)
+                    except Exception:
+                        existing_alt = ''
+
+                existing_alt = (existing_alt or '').strip()
+
+                enriched_mapping[image_key] = {
+                    'existing_alt': existing_alt,
+                    'generated_alt': generated_alt,
+                    'final_alt': None,
+                    'decision': None,
+                    'existing_meaningful': bool(existing_alt),
+                    'source_existing': 'pptx' if existing_alt else None,
+                    'source_generated': 'processor' if generated_alt else None,
+                }
+
+                logger.debug(
+                    f"  Processor key: {image_key} -> existing='{existing_alt[:50]}...' "
+                    f"generated='{generated_alt[:50]}...'"
+                )
+
+            logger.debug(
+                f"Created enriched mapping with {len(enriched_mapping)} entries for injector"
+            )
             
             # Save presentation to temp file for injector processing
             import tempfile
@@ -5836,7 +5862,9 @@ class PPTXAccessibilityProcessor:
             presentation.save(temp_path)
             
             # Use injector to perform robust ALT text injection
-            result = injector.inject_alt_text_from_mapping(temp_path, simple_mapping, output_path, mode="replace")
+            result = injector.inject_alt_text_from_mapping(
+                temp_path, enriched_mapping, output_path, mode="replace"
+            )
             
             # Clean up temp file
             try:
@@ -5851,15 +5879,22 @@ class PPTXAccessibilityProcessor:
             logger.info(f"  Skipped (existing): {stats['skipped_existing']}")
             logger.info(f"  Failed: {stats['failed_injection']}")
             
-            return result['success'], simple_mapping
+            return result['success'], result.get('final_alt_map', enriched_mapping)
             
         except Exception as e:
             logger.error(f"Failed to inject ALT text via dedicated injector: {e}")
             # Fallback to original simple method
             fallback_success = self._inject_alt_text_simple(presentation, alt_text_mapping, output_path)
-            # Create simple mapping for fallback compatibility
-            simple_mapping = {image_key: info['alt_text'] for image_key, info in alt_text_mapping.items()}
-            return fallback_success, simple_mapping
+            fallback_map = {}
+            for image_key, info in alt_text_mapping.items():
+                generated_alt = (info.get('alt_text') or '').strip()
+                fallback_map[image_key] = {
+                    'existing_alt': '',
+                    'generated_alt': generated_alt,
+                    'final_alt': generated_alt or None,
+                    'decision': 'written_generated' if generated_alt else 'skipped_no_content'
+                }
+            return fallback_success, fallback_map
     
     def _inject_alt_text_simple(self, presentation: Presentation, 
                               alt_text_mapping: Dict[str, Any], output_path: str) -> bool:
