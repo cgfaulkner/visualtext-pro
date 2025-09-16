@@ -16,7 +16,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -159,78 +159,107 @@ def _setup_landscape_layout(doc):
     section.bottom_margin = Inches(0.75)
 
 
-def _create_portrait_table(doc, visual_index: Dict, current_alt_by_key: Dict,
-                           final_alt_map: Dict[str, Dict[str, Any]]):
-    """
-    Create portrait-oriented table with fixed column widths as specified:
-    - Slide/Img: 0.9"
-    - Thumbnail: 1.45-1.55" (with right cell padding ~0.12")
-    - Current ALT: 2.1" 
-    - Suggested ALT: 2.15"
-    - Decorative: 0.9-1.2"
-    """
+def _create_portrait_table(
+    doc,
+    visual_index: Dict,
+    current_alt_by_key: Dict,
+    final_alt_map: Dict[str, Dict[str, Any]],
+):
+    """Create portrait-oriented table with expanded ALT tracking columns."""
+    portrait_widths = (0.75, 1.3, 1.05, 1.15, 0.95, 0.95, 0.55, 0.8)
+    return _create_review_table(
+        doc,
+        visual_index,
+        current_alt_by_key,
+        final_alt_map,
+        portrait_widths,
+    )
+
+
+def _create_landscape_table(
+    doc,
+    visual_index: Dict,
+    current_alt_by_key: Dict,
+    final_alt_map: Dict,
+):
+    """Create landscape-oriented table with wider ALT text columns."""
+    landscape_widths = (0.85, 1.6, 1.2, 1.6, 1.2, 1.2, 0.6, 1.15)
+    return _create_review_table(
+        doc,
+        visual_index,
+        current_alt_by_key,
+        final_alt_map,
+        landscape_widths,
+    )
+
+
+def _create_review_table(
+    doc,
+    visual_index: Dict,
+    current_alt_by_key: Dict,
+    final_alt_map: Dict[str, Dict[str, Any]],
+    column_widths: Sequence[float],
+):
+    """Build the shared review table for portrait or landscape layouts."""
     # Sort images by slide and image number for consistent ordering
-    sorted_keys = sorted(visual_index.keys(), 
-                        key=lambda k: (visual_index[k].get('slide_idx', 0),
-                                     visual_index[k].get('image_number', 0)))
-    
-    # Create table with fixed layout
-    table = doc.add_table(rows=1, cols=5)
+    sorted_keys = sorted(
+        visual_index.keys(),
+        key=lambda k: (
+            visual_index[k].get('slide_idx', 0),
+            visual_index[k].get('image_number', 0),
+        ),
+    )
+
+    table = doc.add_table(rows=1, cols=len(column_widths))
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    
+
     # Set fixed table layout
     tbl = table._tbl
     tblPr = tbl.tblPr
     tblLayout = OxmlElement('w:tblLayout')
     tblLayout.set(qn('w:type'), 'fixed')
     tblPr.append(tblLayout)
-    
-    # Set column widths (total ≈ 7.0-7.5")
-    col_widths = [
-        Inches(0.9),    # Slide/Img
-        Inches(1.55),   # Thumbnail (including right padding)
-        Inches(2.1),    # Current ALT
-        Inches(2.15),   # Suggested ALT  
-        Inches(1.0)     # Decorative
-    ]
-    
-    for i, width in enumerate(col_widths):
+
+    width_measures = [Inches(width) for width in column_widths]
+    for i, width in enumerate(width_measures):
         table.columns[i].width = width
-    
-    # Setup header row
+
+    headers = [
+        "Slide / Img",
+        "Thumbnail",
+        "Current ALT Text",
+        "Suggested ALT Text",
+        "Existing ALT",
+        "Generated ALT",
+        "Decorative",
+        "Decision/Notes",
+    ]
+
     header_cells = table.rows[0].cells
-    headers = ["Slide / Img", "Thumbnail", "Current ALT Text", "Suggested ALT Text", "Decorative"]
-    
     for i, (cell, header) in enumerate(zip(header_cells, headers)):
         cell.text = header
         _format_header_cell(cell)
-        if i == 1:  # Thumbnail column - add right padding
-            _set_cell_margins(cell, right=180)  # ~0.12" right padding
-    
-    # Make header row repeat on each page
+        if i == 1:
+            _set_cell_margins(cell, right=180)
+
     _repeat_header_row(table.rows[0])
-    
-    # Add data rows
+
     for key in sorted_keys:
         visual_info = visual_index[key]
-        
-        # Add row
         row = table.add_row()
         cells = row.cells
-        
-        # Slide/Image numbers
+
         slide_num = visual_info.get('slide_number', '?')
         img_num = visual_info.get('image_number', '?')
         cells[0].text = f"{slide_num}/{img_num}"
         cells[0].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        
-        # Thumbnail
+
         thumbnail_path = visual_info.get('thumbnail_path')
         if thumbnail_path and Path(thumbnail_path).exists():
             try:
                 paragraph = cells[1].paragraphs[0]
                 run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
-                run.add_picture(thumbnail_path, width=Inches(1.2))  # Fit within column
+                run.add_picture(thumbnail_path, width=Inches(1.2))
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             except Exception as e:
                 logger.debug(f"Could not add thumbnail for {key}: {e}")
@@ -238,16 +267,22 @@ def _create_portrait_table(doc, visual_index: Dict, current_alt_by_key: Dict,
         else:
             cells[1].text = "[No preview]"
         cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        _set_cell_margins(cells[1], right=180)  # Match header padding
-        
-        # Current ALT Text
+        _set_cell_margins(cells[1], right=180)
+
         current_alt = current_alt_by_key.get(key, "").strip()
         cells[2].text = current_alt if current_alt else "[No ALT text]"
         _format_alt_text_cell(cells[2], bool(current_alt))
-        
-        # Suggested ALT Text
-        record = final_alt_map.get(key, {})
+
+        record = (
+            final_alt_map.get(key, {})
+            if isinstance(final_alt_map, dict)
+            else {}
+        )
+        if not isinstance(record, dict):
+            record = {}
         suggested_alt = _select_suggested_alt(record)
+        final_existing_alt = (record.get('existing_alt') or '').strip()
+        final_generated_alt = (record.get('generated_alt') or '').strip()
 
         if current_alt:
             display_suggested = current_alt
@@ -257,24 +292,34 @@ def _create_portrait_table(doc, visual_index: Dict, current_alt_by_key: Dict,
         cells[3].text = display_suggested
         _format_alt_text_cell(cells[3], bool(suggested_alt or current_alt))
 
-        # Decorative checkbox
+        existing_display = (
+            final_existing_alt if final_existing_alt else "[No ALT text]"
+        )
+        cells[4].text = existing_display
+        _format_alt_text_cell(cells[4], bool(final_existing_alt))
+
+        generated_display = (
+            final_generated_alt if final_generated_alt else "[Not generated]"
+        )
+        cells[5].text = generated_display
+        _format_alt_text_cell(cells[5], bool(final_generated_alt))
+
         is_decorative = _is_decorative_image(visual_info, current_alt, suggested_alt)
-        cells[4].text = "☐"  # Empty checkbox for manual review
-        cells[4].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        # Set row to not break across pages for readability
+        cells[6].text = "☐"
+        cells[6].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[6].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        decision_para = cells[7].paragraphs[0]
+        if decision_para.runs:
+            decision_para.clear()
+        decision_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        decision_para.paragraph_format.space_after = Pt(6)
+        decision_para.paragraph_format.line_spacing = 1.0
+        cells[7].vertical_alignment = WD_ALIGN_VERTICAL.TOP
+
         _set_row_no_break(row)
-    
+
     return table
-
-
-def _create_landscape_table(doc, visual_index: Dict, current_alt_by_key: Dict, final_alt_map: Dict):
-    """Create landscape-oriented table with more space for ALT text."""
-    # Similar to portrait but with wider ALT text columns
-    # Implementation would be similar but with adjusted column widths
-    # For now, just use portrait as fallback
-    return _create_portrait_table(doc, visual_index, current_alt_by_key, final_alt_map)
 
 
 def _select_suggested_alt(record: Dict[str, Any]) -> str:
