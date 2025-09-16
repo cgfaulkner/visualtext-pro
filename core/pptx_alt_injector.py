@@ -1072,15 +1072,16 @@ class PPTXAltTextInjector:
         
         # 2) READ current ALT text (ONLY from cNvPr/@descr and @title)
         existing = self._read_current_alt(shape)
-        
+        existing_display = (existing or '').strip()
+
         # 2.5) PRESERVE MODE HARD GUARD - never overwrite existing ALT text in preserve mode
         # USE INJECTOR'S EFFECTIVE MODE, NOT CONFIG (fixes split-brain issue)
-        logger.info(f"PRESERVE_GUARD: mode={self.mode}, existing='{existing.strip()}'")
-        if self.mode == 'preserve' and existing.strip():
+        logger.info(f"PRESERVE_GUARD: mode={self.mode}, existing='{existing_display}'")
+        if self.mode == 'preserve' and _is_meaningful(existing):
             logger.info(f"INJECT_ALT: Preserving existing ALT text for {element_key} (mode: preserve)")
             self.statistics['skipped_existing'] += 1
             return False
-        
+
         # 3) IDEMPOTENT GUARD - skip if equivalent (using deterministic normalized comparison)
         if not self._should_replace_alt_text_normalized(existing, text):
             logger.debug(f"INJECT_ALT: Skipping equivalent text for {element_key} (normalized texts are identical)")
@@ -1320,8 +1321,8 @@ class PPTXAltTextInjector:
                     continue
 
                 plan = self._determine_alt_decision(image_key, alt_record, self.mode)
-                final_alt_text = plan.final_alt
-                decision = plan.decision
+                decision = alt_record.get('decision') or plan.decision
+                candidate_text = _choose_candidate(alt_record)
 
                 if decision == 'preserved_existing':
                     self.statistics['preserved_existing'] += 1
@@ -1329,18 +1330,20 @@ class PPTXAltTextInjector:
                 if decision == 'skipped_no_content':
                     self.statistics['skipped_no_content'] += 1
                     continue
-                if not final_alt_text:
+                if not candidate_text:
                     self.statistics['skipped_no_content'] += 1
                     continue
 
-                if not plan.should_write:
+                should_write = plan.should_write if plan is not None else decision in {'written_generated', 'written_final'}
+
+                if not should_write:
                     self._record_written_stat(decision)
                     continue
 
                 shape_entry = image_identifiers.get(image_key)
                 logger.info(
                     f"WILL_WRITE key={image_key} has_shape={bool(shape_entry)} mode={self.mode} "
-                    f"decision={decision} final='{final_alt_text[:50]}...'"
+                    f"decision={decision} final='{(candidate_text or '')[:50]}...'"
                 )
                 if not shape_entry:
                     logger.info(f"NO_SHAPE for {image_key}, checking fallback matching...")
@@ -1348,21 +1351,33 @@ class PPTXAltTextInjector:
                     logger.debug(f"SKIP: no shape found for {image_key}")
                 else:
                     logger.debug(
-                        f"-> WILL WRITE for {image_key}: '{final_alt_text[:80]}...' "
+                        f"-> WILL WRITE for {image_key}: '{candidate_text[:80]}...' "
                         f"(mode={self.mode}, decision={decision})"
                     )
 
                 try:
                     if shape_entry:
                         identifier, shape = shape_entry
-                        success = self._inject_alt_text_single(shape, final_alt_text, identifier)
+                        if self.mode == 'preserve':
+                            current_alt = self._read_current_alt(shape)
+                            if _is_meaningful(current_alt):
+                                logger.info(
+                                    "PRESERVE_SKIP: Existing ALT retained for %s", identifier.image_key
+                                )
+                                self.statistics['skipped_existing'] += 1
+                                matched_keys.append(image_key)
+                                continue
+
+                        success = self._inject_alt_text_single(shape, candidate_text, identifier)
                         if success:
                             matched_keys.append(image_key)
                             self._record_written_stat(decision)
                         else:
                             logger.debug(f"Injection skipped for {image_key} (idempotent guard)")
-                            current_alt = self._get_existing_alt_text(shape)
-                            if current_alt.strip() == final_alt_text.strip():
+                            current_alt = self._read_current_alt(shape)
+                            if self.mode == 'preserve' and _is_meaningful(current_alt):
+                                matched_keys.append(image_key)
+                            elif current_alt.strip() == candidate_text.strip():
                                 matched_keys.append(image_key)
                                 self._record_written_stat(decision)
                             else:
@@ -1377,7 +1392,17 @@ class PPTXAltTextInjector:
 
                             for available_key, (identifier, shape) in image_identifiers.items():
                                 if identifier.slide_idx == slide_idx and identifier.shape_idx == shape_idx:
-                                    success = self._inject_alt_text_single(shape, final_alt_text, identifier)
+                                    if self.mode == 'preserve':
+                                        current_alt = self._read_current_alt(shape)
+                                        if _is_meaningful(current_alt):
+                                            self.statistics['skipped_existing'] += 1
+                                            matched_keys.append(image_key)
+                                            matched = True
+                                            logger.info(
+                                                "PRESERVE_SKIP: Existing ALT retained for %s", identifier.image_key
+                                            )
+                                            break
+                                    success = self._inject_alt_text_single(shape, candidate_text, identifier)
                                     if success:
                                         matched_keys.append(image_key)
                                         self._record_written_stat(decision)
@@ -1387,8 +1412,16 @@ class PPTXAltTextInjector:
                                             f"{image_key} -> {available_key}"
                                         )
                                         break
-                                    current_alt = self._get_existing_alt_text(shape)
-                                    if current_alt.strip() == final_alt_text.strip():
+                                    current_alt = self._read_current_alt(shape)
+                                    if self.mode == 'preserve' and _is_meaningful(current_alt):
+                                        matched_keys.append(image_key)
+                                        matched = True
+                                        logger.info(
+                                            f"Successfully matched via stable slide+shape ID (ignoring hash): "
+                                            f"{image_key} -> {available_key}"
+                                        )
+                                        break
+                                    if current_alt.strip() == candidate_text.strip():
                                         matched_keys.append(image_key)
                                         self._record_written_stat(decision)
                                         matched = True
@@ -1404,7 +1437,17 @@ class PPTXAltTextInjector:
                             variant_match = self._try_multi_variant_key_matching(image_key, image_identifiers)
                             if variant_match:
                                 identifier, shape = variant_match
-                                success = self._inject_alt_text_single(shape, final_alt_text, identifier)
+                                if self.mode == 'preserve':
+                                    current_alt = self._read_current_alt(shape)
+                                    if _is_meaningful(current_alt):
+                                        self.statistics['skipped_existing'] += 1
+                                        matched_keys.append(image_key)
+                                        matched = True
+                                        logger.info(
+                                            "PRESERVE_SKIP: Existing ALT retained for %s", identifier.image_key
+                                        )
+                                        break
+                                success = self._inject_alt_text_single(shape, candidate_text, identifier)
                                 if success:
                                     matched_keys.append(image_key)
                                     self._record_written_stat(decision)
@@ -1414,8 +1457,15 @@ class PPTXAltTextInjector:
                                         f"{identifier.image_key}"
                                     )
                                 else:
-                                    current_alt = self._get_existing_alt_text(shape)
-                                    if current_alt.strip() == final_alt_text.strip():
+                                    current_alt = self._read_current_alt(shape)
+                                    if self.mode == 'preserve' and _is_meaningful(current_alt):
+                                        matched_keys.append(image_key)
+                                        matched = True
+                                        logger.info(
+                                            f"Successfully matched via multi-variant key matching: {image_key} -> "
+                                            f"{identifier.image_key}"
+                                        )
+                                    elif current_alt.strip() == candidate_text.strip():
                                         matched_keys.append(image_key)
                                         self._record_written_stat(decision)
                                         matched = True
@@ -1424,11 +1474,11 @@ class PPTXAltTextInjector:
                                             f"{identifier.image_key}"
                                         )
                             if not matched:
-                                if self._write_alt_by_key(image_key, final_alt_text):
+                                if self._write_alt_by_key(image_key, candidate_text):
                                     matched_keys.append(image_key)
                                     self._record_written_stat(decision)
                                     logger.info(f"Successfully injected via key-based fallback: {image_key}")
-                                elif self._try_fallback_injection(presentation, image_key, final_alt_text):
+                                elif self._try_fallback_injection(presentation, image_key, candidate_text):
                                     matched_keys.append(image_key)
                                     self._record_written_stat(decision)
                                     logger.info(f"Successfully injected via general fallback method: {image_key}")
@@ -3351,7 +3401,7 @@ def create_alt_text_mapping(image_data: Dict[str, Dict[str, Any]],
         existing_alt = image_info.get('existing_alt_text', '').strip()
 
         # Check if existing ALT is meaningful (not empty/placeholder)
-        existing_is_meaningful = existing_alt and not _is_skip_token(existing_alt)
+        existing_is_meaningful = _is_meaningful(existing_alt)
 
         # Get generated ALT text if available
         generated_alt = alt_text_results.get(image_key, '').strip()
@@ -3388,6 +3438,43 @@ def _is_skip_token(alt_text: str) -> bool:
 
     skip_tokens = {'(none)', 'n/a', 'not reviewed', 'undefined', 'image.png', 'picture', ''}
     return alt_text.lower().strip() in skip_tokens
+
+
+def _is_meaningful(value: Optional[str]) -> bool:
+    """Return True when the provided ALT text contains meaningful content."""
+    if value is None:
+        return False
+
+    text = value.strip()
+    if not text:
+        return False
+
+    return not _is_skip_token(text)
+
+
+def _choose_candidate(record: Union[str, Dict[str, Any], None]) -> Optional[str]:
+    """Select the best ALT text candidate from an enriched record or legacy mapping."""
+    if record is None:
+        return None
+
+    if isinstance(record, str):
+        candidate = record.strip()
+        return candidate or None
+
+    if not isinstance(record, dict):
+        return None
+
+    for field in ("final_alt", "generated_alt", "existing_alt"):
+        value = record.get(field)
+        if isinstance(value, str) and _is_meaningful(value):
+            return value.strip()
+
+    value = record.get("final_alt")
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+
+    return None
 
 
 def main():
