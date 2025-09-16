@@ -66,11 +66,12 @@ sys.path.insert(0, str(project_root / "shared"))
 from config_manager import ConfigManager
 from unified_alt_generator import FlexibleAltGenerator
 from decorative_filter import (
-    is_force_decorative_by_filename, 
+    is_force_decorative_by_filename,
     is_decorative_image,
     get_image_hash,
     validate_decorative_config
 )
+from .pptx_alt_injector import _is_meaningful
 
 def describe_shape_with_details(shape) -> str:
     """Return a grammatically correct phrase like:
@@ -5835,19 +5836,33 @@ class PPTXAccessibilityProcessor:
 
                 existing_alt = (existing_alt or '').strip()
 
+                existing_meaningful = _is_meaningful(existing_alt)
+                generated_meaningful = _is_meaningful(generated_alt)
+
+                if existing_meaningful:
+                    final_alt = existing_alt
+                    decision = 'preserve_existing'
+                elif generated_meaningful:
+                    final_alt = generated_alt
+                    decision = 'use_generated'
+                else:
+                    final_alt = ''
+                    decision = 'no_alt_available'
+
                 enriched_mapping[image_key] = {
                     'existing_alt': existing_alt,
                     'generated_alt': generated_alt,
-                    'final_alt': None,
-                    'decision': None,
-                    'existing_meaningful': bool(existing_alt),
-                    'source_existing': 'pptx' if existing_alt else None,
-                    'source_generated': 'processor' if generated_alt else None,
+                    'final_alt': final_alt or None,
+                    'decision': decision,
+                    'existing_meaningful': existing_meaningful,
+                    'source_existing': 'pptx' if existing_meaningful else None,
+                    'source_generated': 'processor' if generated_meaningful else None,
                 }
 
                 logger.debug(
                     f"  Processor key: {image_key} -> existing='{existing_alt[:50]}...' "
-                    f"generated='{generated_alt[:50]}...'"
+                    f"generated='{generated_alt[:50]}...' final='{(final_alt or '')[:50]}...' "
+                    f"decision={decision}"
                 )
 
             logger.debug(
@@ -5888,11 +5903,18 @@ class PPTXAccessibilityProcessor:
             fallback_map = {}
             for image_key, info in alt_text_mapping.items():
                 generated_alt = (info.get('alt_text') or '').strip()
+                generated_meaningful = _is_meaningful(generated_alt)
+                decision = 'use_generated' if generated_meaningful else 'no_alt_available'
+                final_alt = generated_alt if generated_meaningful else ''
+
                 fallback_map[image_key] = {
                     'existing_alt': '',
                     'generated_alt': generated_alt,
-                    'final_alt': generated_alt or None,
-                    'decision': 'written_generated' if generated_alt else 'skipped_no_content'
+                    'final_alt': final_alt or None,
+                    'decision': decision,
+                    'existing_meaningful': False,
+                    'source_existing': None,
+                    'source_generated': 'processor' if generated_meaningful else None,
                 }
             return fallback_success, fallback_map
     
