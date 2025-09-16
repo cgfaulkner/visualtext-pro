@@ -686,7 +686,7 @@ class PPTXAltTextInjector:
         
         return collapse(norm1) == collapse(norm2)
     
-    def _write_descr_and_title(self, shape, text: str) -> None:
+    def _write_descr_and_title(self, shape, text: str, preserve_override: bool = False) -> None:
         """
         Overwrite ALT text and make sure it actually lands in XML.
         Many python-pptx shape classes (notably Picture) don't update XML
@@ -697,9 +697,11 @@ class PPTXAltTextInjector:
         mode = getattr(self, "mode", "overwrite")
         has_alt = self._has_meaningful_alt(shape)
         logger.info(f"WRITE_GUARD: mode={mode}, has_meaningful_alt={has_alt}")
-        if mode == "preserve" and has_alt:
+        if mode == "preserve" and has_alt and not preserve_override:
             logger.info("WRITE_GUARD TRIGGERED: Preserve mode: existing ALT found; skipping reinjection for this shape.")
             return
+        if preserve_override and mode == "preserve" and has_alt:
+            logger.info("WRITE_GUARD OVERRIDDEN: Writing ALT despite preserve mode due to final override.")
             
         # Best-effort property set (harmless if ignored)
         for attr in ("descr", "title"):
@@ -957,7 +959,11 @@ class PPTXAltTextInjector:
         should_write = False
 
         if normalized_mode == 'preserve':
-            if existing_alt:
+            if stored_final_alt:
+                decision = 'written_final'
+                final_alt = stored_final_alt
+                should_write = True
+            elif existing_alt:
                 decision = 'preserved_existing'
                 final_alt = existing_alt
             elif candidate_generated:
@@ -1024,16 +1030,25 @@ class PPTXAltTextInjector:
         
         return normalized
     
-    def _inject_alt(self, shape, raw_text: str, element_key: str, source: str = "unknown") -> bool:
+    def _inject_alt(
+        self,
+        shape,
+        raw_text: str,
+        element_key: str,
+        source: str = "unknown",
+        *,
+        preserve_override: bool = False,
+    ) -> bool:
         """
         PHASE 1.1 HOTFIX: Single source of truth for ALL ALT text injection.
         This is the ONLY function that should write ALT text to shapes.
-        
+
         Args:
             shape: Shape to inject ALT text into
             raw_text: Raw ALT text to inject
             element_key: Unique element identifier for logging
             source: Source of the ALT text (e.g., 'generator', 'connector-bypass', 'fallback')
+            preserve_override: Allow writing even when preserve mode would normally skip
             
         Returns:
             True if text was written, False if skipped (idempotent/equivalent)
@@ -1077,10 +1092,15 @@ class PPTXAltTextInjector:
         # 2.5) PRESERVE MODE HARD GUARD - never overwrite existing ALT text in preserve mode
         # USE INJECTOR'S EFFECTIVE MODE, NOT CONFIG (fixes split-brain issue)
         logger.info(f"PRESERVE_GUARD: mode={self.mode}, existing='{existing_display}'")
-        if self.mode == 'preserve' and _is_meaningful(existing):
+        if self.mode == 'preserve' and _is_meaningful(existing) and not preserve_override:
             logger.info(f"INJECT_ALT: Preserving existing ALT text for {element_key} (mode: preserve)")
             self.statistics['skipped_existing'] += 1
             return False
+        if preserve_override and self.mode == 'preserve' and _is_meaningful(existing):
+            logger.info(
+                "PRESERVE_OVERRIDE: Forcing write for %s despite existing ALT in preserve mode",
+                element_key,
+            )
 
         # 3) IDEMPOTENT GUARD - skip if equivalent (using deterministic normalized comparison)
         if not self._should_replace_alt_text_normalized(existing, text):
@@ -1096,7 +1116,7 @@ class PPTXAltTextInjector:
                 return False
         
         # 5) OVERWRITE ONLY - never append
-        self._write_descr_and_title(shape, text)
+        self._write_descr_and_title(shape, text, preserve_override=preserve_override)
 
         # IMMEDIATE READBACK VERIFICATION - Force one known write path end-to-end
         written_descr = self._read_current_alt(shape)
@@ -1350,6 +1370,7 @@ class PPTXAltTextInjector:
                     continue
 
                 should_write = plan.should_write if plan is not None else decision in {'written_generated', 'written_final'}
+                preserve_override = decision == 'written_final'
 
                 if not should_write:
                     self._record_written_stat(decision)
@@ -1373,7 +1394,7 @@ class PPTXAltTextInjector:
                 try:
                     if shape_entry:
                         identifier, shape = shape_entry
-                        if self.mode == 'preserve':
+                        if self.mode == 'preserve' and not preserve_override:
                             current_alt = self._read_current_alt(shape)
                             if _is_meaningful(current_alt):
                                 logger.info(
@@ -1383,7 +1404,12 @@ class PPTXAltTextInjector:
                                 matched_keys.append(image_key)
                                 continue
 
-                        success = self._inject_alt_text_single(shape, candidate_text, identifier)
+                        success = self._inject_alt_text_single(
+                            shape,
+                            candidate_text,
+                            identifier,
+                            preserve_override=preserve_override,
+                        )
                         if success:
                             matched_keys.append(image_key)
                             self._record_written_stat(decision)
@@ -1407,7 +1433,7 @@ class PPTXAltTextInjector:
 
                             for available_key, (identifier, shape) in image_identifiers.items():
                                 if identifier.slide_idx == slide_idx and identifier.shape_idx == shape_idx:
-                                    if self.mode == 'preserve':
+                                    if self.mode == 'preserve' and not preserve_override:
                                         current_alt = self._read_current_alt(shape)
                                         if _is_meaningful(current_alt):
                                             self.statistics['skipped_existing'] += 1
@@ -1417,7 +1443,12 @@ class PPTXAltTextInjector:
                                                 "PRESERVE_SKIP: Existing ALT retained for %s", identifier.image_key
                                             )
                                             break
-                                    success = self._inject_alt_text_single(shape, candidate_text, identifier)
+                                    success = self._inject_alt_text_single(
+                                        shape,
+                                        candidate_text,
+                                        identifier,
+                                        preserve_override=preserve_override,
+                                    )
                                     if success:
                                         matched_keys.append(image_key)
                                         self._record_written_stat(decision)
@@ -1428,7 +1459,7 @@ class PPTXAltTextInjector:
                                         )
                                         break
                                     current_alt = self._read_current_alt(shape)
-                                    if self.mode == 'preserve' and _is_meaningful(current_alt):
+                                    if self.mode == 'preserve' and not preserve_override and _is_meaningful(current_alt):
                                         matched_keys.append(image_key)
                                         matched = True
                                         logger.info(
@@ -1452,7 +1483,7 @@ class PPTXAltTextInjector:
                             variant_match = self._try_multi_variant_key_matching(image_key, image_identifiers)
                             if variant_match:
                                 identifier, shape = variant_match
-                                if self.mode == 'preserve':
+                                if self.mode == 'preserve' and not preserve_override:
                                     current_alt = self._read_current_alt(shape)
                                     if _is_meaningful(current_alt):
                                         self.statistics['skipped_existing'] += 1
@@ -1462,7 +1493,12 @@ class PPTXAltTextInjector:
                                             "PRESERVE_SKIP: Existing ALT retained for %s", identifier.image_key
                                         )
                                         break
-                                success = self._inject_alt_text_single(shape, candidate_text, identifier)
+                                success = self._inject_alt_text_single(
+                                    shape,
+                                    candidate_text,
+                                    identifier,
+                                    preserve_override=preserve_override,
+                                )
                                 if success:
                                     matched_keys.append(image_key)
                                     self._record_written_stat(decision)
@@ -1473,7 +1509,7 @@ class PPTXAltTextInjector:
                                     )
                                 else:
                                     current_alt = self._read_current_alt(shape)
-                                    if self.mode == 'preserve' and _is_meaningful(current_alt):
+                                    if self.mode == 'preserve' and not preserve_override and _is_meaningful(current_alt):
                                         matched_keys.append(image_key)
                                         matched = True
                                         logger.info(
@@ -2434,7 +2470,13 @@ class PPTXAltTextInjector:
             logger.debug(f"Slide part injection failed: {e}")
             return False
     
-    def _inject_alt_text_single(self, shape, alt_text: str, identifier: PPTXImageIdentifier) -> bool:
+    def _inject_alt_text_single(
+        self,
+        shape,
+        alt_text: str,
+        identifier: PPTXImageIdentifier,
+        preserve_override: bool = False,
+    ) -> bool:
         """
         PHASE 1.1 HOTFIX: Route all injection through single source of truth.
         This function is now just a wrapper around _inject_alt().
@@ -2443,6 +2485,7 @@ class PPTXAltTextInjector:
             shape: Picture shape to inject ALT text into
             alt_text: ALT text to inject
             identifier: Image identifier for logging
+            preserve_override: Allow writing even when preserve mode would normally skip
 
         Returns:
             bool: True if injection was successful
@@ -2475,7 +2518,13 @@ class PPTXAltTextInjector:
             # PHASE 1.1 HOTFIX: Use single source of truth for ALL injection
             # This replaces all the old logic with the idempotent injector
             logger.debug(f"ATTEMPTING WRITE for {identifier.image_key} via _inject_alt() (mode={self.mode})")
-            success = self._inject_alt(shape, alt_text, identifier.image_key, "generator")
+            success = self._inject_alt(
+                shape,
+                alt_text,
+                identifier.image_key,
+                "generator",
+                preserve_override=preserve_override,
+            )
             
             # Update stats based on result
             if success:
