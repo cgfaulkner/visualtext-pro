@@ -71,7 +71,11 @@ from decorative_filter import (
     get_image_hash,
     validate_decorative_config
 )
-from .pptx_alt_injector import _is_meaningful
+# Support both package and top-level imports when running as a script
+try:
+    from .pptx_alt_injector import _is_meaningful
+except ImportError:  # pragma: no cover - fallback for script execution
+    from pptx_alt_injector import _is_meaningful
 
 def describe_shape_with_details(shape) -> str:
     """Return a grammatically correct phrase like:
