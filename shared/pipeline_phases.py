@@ -274,36 +274,48 @@ def phase3_resolve(artifacts: RunArtifacts) -> Dict[str, Any]:
         
         # Build final mappings using preserve-first strategy
         final_alt_map = {}
-        
+
         # Stats tracking
         preserved_count = 0
         generated_count = 0
         missing_count = 0
-        
+
         for key in visual_index.keys():
-            if key in current_alt_by_key and current_alt_by_key[key].strip():
-                # Preserve existing ALT text
-                final_alt_map[key] = current_alt_by_key[key].strip()
+            existing_alt = current_alt_by_key.get(key, "").strip()
+            generated_alt = generated_alt_by_key.get(key, "").strip()
+
+            final_alt_map[key] = {
+                "existing_alt": existing_alt,
+                "generated_alt": generated_alt,
+                "source_existing": "pptx",
+                "source_generated": "llava",
+                "final_alt": None,
+                "decision": None,
+            }
+
+            if existing_alt:
                 preserved_count += 1
-            elif key in generated_alt_by_key and generated_alt_by_key[key].strip():
-                # Use generated ALT text
-                final_alt_map[key] = generated_alt_by_key[key].strip()
+            elif generated_alt:
                 generated_count += 1
             else:
-                # No ALT text available
                 missing_count += 1
-        
+
         # Save final mappings
         artifacts.save_final_alt_map(final_alt_map)
-        
+
+        final_mapping_count = sum(
+            1 for record in final_alt_map.values()
+            if record["existing_alt"] or record["generated_alt"] or record["final_alt"]
+        )
+
         result = {
             'success': True,
             'total_images': len(visual_index),
-            'final_mappings': len(final_alt_map),
+            'final_mappings': final_mapping_count,
             'preserved_count': preserved_count,
             'generated_count': generated_count,
             'missing_count': missing_count,
-            'coverage_percent': (len(final_alt_map) / len(visual_index) * 100) if visual_index else 0
+            'coverage_percent': (final_mapping_count / len(visual_index) * 100) if visual_index else 0
         }
         
         logger.info(f"Phase 3 complete: {len(final_alt_map)}/{len(visual_index)} images have ALT text "
