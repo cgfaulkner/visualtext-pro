@@ -1324,6 +1324,21 @@ class PPTXAltTextInjector:
                 decision = alt_record.get('decision') or plan.decision
                 candidate_text = _choose_candidate(alt_record)
 
+                if candidate_text:
+                    stored_final_alt = alt_record.get('final_alt')
+                    current_final = stored_final_alt if isinstance(stored_final_alt, str) else ''
+                    if current_final != candidate_text:
+                        logger.debug(
+                            "SYNC_FINAL_ALT: updating final_alt for %s from %r to %r",  # pragma: no cover
+                            image_key,
+                            stored_final_alt,
+                            candidate_text,
+                        )
+                        alt_record['final_alt'] = candidate_text
+                        if plan is not None:
+                            plan.final_alt = candidate_text
+                        alt_text_mapping[image_key] = alt_record
+
                 if decision == 'preserved_existing':
                     self.statistics['preserved_existing'] += 1
                     continue
