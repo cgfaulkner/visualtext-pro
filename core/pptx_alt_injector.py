@@ -40,6 +40,7 @@ import os
 import sys
 import time
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
 from hashlib import md5
@@ -147,14 +148,14 @@ class PPTXImageIdentifier:
         else:
             # Even if no hash available, add placeholder to maintain format consistency
             components.append("hash_00000000")
-        
+
         return "_".join(components)
-    
+
     @classmethod
     def from_shape(cls, shape: Picture, slide_idx: int, shape_idx):
         """Create identifier from shape object, supporting nested/complex shape indices."""
         shape_name = getattr(shape, 'name', '')
-        
+
         # Extract image hash if available
         image_hash = ""
         try:
@@ -249,6 +250,15 @@ class PPTXImageIdentifier:
         return cls(slide_idx, shape_idx, "", "", "")
 
 
+@dataclass
+class AltWritePlan:
+    """Decision record for a single ALT text injection attempt."""
+
+    final_alt: str
+    decision: str
+    should_write: bool
+
+
 class PPTXAltTextInjector:
     """
     PPTX ALT text injector that integrates with existing system architecture.
@@ -288,6 +298,11 @@ class PPTXAltTextInjector:
             'skipped_existing': 0,
             'skipped_invalid': 0,
             'failed': 0,
+            'preserved_existing': 0,
+            'written_generated': 0,
+            'written_existing': 0,
+            'written_final': 0,
+            'skipped_no_content': 0,
             # Legacy names for compatibility
             'total_images': 0,
             'injected_successfully': 0,
@@ -306,7 +321,16 @@ class PPTXAltTextInjector:
         logger.info("Initialized PPTX ALT text injector")
         logger.debug(f"Skip ALT text if: {self.skip_alt_text_if}")
         logger.debug(f"Mode: {self.mode}")
-    
+
+    def _record_written_stat(self, decision: str) -> None:
+        """Increment statistics counters based on the write decision."""
+        if decision == 'written_generated':
+            self.statistics['written_generated'] += 1
+        elif decision == 'written_existing':
+            self.statistics['written_existing'] += 1
+        elif decision == 'written_final':
+            self.statistics['written_final'] += 1
+
     def _normalize_alt_universal(self, txt: str) -> str:
         """
         DETERMINISTIC NORMALIZER: Bulletproof, sentence-aware deduplication.
@@ -500,8 +524,10 @@ class PPTXAltTextInjector:
         """Synchronize legacy statistics counters to ensure coverage reports show correct values."""
         # Calculate new enriched statistics
         preserved_count = self.statistics.get('preserved_existing', 0)
-        generated_count = self.statistics.get('wrote_generated', 0)
-        total_successful = preserved_count + generated_count
+        generated_count = self.statistics.get('written_generated', 0)
+        existing_count = self.statistics.get('written_existing', 0)
+        final_count = self.statistics.get('written_final', 0)
+        total_successful = preserved_count + generated_count + existing_count + final_count
 
         # Update legacy counters to match new enriched counters
         self.statistics['injected_successfully'] = total_successful
@@ -515,9 +541,11 @@ class PPTXAltTextInjector:
         )
 
         # Log the enriched statistics
-        logger.info(f"📊 ENRICHED STATISTICS:")
+        logger.info("📊 ENRICHED STATISTICS:")
         logger.info(f"   Preserved existing ALT: {preserved_count}")
         logger.info(f"   Wrote generated ALT: {generated_count}")
+        logger.info(f"   Used existing ALT (replace fallback): {existing_count}")
+        logger.info(f"   Wrote stored final ALT: {final_count}")
         logger.info(f"   Total successful: {total_successful}")
     
     def _is_blocked_fallback_pattern(self, text: str) -> bool:
@@ -905,61 +933,70 @@ class PPTXAltTextInjector:
         else:
             return ""
 
-    def _decide_final_alt_text(self, image_key: str, alt_record: Dict[str, Any], mode: str) -> str:
-        """
-        Decide final ALT text based on mode and available existing/generated content.
+    def _determine_alt_decision(self, image_key: str, alt_record: Dict[str, Any], mode: str) -> AltWritePlan:
+        """Resolve the final ALT text and whether it should be written."""
 
-        Args:
-            image_key: Shape identifier
-            alt_record: Enriched ALT record with existing_alt, generated_alt, etc.
-            mode: ALT text handling mode (preserve/replace)
+        normalized_mode = (mode or '').lower()
+        if normalized_mode == 'overwrite':
+            normalized_mode = 'replace'
+        if normalized_mode not in {'preserve', 'replace'}:
+            logger.warning(
+                "Unknown mode '%s' for %s, defaulting to replace behavior",
+                mode,
+                image_key,
+            )
+            normalized_mode = 'replace'
 
-        Returns:
-            Final ALT text to inject, or empty string to skip
-        """
-        existing_alt = alt_record.get('existing_alt', '').strip()
-        generated_alt = alt_record.get('generated_alt', '').strip()
-        existing_meaningful = alt_record.get('existing_meaningful', False)
+        existing_alt = (alt_record.get('existing_alt') or '').strip()
+        generated_alt = (alt_record.get('generated_alt') or '').strip()
+        stored_final_alt = (alt_record.get('final_alt') or '').strip()
 
-        if mode == 'preserve':
-            if existing_meaningful:
-                logger.info(f"PRESERVE: keeping existing ALT for {image_key}: '{existing_alt[:50]}...'")
-                alt_record['decision'] = 'preserved_existing'
-                alt_record['final_alt'] = existing_alt
-                self.statistics['preserved_existing'] = self.statistics.get('preserved_existing', 0) + 1
-                return existing_alt
-            elif generated_alt:
-                logger.info(f"PRESERVE: using generated ALT for {image_key} (existing empty): '{generated_alt[:50]}...'")
-                alt_record['decision'] = 'wrote_generated'
-                alt_record['final_alt'] = generated_alt
-                self.statistics['wrote_generated'] = self.statistics.get('wrote_generated', 0) + 1
-                return generated_alt
-            else:
-                logger.info(f"PRESERVE: no ALT available for {image_key}")
-                alt_record['decision'] = 'skipped_no_content'
-                return ""
+        candidate_generated = stored_final_alt or generated_alt
+        final_alt = ''
+        decision = 'skipped_no_content'
+        should_write = False
 
-        elif mode == 'replace':
-            if generated_alt:
-                logger.info(f"REPLACE: using generated ALT for {image_key}: '{generated_alt[:50]}...'")
-                alt_record['decision'] = 'replaced_with_generated'
-                alt_record['final_alt'] = generated_alt
-                self.statistics['wrote_generated'] = self.statistics.get('wrote_generated', 0) + 1
-                return generated_alt
-            elif existing_meaningful:
-                logger.info(f"REPLACE: fallback to existing ALT for {image_key}: '{existing_alt[:50]}...'")
-                alt_record['decision'] = 'fallback_to_existing'
-                alt_record['final_alt'] = existing_alt
-                self.statistics['preserved_existing'] = self.statistics.get('preserved_existing', 0) + 1
-                return existing_alt
-            else:
-                logger.info(f"REPLACE: no ALT available for {image_key}")
-                alt_record['decision'] = 'skipped_no_content'
-                return ""
+        if normalized_mode == 'preserve':
+            if existing_alt:
+                decision = 'preserved_existing'
+                final_alt = existing_alt
+            elif candidate_generated:
+                decision = 'written_generated'
+                final_alt = candidate_generated
+                should_write = True
+        else:  # replace semantics
+            if candidate_generated:
+                decision = 'written_generated'
+                final_alt = candidate_generated
+                should_write = True
+            elif existing_alt:
+                decision = 'written_existing'
+                final_alt = existing_alt
+                should_write = False
 
-        else:
-            logger.warning(f"Unknown mode '{mode}', defaulting to replace behavior")
-            return self._decide_final_alt_text(image_key, alt_record, 'replace')
+        # If a stored final ALT overrides the generated candidate, surface that in the decision
+        if (
+            decision == 'written_generated'
+            and stored_final_alt
+            and stored_final_alt == final_alt
+            and stored_final_alt != generated_alt
+        ):
+            decision = 'written_final'
+
+        alt_record['final_alt'] = final_alt or None
+        alt_record['decision'] = decision
+
+        logger.debug(
+            "ALT_DECISION key=%s mode=%s decision=%s existing='%s' generated='%s' final='%s'",
+            image_key,
+            normalized_mode,
+            decision,
+            existing_alt[:50],
+            generated_alt[:50],
+            (final_alt or '')[:50],
+        )
+
+        return AltWritePlan(final_alt, decision, should_write and bool(final_alt))
 
     def _apply_final_normalization_gate(self, raw_text: str, element_key: str, source: str) -> str:
         """
@@ -1147,14 +1184,14 @@ class PPTXAltTextInjector:
                         if descr and title and title == descr:
                             cnvpr.set("title", "")  # clear duplicate title
     
-    def inject_alt_text_from_mapping(self, pptx_path: str, alt_text_mapping: Dict[str, str],
+    def inject_alt_text_from_mapping(self, pptx_path: str, alt_text_mapping: Dict[str, Dict[str, Any]],
                                    output_path: Optional[str] = None, mode: Optional[str] = None) -> Dict[str, Any]:
         """
         Inject ALT text into PPTX file from a mapping dictionary.
 
         Args:
             pptx_path: Path to input PPTX file
-            alt_text_mapping: Dictionary mapping image keys to ALT text
+            alt_text_mapping: Mapping of image keys to enriched ALT records
             output_path: Optional output path (defaults to overwriting input)
             mode: ALT text handling mode ("preserve" or "replace"). If None, uses config mode.
 
@@ -1260,70 +1297,145 @@ class PPTXAltTextInjector:
             logger.info(f"PRS_ID before inject: {id(presentation)}")
 
             for image_key, alt_record in alt_text_mapping.items():
-                # Handle both old string format and new enriched format for backward compatibility
                 if isinstance(alt_record, str):
-                    # Legacy format - convert to enriched format
-                    alt_record = {"final_alt": alt_record, "existing_alt": "", "generated_alt": alt_record}
-
-                # Decide final ALT text based on mode and available content
-                final_alt_text = self._decide_final_alt_text(image_key, alt_record, self.mode)
-                if not final_alt_text:
+                    alt_record = {
+                        "existing_alt": "",
+                        "generated_alt": alt_record,
+                        "final_alt": alt_record or None,
+                        "decision": None,
+                        "existing_meaningful": False,
+                        "source_existing": None,
+                        "source_generated": None,
+                    }
+                    alt_text_mapping[image_key] = alt_record
+                elif isinstance(alt_record, dict):
+                    alt_text_mapping[image_key] = alt_record
+                else:
+                    logger.warning(
+                        "Unsupported ALT record type for %s: %s",
+                        image_key,
+                        type(alt_record).__name__,
+                    )
+                    unmatched_keys.append(image_key)
                     continue
 
-                shape = image_identifiers.get(image_key)
-                logger.info(f"WILL_WRITE key={image_key} has_shape={bool(shape)} mode={self.mode} final='{final_alt_text[:50]}...'")
-                if not shape:
+                plan = self._determine_alt_decision(image_key, alt_record, self.mode)
+                final_alt_text = plan.final_alt
+                decision = plan.decision
+
+                if decision == 'preserved_existing':
+                    self.statistics['preserved_existing'] += 1
+                    continue
+                if decision == 'skipped_no_content':
+                    self.statistics['skipped_no_content'] += 1
+                    continue
+                if not final_alt_text:
+                    self.statistics['skipped_no_content'] += 1
+                    continue
+
+                if not plan.should_write:
+                    self._record_written_stat(decision)
+                    continue
+
+                shape_entry = image_identifiers.get(image_key)
+                logger.info(
+                    f"WILL_WRITE key={image_key} has_shape={bool(shape_entry)} mode={self.mode} "
+                    f"decision={decision} final='{final_alt_text[:50]}...'"
+                )
+                if not shape_entry:
                     logger.info(f"NO_SHAPE for {image_key}, checking fallback matching...")
-                # Add explicit trace logging for all write attempts
                 if image_key not in image_identifiers:
                     logger.debug(f"SKIP: no shape found for {image_key}")
                 else:
-                    logger.debug(f"-> WILL WRITE for {image_key}: '{final_alt_text[:80]}...' (mode={self.mode})")
+                    logger.debug(
+                        f"-> WILL WRITE for {image_key}: '{final_alt_text[:80]}...' "
+                        f"(mode={self.mode}, decision={decision})"
+                    )
 
                 try:
-                    if image_key in image_identifiers:
-                        # Direct key match (exact hash match)
-                        identifier, shape = image_identifiers[image_key]
-                        self._inject_alt_text_single(shape, final_alt_text, identifier)
-                        matched_keys.append(image_key)
+                    if shape_entry:
+                        identifier, shape = shape_entry
+                        success = self._inject_alt_text_single(shape, final_alt_text, identifier)
+                        if success:
+                            matched_keys.append(image_key)
+                            self._record_written_stat(decision)
+                        else:
+                            logger.debug(f"Injection skipped for {image_key} (idempotent guard)")
+                            current_alt = self._get_existing_alt_text(shape)
+                            if current_alt.strip() == final_alt_text.strip():
+                                matched_keys.append(image_key)
+                                self._record_written_stat(decision)
+                            else:
+                                unmatched_keys.append(image_key)
                     else:
-                        # Try robust key parsing that ignores hash for matching
                         matched = False
 
                         try:
-                            # Parse key to get stable slide+shape identifiers
-                            slide_idx, shape_idx = PPTXImageIdentifier.from_key(image_key).slide_idx, PPTXImageIdentifier.from_key(image_key).shape_idx
+                            identifier_from_key = PPTXImageIdentifier.from_key(image_key)
+                            slide_idx = identifier_from_key.slide_idx
+                            shape_idx = identifier_from_key.shape_idx
 
-                            # Find any identifier with matching slide+shape, ignoring hash
                             for available_key, (identifier, shape) in image_identifiers.items():
                                 if identifier.slide_idx == slide_idx and identifier.shape_idx == shape_idx:
-                                    # Found a shape match by stable identifiers
-                                    self._inject_alt_text_single(shape, final_alt_text, identifier)
-                                    matched_keys.append(image_key)
-                                    matched = True
-                                    logger.info(f"Successfully matched via stable slide+shape ID (ignoring hash): {image_key} -> {available_key}")
-                                    break
+                                    success = self._inject_alt_text_single(shape, final_alt_text, identifier)
+                                    if success:
+                                        matched_keys.append(image_key)
+                                        self._record_written_stat(decision)
+                                        matched = True
+                                        logger.info(
+                                            f"Successfully matched via stable slide+shape ID (ignoring hash): "
+                                            f"{image_key} -> {available_key}"
+                                        )
+                                        break
+                                    current_alt = self._get_existing_alt_text(shape)
+                                    if current_alt.strip() == final_alt_text.strip():
+                                        matched_keys.append(image_key)
+                                        self._record_written_stat(decision)
+                                        matched = True
+                                        logger.info(
+                                            f"Successfully matched via stable slide+shape ID (ignoring hash): "
+                                            f"{image_key} -> {available_key}"
+                                        )
+                                        break
                         except Exception as e:
                             logger.debug(f"Could not parse key for stable matching: {image_key}, {e}")
 
                         if not matched:
-                            # SURGICAL FIX A: Try multi-variant key matching (0-based/1-based, shape/shapeid)
                             variant_match = self._try_multi_variant_key_matching(image_key, image_identifiers)
                             if variant_match:
                                 identifier, shape = variant_match
-                                self._inject_alt_text_single(shape, alt_text, identifier)
-                                matched_keys.append(image_key)
-                                logger.info(f"Successfully matched via multi-variant key matching: {image_key} -> {identifier.image_key}")
-                            else:
-                                # Try key-based fallback injection (more precise than general fallback)
-                                if self._write_alt_by_key(image_key, alt_text):
+                                success = self._inject_alt_text_single(shape, final_alt_text, identifier)
+                                if success:
                                     matched_keys.append(image_key)
+                                    self._record_written_stat(decision)
+                                    matched = True
+                                    logger.info(
+                                        f"Successfully matched via multi-variant key matching: {image_key} -> "
+                                        f"{identifier.image_key}"
+                                    )
+                                else:
+                                    current_alt = self._get_existing_alt_text(shape)
+                                    if current_alt.strip() == final_alt_text.strip():
+                                        matched_keys.append(image_key)
+                                        self._record_written_stat(decision)
+                                        matched = True
+                                        logger.info(
+                                            f"Successfully matched via multi-variant key matching: {image_key} -> "
+                                            f"{identifier.image_key}"
+                                        )
+                            if not matched:
+                                if self._write_alt_by_key(image_key, final_alt_text):
+                                    matched_keys.append(image_key)
+                                    self._record_written_stat(decision)
                                     logger.info(f"Successfully injected via key-based fallback: {image_key}")
-                                elif self._try_fallback_injection(presentation, image_key, alt_text):
+                                elif self._try_fallback_injection(presentation, image_key, final_alt_text):
                                     matched_keys.append(image_key)
+                                    self._record_written_stat(decision)
                                     logger.info(f"Successfully injected via general fallback method: {image_key}")
                                 else:
-                                    logger.warning(f"Could not find image for key (even with fallback): {image_key}")
+                                    logger.warning(
+                                        f"Could not find image for key (even with fallback): {image_key}"
+                                    )
                                     unmatched_keys.append(image_key)
 
                 except Exception as e:
@@ -1371,7 +1483,8 @@ class PPTXAltTextInjector:
                 'input_file': str(pptx_path),
                 'output_file': str(output_path),
                 'statistics': self.statistics.copy(),
-                'errors': []
+                'errors': [],
+                'final_alt_map': alt_text_mapping
             }
             
             self._log_injection_summary(result)
@@ -1389,7 +1502,8 @@ class PPTXAltTextInjector:
                 'input_file': str(pptx_path),
                 'output_file': str(output_path),
                 'statistics': self.statistics.copy(),
-                'errors': [error_msg]
+                'errors': [error_msg],
+                'final_alt_map': alt_text_mapping
             }
         finally:
             # Restore original mode
@@ -2825,9 +2939,9 @@ class PPTXAltTextInjector:
         except Exception:
             return False
     
-    def _perform_post_injection_verification(self, presentation: Presentation, 
-                                          image_identifiers: Dict[str, Tuple], 
-                                          alt_text_mapping: Dict[str, str]) -> None:
+    def _perform_post_injection_verification(self, presentation: Presentation,
+                                          image_identifiers: Dict[str, Tuple],
+                                          alt_text_mapping: Dict[str, Dict[str, Any]]) -> None:
         """
         Verify that ALT texts were actually injected after the injection process.
         
@@ -2847,7 +2961,11 @@ class PPTXAltTextInjector:
             if isinstance(alt_record, str):
                 expected_alt_text = alt_record
             else:
-                expected_alt_text = alt_record.get('final_alt', '') or alt_record.get('generated_alt', '')
+                expected_alt_text = (
+                    alt_record.get('final_alt', '')
+                    or alt_record.get('generated_alt', '')
+                    or alt_record.get('existing_alt', '')
+                )
 
             if image_key in image_identifiers:
                 identifier, shape = image_identifiers[image_key]
@@ -3077,8 +3195,13 @@ class PPTXAltTextInjector:
         logger.info(f"  Input file: {result['input_file']}")
         logger.info(f"  Output file: {result['output_file']}")
         logger.info(f"  Total images found: {stats['total_images']}")
-        logger.info(f"  Successfully injected: {stats['injected_successfully']}")
-        logger.info(f"  Skipped (existing): {stats['skipped_existing']}")
+        logger.info(f"  Successfully processed: {stats['injected_successfully']}")
+        logger.info(f"  Preserved existing ALT: {stats.get('preserved_existing', 0)}")
+        logger.info(f"  Written (generated): {stats.get('written_generated', 0)}")
+        logger.info(f"  Written (existing fallback): {stats.get('written_existing', 0)}")
+        logger.info(f"  Written (stored final): {stats.get('written_final', 0)}")
+        logger.info(f"  Skipped (no content): {stats.get('skipped_no_content', 0)}")
+        logger.info(f"  Skipped (existing fence): {stats['skipped_existing']}")
         logger.info(f"  Skipped (invalid): {stats['skipped_invalid']}")
         logger.info(f"  Failed injection: {stats['failed_injection']}")
         logger.info(f"  Validation failures: {stats['validation_failures']}")
@@ -3284,10 +3407,12 @@ Examples:
     parser.add_argument('pptx_file', help='Input PPTX file')
     parser.add_argument('-o', '--output', help='Output PPTX file (default: overwrite input)')
     parser.add_argument('--alt-text-file', help='JSON file containing ALT text mappings')
-    parser.add_argument('--extract-only', action='store_true', 
+    parser.add_argument('--extract-only', action='store_true',
                        help='Only extract images with identifiers (no injection)')
     parser.add_argument('--test-pdf-export', action='store_true',
                        help='Test ALT text survival in PDF export')
+    parser.add_argument('--emit-injected-map', action='store_true',
+                       help='Write *-alt_map.final.json with final ALT decisions after injection')
     parser.add_argument('--config', help='Configuration file path')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     parser.add_argument('--mode', choices=['preserve', 'overwrite'], 
@@ -3379,15 +3504,38 @@ Examples:
         stats = result['statistics']
         print(f"\nInjection Results:")
         print(f"  Success: {result['success']}")
-        print(f"  Images processed: {stats['injected_successfully']}/{stats['total_images']}")
-        print(f"  Skipped (existing): {stats['skipped_existing']}")
+        print(f"  Processed: {stats['injected_successfully']}/{stats['total_images']}")
+        print(f"    Preserved existing: {stats.get('preserved_existing', 0)}")
+        print(f"    Written (generated): {stats.get('written_generated', 0)}")
+        print(f"    Written (existing fallback): {stats.get('written_existing', 0)}")
+        print(f"    Written (stored final): {stats.get('written_final', 0)}")
+        print(f"    Skipped (no content): {stats.get('skipped_no_content', 0)}")
         print(f"  Failed: {stats['failed_injection']}")
         
         if result.get('errors'):
             print(f"Errors:")
             for error in result['errors']:
                 print(f"  - {error}")
-        
+
+        if args.emit_injected_map and result.get('final_alt_map'):
+            emitted_path = Path(args.alt_text_file).with_name(
+                f"{Path(args.alt_text_file).stem}.final.json"
+            )
+            final_map_payload = {}
+            for key, record in result['final_alt_map'].items():
+                if isinstance(record, dict):
+                    final_map_payload[key] = {
+                        'final_alt': record.get('final_alt'),
+                        'decision': record.get('decision')
+                    }
+                else:
+                    final_map_payload[key] = {'final_alt': record, 'decision': None}
+
+            with open(emitted_path, 'w', encoding='utf-8') as f:
+                json.dump(final_map_payload, f, indent=2, ensure_ascii=False)
+
+            print(f"  Injected map saved to: {emitted_path}")
+
         if result['success']:
             print(f"✅ ALT text injection completed successfully!")
             print(f"Output saved to: {result['output_file']}")
