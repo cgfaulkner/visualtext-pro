@@ -124,6 +124,14 @@ def shade_cell(cell, hex_color):
     shd.set(qn('w:fill'), hex_color)
     tcPr.append(shd)
 
+def enable_wrap(cell):
+    """Enable text wrapping by removing any noWrap flags."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    # remove any <w:noWrap/> if present
+    for elem in list(tcPr):
+        if elem.tag == qn('w:noWrap'):
+            tcPr.remove(elem)
+
 def set_font_properties(run, size=11, bold=False, italic=False, color=None):
     """Set font properties for a run."""
     run.font.name = 'Calibri'
@@ -264,7 +272,7 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
         final_alt_map = normalize_final_alt_map(final_alt_map)
 
     doc = Document()
-    
+
     # Force portrait orientation with sane geometry and print layout
     force_portrait_with_sane_geometry(doc)
     force_print_layout(doc, zoom_percent=110)
@@ -415,44 +423,40 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     set_font_properties(summary_run, size=10, color="666666")
     summary_para.paragraph_format.space_after = Pt(12)
     
-    # Fixed table with optimized columns for portrait layout
-    table = doc.add_table(rows=1, cols=9)
+    # Create 7-column table with proper headers
+    table = doc.add_table(rows=1, cols=7)
     table.autofit = False  # Critical: let our fixed widths win
 
-    # Columns: [Slide / ID, Thumbnail, Current, Suggested, Existing, Generated, Status, Decor., Decision]
-    # 8.5" page - 1.0" margins = 7.5" usable width
+    # Set headers
+    headers = ["Slide/ID", "Thumbnail", "Current", "Generated ALT", "Status", "Decor", "Notes"]
+    for i, cell in enumerate(table.rows[0].cells):
+        cell.text = headers[i]
+        set_font_properties(cell.paragraphs[0].runs[0], size=11, bold=True)
+
+    # Set fixed column widths that sum to exactly 7.5 inches
     col_widths = [
-        Inches(0.65),
-        Inches(1.0),
-        Inches(1.0),
-        Inches(1.0),
-        Inches(0.85),
-        Inches(0.85),
-        Inches(0.9),
-        Inches(0.45),
-        Inches(0.8),
+        Inches(0.7),  # Slide/ID
+        Inches(1.5),  # Thumbnail
+        Inches(1.6),  # Current
+        Inches(1.6),  # Generated ALT
+        Inches(0.6),  # Status
+        Inches(0.5),  # Decor
+        Inches(0.9),  # Notes
     ]
     for i, w in enumerate(col_widths):
         table.columns[i].width = w
-        for cell in table.columns[i].cells:
-            cell.width = w
+
+    # Ensure fixed layout (no "mystery squeeze")
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    tblLayout = OxmlElement('w:tblLayout')
+    tblLayout.set(qn('w:type'), 'fixed')
+    tblPr.append(tblLayout)
 
     hdr = table.rows[0].cells
-    # Shortened labels to prevent wrap
-    header_names = [
-        "Slide / ID",
-        "Thumbnail",
-        "Current",
-        "Suggested",
-        "Existing ALT",
-        "Generated ALT",
-        "Status",
-        "Decor.",
-        "Decision/Notes",
-    ]
-    
+    header_names = headers
+
     for i, name in enumerate(header_names):
-        hdr[i].text = name
         # Header formatting to prevent letter-wrapping
         p = hdr[i].paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -462,209 +466,78 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
             run.font.size = Pt(10)
         p.paragraph_format.keep_together = True
         p.paragraph_format.keep_with_next = True
-        
+
         # Header styling
         for r in p.runs:
             set_font_properties(r, size=9.5, bold=True, color="FFFFFF")
-        
+
         # Dark gray header background
         shade_cell(hdr[i], "4F4F4F")
     
     # Make header repeat on every page
     repeat_header_on_each_page(table.rows[0])
     
-    # Data rows with improved cell formatting
-    for row_idx, item in enumerate(processed_alt_data):
+    # Write each row with new 7-column layout
+    for item in processed_alt_data:
         row = table.add_row()
-        set_row_no_break(row)
         cells = row.cells
-        
-        # Apply zebra striping (light gray on even rows)
-        if row_idx % 2 == 0:
-            for cell in cells:
-                shade_cell(cell, "F7F7F7")
-        
-        # Set all cell widths and basic formatting
-        for i, cell in enumerate(cells):
-            cell.width = col_widths[i]
-            cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP  # Top-left align body cells
-        
-        # Column 0: Slide / Img (combined)
-        cell = cells[0]
-        para = cell.paragraphs[0]
-        para.clear()
-        slide_num = item.get('slide_number', '')
-        image_num = item.get('image_number', '')
-        run = para.add_run(f"S{slide_num} / I{image_num}")
-        set_font_properties(run, size=11, bold=True)
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
-        
-        # Column 1: Thumbnail with improved sizing and right padding
-        cell = cells[1]
-        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER  # Center thumbnail vertically
-        set_cell_margins(cell, right=180)  # ~0.125" gutter on the right
-        para = cell.paragraphs[0]
-        para.clear()
-        
-        thumb_path = item.get('image_path')
-        if thumb_path and Path(thumb_path).exists():
-            try:
-                # Add thumbnail with constrained sizing
-                run = para.add_run()
-                pic = run.add_picture(thumb_path, width=Inches(1.40))  # a hair smaller than the column
-                    
-                # Add ALT text to picture for accessibility
-                pic._inline.graphic.graphicData.pic.nvPicPr.cNvPr.set('descr', 
-                    f"Thumbnail of slide {item.get('slide_number', '')} image {item.get('image_number', '')}")
-            except Exception:
-                run = para.add_run("(thumbnail unavailable)")
-                set_font_properties(run, size=10, italic=True, color="999999")
+
+        # 0) Slide/ID
+        slide = item.get('slide_number', '?')
+        img = item.get('image_number', '?')
+        cells[0].text = f"{slide}/{img}"
+        enable_wrap(cells[0])
+
+        # 1) Thumbnail (1.5")
+        thumb = item.get('thumbnail_path') or item.get('thumb_path') or item.get('image_path')
+        p = cells[1].paragraphs[0]
+        p.clear()
+        if thumb and Path(thumb).exists():
+            run = p.add_run()
+            run.add_picture(thumb, width=Inches(1.5))
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         else:
-            run = para.add_run("(no thumbnail)")
-            set_font_properties(run, size=10, italic=True, color="999999")
-        
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
-        
-        # Column 2: Current ALT Text (using processed data)
-        cell = cells[2]
-        para = cell.paragraphs[0]
-        para.clear()
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT  # Top-left align
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
-        
+            run = p.add_run("[No image]")
+            set_font_properties(run, size=10, color="999999")
+
+        # Prepare Current/Generated strings (you already compute these earlier)
         current_alt_display = item.get('current_alt_display', '[No ALT text]')
-        
-        if current_alt_display == "[No ALT text]":
-            run = para.add_run(current_alt_display)
-            set_font_properties(run, size=10.5, color="999999")
-            # Highlight missing current ALT with yellow background
-            shade_cell(cell, "FFF2CC")
-        else:
-            run = para.add_run(current_alt_display)
-            set_font_properties(run, size=10.5)
-        
-        # Column 3: Suggested ALT Text (using processed data)
-        cell = cells[3]
-        para = cell.paragraphs[0]
-        para.clear()
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT  # Top-left align
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
-        
         suggested_alt_display = item.get('suggested_alt_display', '[No suggestion]')
-        
-        if not suggested_alt_display or suggested_alt_display == "[No suggestion]":
-            run = para.add_run("[No suggestion]")
-            set_font_properties(run, size=10.5, color="999999")
-        else:
-            run = para.add_run(suggested_alt_display)
-            set_font_properties(run, size=10.5)
-            
-            # Highlight identical current/suggested with green background
-            if (current_alt_display != "[No ALT text]" and 
-                current_alt_display == suggested_alt_display):
-                shade_cell(cell, "E2F0D9")
-        
-        # Column 4: Existing ALT from final map
-        cell = cells[4]
-        para = cell.paragraphs[0]
-        para.clear()
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
 
-        existing_alt_map = (item.get('existing_alt_from_map') or '').strip()
-        if existing_alt_map:
-            run = para.add_run(existing_alt_map)
-            set_font_properties(run, size=10.5)
-        else:
-            run = para.add_run('[No ALT text]')
-            set_font_properties(run, size=10.5, color="999999")
+        # 2) Current
+        cells[2].text = current_alt_display
+        enable_wrap(cells[2])
 
-        # Column 5: Generated ALT from final map
-        cell = cells[5]
-        para = cell.paragraphs[0]
-        para.clear()
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
+        # 3) Generated ALT
+        cells[3].text = suggested_alt_display
+        enable_wrap(cells[3])
 
-        generated_alt_map = (item.get('generated_alt_from_map') or '').strip()
-        if generated_alt_map:
-            run = para.add_run(generated_alt_map)
-            set_font_properties(run, size=10.5)
-        else:
-            run = para.add_run('[Not generated]')
-            set_font_properties(run, size=10.5, color="999999")
+        # 4) Status
+        # Prefer enriched JSON 'decision' when present, else infer.
+        decision = item.get('decision')
+        if not decision:
+            if current_alt_display != "[No ALT text]" and current_alt_display == suggested_alt_display:
+                decision = "Preserved"
+            elif current_alt_display == "[No ALT text]" and suggested_alt_display != "[No suggestion]":
+                decision = "Generated"
+            elif current_alt_display != "[No ALT text]" and suggested_alt_display != "[No suggestion]":
+                decision = "Replaced"
+            else:
+                decision = "Pending"
+        cells[4].text = decision
+        enable_wrap(cells[4])
 
-        # Column 6: Status information
-        cell = cells[6]
-        para = cell.paragraphs[0]
-        para.clear()
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
-        
-        # Get status information from item, status_map, or derive it
-        status_info = item.get('status_info', {})
-        status_display = status_info.get('status', '')
-        
-        # Try to get status from status_map using image_key
-        if not status_display and status_map and image_key:
-            status_info = status_map.get(image_key, {})
-            status_display = status_info.get('status', '')
-        
-        # If no status provided, derive it from current state
-        if not status_display:
-            status_display, status_text = _derive_status_from_current_state(
-                current_alt_display, suggested_alt_display, item
-            )
-        else:
-            # Map provided status to user-friendly text
-            status_text = _map_status_to_display(status_display)
-        
-        run = para.add_run(status_text)
-        
-        # Color code the status based on mapped display text
-        status_lower = status_text.lower()
-        if 'needs alt' in status_lower:
-            set_font_properties(run, size=9, color="CC0000")  # Red for needs attention
-            shade_cell(cell, "FFE6E6")
-        elif 'fallback' in status_lower:
-            set_font_properties(run, size=9, color="FF8C00")  # Orange for fallback
-            shade_cell(cell, "FFF2E6")
-        elif 'decorative' in status_lower:
-            set_font_properties(run, size=9, color="888888")  # Gray for decorative
-            shade_cell(cell, "F0F0F0")
-        elif 'preserved' in status_lower:
-            set_font_properties(run, size=9, color="0066CC")  # Blue for preserved
-        elif 'generated' in status_lower:
-            set_font_properties(run, size=9, color="006600")  # Green for generated
-        else:
-            set_font_properties(run, size=9, color="000000")  # Black for unknown
-        
-        # Column 7: Decorative checkbox (single line, centered)
-        cell = cells[7]
-        para = cell.paragraphs[0]
-        para.clear()
-        run = para.add_run("Yes" if item.get('is_decorative', False) else "No")
-        set_font_properties(run, size=11)
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
+        # 5) Decor
+        cells[5].text = "Yes" if item.get('is_decorative', False) else "No"
+        cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Column 8: Decision or review notes
-        cell = cells[8]
-        para = cell.paragraphs[0]
-        para.clear()
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        para.paragraph_format.space_after = Pt(6)
-        para.paragraph_format.line_spacing = 1.0
+        # 6) Notes (leave blank for reviewers)
+        cells[6].text = item.get('notes', "")
+
+        # Optional: visually mark identical current/generated
+        if (current_alt_display != "[No ALT text]" and
+            current_alt_display == suggested_alt_display):
+            shade_cell(cells[3], "E2F0D9")  # light green
     
     # Final portrait enforcement (catches any stray landscape sections)
     force_portrait_with_sane_geometry(doc)
