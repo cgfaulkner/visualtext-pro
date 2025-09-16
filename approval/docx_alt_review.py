@@ -227,24 +227,30 @@ def normalize_alt_text(text):
 
 def pick_alts_for_report(key, final_alt_map, existing_alt_from_ppt):
     """
-    - If the PPT had ALT already, use it for BOTH Current and Suggested
-      (so they match exactly).
-    - If the PPT had none, Suggested = generated canonical ALT; Current = "".
+    Determine the display ALT values for the approval report.
+
+    Returns:
+        Tuple[str, str, str, str]: current ALT, suggested ALT, existing ALT from
+        final_alt_map, generated ALT from final_alt_map.
     """
     existing = (existing_alt_from_ppt or "").strip()
     record = final_alt_map.get(key, {}) if isinstance(final_alt_map, dict) else {}
 
-    if not existing and isinstance(record, dict):
-        existing = (record.get('existing_alt') or "").strip()
+    if not isinstance(record, dict):
+        record = {}
 
-    final_alt = (record.get('final_alt') or "").strip() if isinstance(record, dict) else ""
-    generated = (record.get('generated_alt') or "").strip() if isinstance(record, dict) else ""
+    map_existing = (record.get('existing_alt') or "").strip()
+    map_generated = (record.get('generated_alt') or "").strip()
+    final_alt = (record.get('final_alt') or "").strip()
 
-    suggested = final_alt or generated
+    if not existing and map_existing:
+        existing = map_existing
+
+    suggested = final_alt or map_generated
 
     if existing:
-        return existing, existing  # Current, Suggested
-    return "", suggested
+        return existing, existing, map_existing, map_generated
+    return "", suggested, map_existing, map_generated
 
 def generate_alt_review_doc(processed_images, lecture_title: str, output_path: str, original_pptx_path: str = None, final_alt_map: dict = None, status_map: dict = None):
     """
@@ -339,13 +345,20 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
         
         # Use canonical final_alt_map if provided, otherwise fall back to processed_images
         if final_alt_map:
-            current_alt, suggested_alt = pick_alts_for_report(image_key, final_alt_map, original_alt)
+            (
+                current_alt,
+                suggested_alt,
+                map_existing_alt,
+                map_generated_alt,
+            ) = pick_alts_for_report(image_key, final_alt_map, original_alt)
         else:
             # Fallback to old logic for backward compatibility
             generated_alt = item.get('suggested_alt', '').strip()
             current_alt = original_alt if original_alt else ""
             suggested_alt = original_alt if original_alt else (generated_alt if generated_alt else "")
-        
+            map_existing_alt = original_alt
+            map_generated_alt = generated_alt
+
         # For display
         current_display = current_alt if current_alt else "[No ALT text]"
         suggested_display = suggested_alt if suggested_alt else "[No ALT text]"
@@ -362,6 +375,8 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
         processed_item = item.copy()
         processed_item['current_alt_display'] = current_display
         processed_item['suggested_alt_display'] = suggested_display
+        processed_item['existing_alt_from_map'] = map_existing_alt
+        processed_item['generated_alt_from_map'] = map_generated_alt
         processed_alt_data.append(processed_item)
     
     total_images = len(processed_images)
@@ -401,20 +416,40 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
     summary_para.paragraph_format.space_after = Pt(12)
     
     # Fixed table with optimized columns for portrait layout
-    table = doc.add_table(rows=1, cols=6)
+    table = doc.add_table(rows=1, cols=9)
     table.autofit = False  # Critical: let our fixed widths win
-    
-    # Columns: [Slide / ID, Thumbnail, Current, Suggested, Status, Decor.]  
-    # 8.5" page - 1.0" margins = 7.5" usable width, optimized for shorter headers
-    col_widths = [Inches(0.8), Inches(0.8), Inches(2.2), Inches(2.2), Inches(1.0), Inches(0.5)]
+
+    # Columns: [Slide / ID, Thumbnail, Current, Suggested, Existing, Generated, Status, Decor., Decision]
+    # 8.5" page - 1.0" margins = 7.5" usable width
+    col_widths = [
+        Inches(0.65),
+        Inches(1.0),
+        Inches(1.0),
+        Inches(1.0),
+        Inches(0.85),
+        Inches(0.85),
+        Inches(0.9),
+        Inches(0.45),
+        Inches(0.8),
+    ]
     for i, w in enumerate(col_widths):
         table.columns[i].width = w
         for cell in table.columns[i].cells:
             cell.width = w
-    
+
     hdr = table.rows[0].cells
     # Shortened labels to prevent wrap
-    header_names = ["Slide / ID", "Thumbnail", "Current", "Suggested", "Status", "Decor."]
+    header_names = [
+        "Slide / ID",
+        "Thumbnail",
+        "Current",
+        "Suggested",
+        "Existing ALT",
+        "Generated ALT",
+        "Status",
+        "Decor.",
+        "Decision/Notes",
+    ]
     
     for i, name in enumerate(header_names):
         hdr[i].text = name
@@ -535,8 +570,40 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
                 current_alt_display == suggested_alt_display):
                 shade_cell(cell, "E2F0D9")
         
-        # Column 4: Status information
+        # Column 4: Existing ALT from final map
         cell = cells[4]
+        para = cell.paragraphs[0]
+        para.clear()
+        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        para.paragraph_format.space_after = Pt(6)
+        para.paragraph_format.line_spacing = 1.0
+
+        existing_alt_map = (item.get('existing_alt_from_map') or '').strip()
+        if existing_alt_map:
+            run = para.add_run(existing_alt_map)
+            set_font_properties(run, size=10.5)
+        else:
+            run = para.add_run('[No ALT text]')
+            set_font_properties(run, size=10.5, color="999999")
+
+        # Column 5: Generated ALT from final map
+        cell = cells[5]
+        para = cell.paragraphs[0]
+        para.clear()
+        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        para.paragraph_format.space_after = Pt(6)
+        para.paragraph_format.line_spacing = 1.0
+
+        generated_alt_map = (item.get('generated_alt_from_map') or '').strip()
+        if generated_alt_map:
+            run = para.add_run(generated_alt_map)
+            set_font_properties(run, size=10.5)
+        else:
+            run = para.add_run('[Not generated]')
+            set_font_properties(run, size=10.5, color="999999")
+
+        # Column 6: Status information
+        cell = cells[6]
         para = cell.paragraphs[0]
         para.clear()
         para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -581,13 +648,21 @@ def generate_alt_review_doc(processed_images, lecture_title: str, output_path: s
         else:
             set_font_properties(run, size=9, color="000000")  # Black for unknown
         
-        # Column 5: Decorative checkbox (single line, centered)
-        cell = cells[5]
+        # Column 7: Decorative checkbox (single line, centered)
+        cell = cells[7]
         para = cell.paragraphs[0]
         para.clear()
         run = para.add_run("Yes" if item.get('is_decorative', False) else "No")
         set_font_properties(run, size=11)
         para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        para.paragraph_format.space_after = Pt(6)
+        para.paragraph_format.line_spacing = 1.0
+
+        # Column 8: Decision or review notes
+        cell = cells[8]
+        para = cell.paragraphs[0]
+        para.clear()
+        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
         para.paragraph_format.space_after = Pt(6)
         para.paragraph_format.line_spacing = 1.0
     
