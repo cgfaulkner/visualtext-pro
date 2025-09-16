@@ -32,6 +32,19 @@ from pipeline_artifacts import normalize_final_alt_map
 logger = logging.getLogger(__name__)
 
 
+STATUS_LABELS = {
+    'preserve_existing': 'Preserve existing',
+    'use_generated': 'Use generated',
+    'no_alt_available': 'No ALT available',
+    'flag_for_review': 'Needs review',
+    'needs_review': 'Needs review',
+    'custom_alt': 'Custom ALT',
+    'manual_update': 'Manual update',
+    'mark_decorative': 'Decorative',
+    'decorative': 'Decorative',
+}
+
+
 def generate_alt_review_doc(
     visual_index_path: str,
     current_alt_by_key_path: str,
@@ -165,15 +178,120 @@ def _create_portrait_table(
     current_alt_by_key: Dict,
     final_alt_map: Dict[str, Dict[str, Any]],
 ):
-    """Create portrait-oriented table with expanded ALT tracking columns."""
-    portrait_widths = (0.75, 1.3, 1.05, 1.15, 0.95, 0.95, 0.55, 0.8)
-    return _create_review_table(
-        doc,
-        visual_index,
-        current_alt_by_key,
-        final_alt_map,
-        portrait_widths,
+    """Create portrait-oriented table with focused review columns."""
+    column_widths = (0.70, 1.50, 1.75, 1.75, 0.60, 0.50, 0.70)
+
+    sorted_keys = sorted(
+        visual_index.keys(),
+        key=lambda k: (
+            visual_index[k].get('slide_idx', 0),
+            visual_index[k].get('image_number', 0),
+        ),
     )
+
+    table = doc.add_table(rows=1, cols=len(column_widths))
+    table.autofit = False
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    tblLayout = OxmlElement('w:tblLayout')
+    tblLayout.set(qn('w:type'), 'fixed')
+    tblPr.append(tblLayout)
+
+    width_measures = [Inches(width) for width in column_widths]
+    for i, width in enumerate(width_measures):
+        table.columns[i].width = width
+
+    headers = [
+        'Slide/ID',
+        'Thumbnail',
+        'Current',
+        'Generated ALT',
+        'Status',
+        'Decor',
+        'Notes',
+    ]
+
+    header_cells = table.rows[0].cells
+    for cell, header in zip(header_cells, headers):
+        cell.text = header
+        _format_header_cell(cell)
+
+    _repeat_header_row(table.rows[0])
+
+    for key in sorted_keys:
+        visual_info = visual_index.get(key, {})
+        row = table.add_row()
+        cells = row.cells
+
+        slide_num = visual_info.get('slide_number', '?')
+        img_num = visual_info.get('image_number', '?')
+        cells[0].text = f"{slide_num}/{img_num}"
+        cells[0].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+        thumbnail_path = visual_info.get('thumbnail_path')
+        cells[1].text = ''
+        paragraph = cells[1].paragraphs[0]
+        run = paragraph.add_run()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        try:
+            if thumbnail_path and Path(thumbnail_path).exists():
+                run.add_picture(thumbnail_path, width=Inches(1.5))
+            else:
+                raise FileNotFoundError(thumbnail_path or 'Missing thumbnail')
+        except Exception as exc:
+            logger.debug(f"Could not add thumbnail for {key}: {exc}")
+            cells[1].text = "[No preview]"
+            cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cells[1].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+        record = final_alt_map.get(key, {}) if isinstance(final_alt_map, dict) else {}
+        if not isinstance(record, dict):
+            record = {}
+
+        current_alt = (current_alt_by_key.get(key) or '').strip()
+        current_display = current_alt if current_alt else "[No ALT text]"
+        cells[2].text = current_display
+        _format_alt_text_cell(cells[2], bool(current_alt))
+        _ensure_wrap(cells[2])
+        _set_cell_margins(cells[2], left=80, right=80)
+
+        generated_alt = _get_generated_alt_text(record, visual_info, current_alt)
+        generated_display = generated_alt if generated_alt else "[Not generated]"
+        cells[3].text = generated_display
+        _format_alt_text_cell(cells[3], bool(generated_alt))
+        _ensure_wrap(cells[3])
+        _set_cell_margins(cells[3], left=80, right=80)
+
+        status_text = _resolve_status_label(record, current_alt, generated_alt)
+        cells[4].text = status_text
+        cells[4].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        is_decorative = _is_decorative_image(
+            visual_info,
+            current_alt,
+            generated_alt,
+        )
+        decision_value = (record.get('decision') or '').strip() if record else ''
+        if decision_value in {'mark_decorative', 'decorative'}:
+            is_decorative = True
+        cells[5].text = '☑' if is_decorative else '☐'
+        cells[5].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        notes_text = _build_notes_text(record, visual_info)
+        cells[6].text = notes_text
+        _format_alt_text_cell(cells[6], bool(notes_text))
+        _ensure_wrap(cells[6])
+        _set_cell_margins(cells[6], left=80, right=80)
+
+        cells[6].vertical_alignment = WD_ALIGN_VERTICAL.TOP
+
+        _set_row_no_break(row)
+
+    return table
 
 
 def _create_landscape_table(
@@ -322,6 +440,110 @@ def _create_review_table(
     return table
 
 
+def _clean_text(value: Any) -> str:
+    """Return stripped text for the provided value."""
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def _get_generated_alt_text(
+    record: Dict[str, Any],
+    visual_info: Dict[str, Any],
+    current_alt: str,
+) -> str:
+    """Prefer enriched generated ALT text with graceful fallbacks."""
+    generated_alt = _clean_text(record.get('generated_alt')) if record else ''
+    if generated_alt:
+        return generated_alt
+
+    visual_generated = _clean_text(visual_info.get('generated_alt'))
+    if visual_generated:
+        return visual_generated
+
+    final_alt = _clean_text(record.get('final_alt')) if record else ''
+    if final_alt and final_alt != current_alt:
+        return final_alt
+
+    return ''
+
+
+def _resolve_status_label(
+    record: Dict[str, Any],
+    current_alt: str,
+    generated_alt: str,
+) -> str:
+    """Resolve a human-friendly status label with sensible defaults."""
+    decision_value = _clean_text(record.get('decision')) if record else ''
+    if decision_value:
+        normalized = decision_value.lower()
+        if normalized in STATUS_LABELS:
+            return STATUS_LABELS[normalized]
+        return decision_value.replace('_', ' ').strip().title()
+
+    final_alt = _clean_text(record.get('final_alt')) if record else ''
+    if final_alt:
+        if generated_alt and final_alt == generated_alt:
+            return STATUS_LABELS['use_generated']
+        if current_alt and final_alt == current_alt:
+            return STATUS_LABELS['preserve_existing']
+        return STATUS_LABELS['custom_alt']
+
+    if generated_alt and current_alt:
+        return 'Existing + Generated'
+    if generated_alt:
+        return 'Generated available'
+    if current_alt:
+        return 'Existing only'
+
+    return STATUS_LABELS['no_alt_available']
+
+
+def _build_notes_text(
+    record: Dict[str, Any],
+    visual_info: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Assemble provenance and notes information for display."""
+    notes_parts: list[str] = []
+
+    if record:
+        source_existing = _clean_text(record.get('source_existing'))
+        if source_existing:
+            notes_parts.append(f"Existing: {source_existing}")
+
+        source_generated = _clean_text(record.get('source_generated'))
+        if source_generated:
+            notes_parts.append(f"Generated: {source_generated}")
+
+        record_notes = _clean_text(record.get('notes'))
+        if record_notes:
+            notes_parts.append(record_notes)
+
+        provenance = record.get('provenance')
+        if isinstance(provenance, dict):
+            for key, value in provenance.items():
+                provenance_value = _clean_text(value)
+                if provenance_value:
+                    key_text = _clean_text(key) or 'Provenance'
+                    notes_parts.append(f"{key_text}: {provenance_value}")
+        elif isinstance(provenance, list):
+            for value in provenance:
+                provenance_value = _clean_text(value)
+                if provenance_value:
+                    notes_parts.append(provenance_value)
+        else:
+            provenance_text = _clean_text(provenance)
+            if provenance_text:
+                notes_parts.append(provenance_text)
+
+    if visual_info:
+        visual_provenance = _clean_text(visual_info.get('provenance'))
+        if visual_provenance:
+            notes_parts.append(visual_provenance)
+
+    return ' • '.join(notes_parts)
+
+
 def _select_suggested_alt(record: Dict[str, Any]) -> str:
     """Return the preferred suggested ALT text from a final_alt_map record."""
     if not isinstance(record, dict):
@@ -461,3 +683,15 @@ def _set_row_no_break(row):
     trPr = row._tr.get_or_add_trPr()
     cantSplit = OxmlElement('w:cantSplit')
     trPr.append(cantSplit)
+
+
+def _ensure_wrap(cell) -> None:
+    """Ensure cell content can wrap across lines."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    no_wrap_tag = qn('w:noWrap')
+    for no_wrap in list(tc_pr.findall(no_wrap_tag)):
+        tc_pr.remove(no_wrap)
+
+    for paragraph in cell.paragraphs:
+        paragraph.paragraph_format.keep_together = False
+        paragraph.paragraph_format.keep_with_next = False
