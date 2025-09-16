@@ -18,6 +18,7 @@ from alt_manifest import (
     create_instance_key, create_content_key, parse_min_shape_area, MANIFEST_SCHEMA_VERSION
 )
 from shape_utils import is_image_like, is_decorative_shape
+from alt_text_reader import read_existing_alt
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class ManifestProcessor:
                         discovered_elements += 1
                         
                         # Extract existing ALT text
-                        existing_alt = self._extract_current_alt_text(shape)
+                        existing_alt = self._collect_existing_alt(shape)
                         
                         # Create placeholder content_key (will be replaced in Step 2)
                         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE and hasattr(shape, 'image'):
@@ -1000,7 +1001,7 @@ class ManifestProcessor:
                         shape_id = getattr(shape, 'shape_id', shape_idx)
                         
                         # Extract existing ALT text from PPTX (all shapes can have ALT text)
-                        current_alt = self._extract_current_alt_text(shape)
+                        current_alt = self._collect_existing_alt(shape)
                         
                         # Generate hash - for pictures use image data, for others use shape properties
                         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
@@ -1091,74 +1092,19 @@ class ManifestProcessor:
                 'entries_created': 0
             }
     
-    def _extract_current_alt_text(self, shape) -> str:
-        """Extract current ALT text from PPTX shape (all types including groups/vectors)."""
+    def _collect_existing_alt(self, shape) -> str:
+        """Collect existing ALT text for a shape using the shared reader."""
         try:
-            # Try multiple methods to get ALT text
-            alt_text = ""
-            
-            # Method 1: Direct alternative_text property
-            try:
-                alt_text = getattr(shape, 'alternative_text', '') or ''
-            except:
-                pass
-            
-            # Method 2: XML cNvPr element search (comprehensive for all shape types)
-            if not alt_text and hasattr(shape, '_element'):
-                try:
-                    element = shape._element
-                    # Try multiple XPath patterns for different shape types
-                    xpath_patterns = [
-                        ".//p:nvPicPr/p:cNvPr",          # Picture
-                        ".//p:nvSpPr/p:cNvPr",           # AutoShape 
-                        ".//p:nvCxnSpPr/p:cNvPr",        # Connector
-                        ".//p:nvGraphicFramePr/p:cNvPr", # Chart/Table/SmartArt
-                        ".//p:nvGrpSpPr/p:cNvPr",        # Group
-                        ".//p:cNvPr",                    # Generic fallback
-                        ".//{http://schemas.openxmlformats.org/drawingml/2006/main}cNvPr"  # Namespace explicit
-                    ]
-                    
-                    for xpath in xpath_patterns:
-                        try:
-                            nvpr_elements = element.xpath(xpath)
-                            if nvpr_elements:
-                                nvpr = nvpr_elements[0]
-                                alt_text = nvpr.get('descr', '') or nvpr.get('title', '')
-                                if alt_text:
-                                    break
-                        except:
-                            continue
-                except:
-                    pass
-            
-            # Method 3: Title property fallback  
-            if not alt_text:
-                try:
-                    alt_text = getattr(shape, 'title', '') or ''
-                except:
-                    pass
-            
-            # Method 4: For groups, check if children have ALT text
-            if not alt_text and hasattr(shape, 'shapes'):
-                try:
-                    from pptx.enum.shapes import MSO_SHAPE_TYPE
-                    if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-                        # For groups, collect ALT from image children
-                        child_alts = []
-                        for child_shape in shape.shapes:
-                            child_alt = self._extract_current_alt_text(child_shape)
-                            if child_alt:
-                                child_alts.append(child_alt)
-                        if child_alts:
-                            alt_text = "; ".join(child_alts[:3])  # Limit to first 3 meaningful child ALTs
-                except:
-                    pass
-            
-            return alt_text.strip()
-            
-        except Exception as e:
-            logger.debug(f"Could not extract ALT text: {e}")
+            alt_text = read_existing_alt(shape)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(f"Could not extract ALT text: {exc}")
             return ""
+
+        return (alt_text or "").strip()
+
+    def _extract_current_alt_text(self, shape) -> str:
+        """Backward-compatible alias for _collect_existing_alt."""
+        return self._collect_existing_alt(shape)
     
     def _extract_slide_text(self, slide) -> str:
         """Extract text content from slide for context."""
