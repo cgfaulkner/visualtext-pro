@@ -180,3 +180,29 @@ approval_docs:
   include_context: true
   review_suffix: "_ALT_Review"
   image_max_width_px: 600
+
+# --- Profiles ---
+profiles:
+  scientific_strict:
+    # Keep context on for science-y slides; preserve existing write-path toggles
+    pptx_processing:
+      include_slide_notes: true
+      include_slide_text: true
+      convert_wmf_to_png: true
+      max_workers: 4
+
+  default:
+    # Mirrors your current defaults so --profile default is explicit
+    pptx_processing:
+      include_slide_notes: true
+      include_slide_text: true
+      convert_wmf_to_png: true
+      max_workers: 4
+
+  fast_batch:
+    # Faster pass: no context, more workers
+    pptx_processing:
+      include_slide_notes: false
+      include_slide_text: false
+      convert_wmf_to_png: true
+      max_workers: 8
