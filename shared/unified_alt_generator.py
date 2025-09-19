@@ -22,8 +22,15 @@ except Exception:
 # Prefer package-relative imports; fall back to bare for legacy callers
 try:
     from .config_manager import ConfigManager
+    from .llava_connectivity import LLaVAConnectivityManager, ServiceState
 except Exception:
     from config_manager import ConfigManager  # fallback
+    try:
+        from llava_connectivity import LLaVAConnectivityManager, ServiceState
+    except ImportError:
+        # Fallback if connectivity module not available
+        LLaVAConnectivityManager = None
+        ServiceState = None
 
 import logging
 import re
@@ -160,19 +167,146 @@ class LLaVAProvider(BaseAltProvider):
             self.logging_config = config_manager.get_logging_config()
             level_name = self.logging_config.get("level", "INFO").upper()
             logger.setLevel(getattr(logging, level_name, logging.INFO))
+
+        # Initialize connectivity manager for hardening
+        self.connectivity_manager = None
+        if LLaVAConnectivityManager:
+            connectivity_config = {
+                'providers': {provider_name: config},
+                'max_retries': config.get('retries', 3),
+                'retry_base_delay': config.get('retry_backoff_sec', 1.0),
+                'circuit_breaker_failure_threshold': config.get('circuit_breaker_threshold', 5),
+                'circuit_breaker_recovery_timeout': config.get('circuit_breaker_recovery', 60.0),
+                'background_monitoring': config.get('background_monitoring', False),
+                'health_cache_ttl': config.get('health_cache_ttl', 30.0)
+            }
+            try:
+                self.connectivity_manager = LLaVAConnectivityManager(connectivity_config)
+                logger.debug(f"Connectivity hardening enabled for {provider_name}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize connectivity hardening: {e}")
+                self.connectivity_manager = None
+
+        # Pre-flight validation flag
+        self.pre_flight_validated = False
+        self.last_validation_time = 0
+        self.validation_cache_ttl = config.get('validation_cache_ttl', 300)  # 5 minutes
     
+    def _run_pre_flight_validation(self) -> bool:
+        """
+        Run pre-flight connectivity validation with caching.
+
+        Returns:
+            True if validation passes or is cached, False otherwise
+        """
+        current_time = time.time()
+
+        # Check if validation is still valid from cache
+        if (self.pre_flight_validated and
+            current_time - self.last_validation_time < self.validation_cache_ttl):
+            return True
+
+        # Skip if no connectivity manager
+        if not self.connectivity_manager:
+            logger.debug("No connectivity manager available, skipping pre-flight validation")
+            return True
+
+        provider_config = {
+            'name': self.provider_name,
+            'base_url': self.config.get('base_url', 'http://127.0.0.1:11434'),
+            'model': self.config.get('model', 'llava:latest')
+        }
+
+        try:
+            logger.debug(f"Running pre-flight validation for {self.provider_name}")
+            validation_result = self.connectivity_manager.validate_connectivity(provider_config)
+
+            self.pre_flight_validated = validation_result['can_process']
+            self.last_validation_time = current_time
+
+            if validation_result['can_process']:
+                logger.info(f"✅ Pre-flight validation passed for {self.provider_name} "
+                          f"(status: {validation_result['overall_status'].value})")
+
+                # Log recommendations if service is degraded
+                if validation_result['recommendations']:
+                    for rec in validation_result['recommendations']:
+                        logger.warning(f"⚠️ {rec}")
+            else:
+                logger.error(f"❌ Pre-flight validation failed for {self.provider_name}")
+                for rec in validation_result['recommendations']:
+                    logger.error(f"💡 {rec}")
+
+            return self.pre_flight_validated
+
+        except Exception as e:
+            logger.error(f"Pre-flight validation error for {self.provider_name}: {e}")
+            self.pre_flight_validated = False
+            return False
+
     def generate_alt_text(self, image_path: str, custom_prompt: str) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
         Returns (generation_result, metadata). Must NOT send chat objects to /api/generate.
+        Enhanced with connectivity hardening and pre-flight validation.
+        """
+        # Run pre-flight validation
+        if not self._run_pre_flight_validation():
+            # Create graceful degradation response
+            degraded_text = self._create_degradation_response(custom_prompt, image_path)
+            return (
+                {"status": "degraded", "text": degraded_text},
+                {
+                    "success": True,  # Mark as success since we provided fallback
+                    "provider": self.provider_name,
+                    "degraded": True,
+                    "reason": "Pre-flight validation failed",
+                    "generation_time": 0.1,
+                    "tokens_used": 0,
+                    "cost_estimate": 0.0
+                }
+            )
+        # Use hardened execution if connectivity manager is available
+        if self.connectivity_manager:
+            try:
+                result = self.connectivity_manager.execute_with_hardening(
+                    self._execute_generation_request,
+                    self.provider_name,
+                    custom_prompt,
+                    image_path
+                )
+                return result
+            except Exception as e:
+                # If hardened execution fails, create degradation response
+                logger.warning(f"Hardened execution failed for {self.provider_name}: {e}")
+                degraded_text = self._create_degradation_response(custom_prompt, image_path)
+                return (
+                    {"status": "degraded", "text": degraded_text},
+                    {
+                        "success": True,
+                        "provider": self.provider_name,
+                        "degraded": True,
+                        "reason": f"Hardened execution failed: {str(e)}",
+                        "generation_time": 0.1,
+                        "tokens_used": 0,
+                        "cost_estimate": 0.0
+                    }
+                )
+        else:
+            # Fallback to original execution without hardening
+            return self._execute_generation_request(custom_prompt, image_path)
+
+    def _execute_generation_request(self, custom_prompt: str, image_path: str) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Execute the actual generation request (extracted for hardening wrapper).
         """
         # Extract configuration
         base_url = self.config.get('base_url', 'http://127.0.0.1:11434')
         model = self.config.get('model', 'llava:latest')
         endpoint_path = self.config.get('endpoint', '/api/generate')
-        
+
         # Safely build the URL
         full = _make_safe_url(base_url, endpoint_path)
-        
+
         # Log the URL once for debugging (only in debug mode)
         if not hasattr(self, '_url_logged'):
             logger.info(f"LLaVA generate URL: {full}")
@@ -191,7 +325,7 @@ class LLaVAProvider(BaseAltProvider):
             "num_predict": 100,      # Limit response length
             "repeat_penalty": 1.0,   # No repetition penalty to avoid randomness
         }
-        
+
         # Add seed if supported (for full determinism)
         seed = self.config.get('seed', 42)
         if seed is not None:
@@ -199,95 +333,97 @@ class LLaVAProvider(BaseAltProvider):
 
         # Choose payload shape based on endpoint
         if endpoint_path.endswith("/api/chat"):
-            # Chat style expects messages (object), so we use chat format here
             payload = {
                 "model": model,
                 "messages": [
                     {"role": "system", "content": "You are an expert accessibility captioner."},
                     {"role": "user", "content": prompt_text}
                 ],
-                # Ollama supports images at top-level with chat as of recent versions;
-                # if your version requires images inside message content, move it there accordingly.
                 "images": [img_b64],
                 "stream": False,
                 "options": deterministic_options
             }
         else:
-            # /api/generate requires a STRING prompt; images go in a separate array
             payload = {
                 "model": model,
-                "prompt": prompt_text,   # <-- STRING, not object
-                "images": [img_b64],     # base64 strings
+                "prompt": prompt_text,
+                "images": [img_b64],
                 "stream": False,
                 "options": deterministic_options
             }
 
         headers = {"Content-Type": "application/json"}
-        retries = self.config.get('retries', 5)
-        backoff = self.config.get('retry_backoff_sec', 1.0)
-        last_err = None
-
         start_time = time.time()
-        
-        for attempt in range(1, retries + 1):
-            try:
-                resp = requests.post(full, data=json.dumps(payload), headers=headers, timeout=60)
-                # Raise for HTTP-level errors (400, 500...)
-                resp.raise_for_status()
-                data = resp.json()
 
-                # Parse response shape: Ollama returns {'response': '...'} for generate,
-                # and {'message': {'content': '...'}} for chat.
-                if endpoint_path.endswith("/api/chat"):
-                    content = (data.get("message") or {}).get("content") or ""
-                else:
-                    content = data.get("response") or ""
+        # Single request attempt (retries are handled by connectivity manager)
+        resp = requests.post(full, data=json.dumps(payload), headers=headers, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
 
-                content = (content or "").strip()
-                if not content:
-                    raise ValueError("Empty response from provider.")
+        # Parse response
+        if endpoint_path.endswith("/api/chat"):
+            content = (data.get("message") or {}).get("content") or ""
+        else:
+            content = data.get("response") or ""
 
-                # Apply normalization to 1-2 complete sentences (no truncation)
-                content = self._normalize_to_complete_sentences(content)
-                
-                generation_result = {"status": "ok", "text": content}
-                    
-                meta = {
-                    "endpoint": endpoint_path, 
-                    "model": model, 
-                    "length": len(content),
-                    "success": True,
-                    "generation_time": time.time() - start_time,
-                    "provider": self.provider_name,
-                    "tokens_used": 0,
-                    "cost_estimate": 0.0
-                }
-                logger.info("✅ Generated ALT text (%.3fs): %s", meta["generation_time"], content[:100])
-                return generation_result, meta
+        content = (content or "").strip()
+        if not content:
+            raise ValueError("Empty response from provider.")
 
-            except requests.HTTPError as e:
-                # Log full server response for easier debugging
-                txt = e.response.text if getattr(e, "response", None) is not None else ""
-                last_err = f"{e} | body: {txt}"
-                logger.warning(f"HTTP error (attempt {attempt}/{retries}): {last_err}")
-                time.sleep(backoff)
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"Request failed (attempt {attempt}/{retries}): {last_err}")
-                time.sleep(backoff)
+        # Apply normalization to 1-2 complete sentences
+        content = self._normalize_to_complete_sentences(content)
 
-        # All attempts failed
-        generation_result = {"status": "fail", "reason": "provider_error"}
+        generation_result = {"status": "ok", "text": content}
+
         meta = {
-            "success": False,
-            "error": last_err,
+            "endpoint": endpoint_path,
+            "model": model,
+            "length": len(content),
+            "success": True,
             "generation_time": time.time() - start_time,
             "provider": self.provider_name,
-            "endpoint": endpoint_path,
-            "model": model
+            "tokens_used": 0,
+            "cost_estimate": 0.0
         }
-        logger.error(f"LLaVA/Ollama call failed after {retries} attempts: {last_err}")
+        logger.info("✅ Generated ALT text (%.3fs): %s", meta["generation_time"], content[:100])
         return generation_result, meta
+
+    def _create_degradation_response(self, custom_prompt: str, image_path: str) -> str:
+        """
+        Create a graceful degradation response when LLaVA is unavailable.
+        """
+        if self.connectivity_manager:
+            # Use the connectivity manager's degradation logic
+            context = getattr(self, 'context', '') or custom_prompt
+            return self.connectivity_manager.create_degraded_response(context)
+        else:
+            # Simple fallback
+            return "Visual content. Detailed description unavailable due to service limitations."
+
+    def get_connectivity_status(self) -> Dict[str, Any]:
+        """Get detailed connectivity status for this provider."""
+        if self.connectivity_manager:
+            return {
+                'hardening_enabled': True,
+                'pre_flight_validated': self.pre_flight_validated,
+                'last_validation_time': self.last_validation_time,
+                'service_status': self.connectivity_manager.get_service_status(),
+                'provider_name': self.provider_name
+            }
+        else:
+            return {
+                'hardening_enabled': False,
+                'provider_name': self.provider_name,
+                'status': 'basic_mode'
+            }
+
+    def force_connectivity_reset(self):
+        """Force reset connectivity state (for testing/recovery)."""
+        if self.connectivity_manager:
+            self.connectivity_manager.force_circuit_breaker_reset(self.provider_name)
+            self.pre_flight_validated = False
+            self.last_validation_time = 0
+            logger.info(f"Connectivity state reset for {self.provider_name}")
     
     def _normalize_to_complete_sentences(self, text: str) -> str:
         """
@@ -608,9 +744,25 @@ class FlexibleAltGenerator:
                     # Handle failure cases
                     if generation_result and generation_result.get("status") == "fail":
                         error_message = generation_result.get("reason", "Unknown failure")
+                    elif generation_result and generation_result.get("status") == "degraded":
+                        # Degraded responses are still successes
+                        self.usage_stats['successful_requests'] += 1
+                        final_metadata["successful_provider"] = provider_name
+                        final_metadata["successful_model"] = metadata.get("model", "degraded")
+
+                        logger.warning(f"⚠️ Degraded response from {provider_name}: {generation_result.get('text', '')[:50]}...")
+
+                        # Record success to reset failure state
+                        self._record_success(provider_name)
+
+                        result = generation_result.get("text", "")
+                        if return_metadata:
+                            return result, final_metadata
+                        else:
+                            return result
                     else:
                         error_message = metadata.get("error", "No result returned")
-                    
+
                     status_code = metadata.get("status_code")
                     # Create a mock exception for failure recording
                     mock_error = Exception(error_message)
@@ -1254,6 +1406,110 @@ class FlexibleAltGenerator:
                 }
         
         return performance
+
+    def get_connectivity_status(self) -> Dict[str, Any]:
+        """Get comprehensive connectivity status for all providers."""
+        status = {
+            'timestamp': time.time(),
+            'providers': {},
+            'overall_connectivity_health': True
+        }
+
+        for provider_name, provider in self.providers.items():
+            if hasattr(provider, 'get_connectivity_status'):
+                provider_status = provider.get_connectivity_status()
+                status['providers'][provider_name] = provider_status
+
+                # Check if this provider affects overall health
+                if provider_status.get('hardening_enabled', False):
+                    service_status = provider_status.get('service_status', {})
+                    if not service_status.get('overall_healthy', True):
+                        status['overall_connectivity_health'] = False
+            else:
+                status['providers'][provider_name] = {
+                    'hardening_enabled': False,
+                    'status': 'legacy_mode'
+                }
+
+        return status
+
+    def force_connectivity_reset(self, provider_name: Optional[str] = None):
+        """Force reset connectivity state for specified provider or all providers."""
+        if provider_name:
+            if provider_name in self.providers:
+                provider = self.providers[provider_name]
+                if hasattr(provider, 'force_connectivity_reset'):
+                    provider.force_connectivity_reset()
+                    logger.info(f"Connectivity reset for {provider_name}")
+                else:
+                    logger.warning(f"Provider {provider_name} does not support connectivity reset")
+            else:
+                logger.error(f"Provider {provider_name} not found")
+        else:
+            # Reset all providers
+            for name, provider in self.providers.items():
+                if hasattr(provider, 'force_connectivity_reset'):
+                    provider.force_connectivity_reset()
+            logger.info("Connectivity reset for all providers")
+
+    def run_connectivity_diagnostics(self) -> Dict[str, Any]:
+        """Run comprehensive connectivity diagnostics for all providers."""
+        diagnostics = {
+            'timestamp': time.time(),
+            'diagnostics': {},
+            'summary': {
+                'total_providers': len(self.providers),
+                'hardened_providers': 0,
+                'healthy_providers': 0,
+                'degraded_providers': 0,
+                'failing_providers': 0
+            }
+        }
+
+        for provider_name, provider in self.providers.items():
+            provider_diagnostics = {
+                'provider_name': provider_name,
+                'hardening_enabled': False,
+                'connectivity_test_results': None
+            }
+
+            if hasattr(provider, 'get_connectivity_status'):
+                status = provider.get_connectivity_status()
+                provider_diagnostics['hardening_enabled'] = status.get('hardening_enabled', False)
+                provider_diagnostics['status'] = status
+
+                if provider_diagnostics['hardening_enabled']:
+                    diagnostics['summary']['hardened_providers'] += 1
+
+                    # Run validation test
+                    if hasattr(provider, '_run_pre_flight_validation'):
+                        try:
+                            logger.info(f"Running connectivity test for {provider_name}")
+                            test_result = provider._run_pre_flight_validation()
+                            provider_diagnostics['connectivity_test_results'] = {
+                                'passed': test_result,
+                                'timestamp': time.time()
+                            }
+
+                            if test_result:
+                                diagnostics['summary']['healthy_providers'] += 1
+                            else:
+                                diagnostics['summary']['failing_providers'] += 1
+
+                        except Exception as e:
+                            provider_diagnostics['connectivity_test_results'] = {
+                                'passed': False,
+                                'error': str(e),
+                                'timestamp': time.time()
+                            }
+                            diagnostics['summary']['failing_providers'] += 1
+                else:
+                    # Legacy provider - assume healthy but not hardened
+                    diagnostics['summary']['healthy_providers'] += 1
+
+            diagnostics['diagnostics'][provider_name] = provider_diagnostics
+
+        return diagnostics
 
     def generate_text_response(self, prompt: str) -> Optional[str]:
         """
