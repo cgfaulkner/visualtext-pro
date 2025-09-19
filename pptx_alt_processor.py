@@ -32,6 +32,7 @@ sys.path.insert(0, str(project_root / "core"))
 from config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
 from pptx_alt_injector import PPTXAltTextInjector
+from resource_manager import ResourceContext, validate_system_resources
 
 # Set up enhanced logging (will be replaced by enhanced config if enabled)
 logging.basicConfig(
@@ -145,102 +146,117 @@ class PPTXAltProcessor:
         
         logger.info(f"Processing PPTX: {input_path.name}")
         logger.info(f"Output: {output_path.name}")
-        
-        start_time = time.time()
-        
-        try:
-            # Clear previous failed generations
-            self.failed_generations = []
-            
-            # Use the existing PPTXAccessibilityProcessor with enhanced validation
-            result = self.pptx_processor.process_pptx(
-                str(input_path), 
-                str(output_path), 
-                failed_generation_callback=self._log_failed_generation,
-                debug=self.debug
-            )
-            
-            processing_time = time.time() - start_time
-            result['processing_time'] = processing_time
-            
-            # Ensure we have the processed_images count
-            if 'processed_images' not in result:
-                result['processed_images'] = result.get('total_images', 0)
-            
-            if result['success']:
-                # Generate and log coverage report
-                coverage_report = self._generate_coverage_report(result)
-                result['coverage_report'] = coverage_report
-                
-                logger.info(f"✅ Successfully processed PPTX:")
-                logger.info(f"   Input: {input_path.name}")
-                logger.info(f"   Output: {output_path.name}")
-                logger.info(f"   Images processed: {result['processed_images']}")
-                logger.info(f"   Processing time: {processing_time:.2f}s")
-                
-                # Log coverage statistics
-                self._log_coverage_report(coverage_report)
-                
-                # Generate coverage report file if requested
-                if generate_coverage_report:
-                    self._save_coverage_report_file(coverage_report, input_path, output_path)
-                
-                # Optional PDF export
-                if export_pdf:
-                    pdf_result = self._export_to_pdf(output_path)
-                    result['pdf_export'] = pdf_result
-                    
-                    if pdf_result['success']:
-                        logger.info(f"   PDF exported: {pdf_result['pdf_file']}")
-                    else:
-                        logger.warning(f"   PDF export failed: {pdf_result['error']}")
-            else:
-                logger.error(f"❌ Processing failed:")
-                for error in result.get('errors', []):
-                    logger.error(f"   - {error}")
-            
-            # Log any failed generations for manual review
-            if self.failed_generations:
-                self._log_failed_generations_summary()
-                result['failed_generations'] = self.failed_generations
-            
-            # Export session data if enhanced logging is available
-            if self.log_config:
-                try:
-                    # Update processing stats
-                    self.log_config.update_processing_stats({
-                        'processing_time': time.time() - start_time,
-                        'input_file': str(input_path),
-                        'output_file': str(output_path),
-                        'success': True
-                    })
-                    # Export logs and data
-                    self.log_config.export_session_data()
-                    
-                    # Log session summary
-                    summary = self.log_config.get_session_summary()
-                    logger.info(f"📊 Session Summary:")
-                    logger.info(f"   ALT texts generated: {summary['total_alt_texts']}")
-                    logger.info(f"   Failed generations: {summary['total_failures']}")
-                    logger.info(f"   Success rate: {summary['success_rate']:.1f}%")
-                    logger.info(f"   Session logs saved to: logs/{self.log_config.session_id}*")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to export session data: {e}")
-            
-            return result
-            
-        except Exception as e:
-            error_msg = f"Processing failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            
+
+        # Pre-flight disk space check
+        validation_result = validate_system_resources(required_memory_mb=250, required_disk_mb=300)
+        if not validation_result['sufficient']:
+            error_msg = "Insufficient system resources: " + "; ".join(validation_result['errors'])
+            logger.error(error_msg)
             return {
                 'success': False,
                 'input_file': str(input_path),
                 'output_file': str(output_path),
-                'processing_time': time.time() - start_time,
+                'processing_time': 0,
                 'errors': [error_msg]
             }
+
+        start_time = time.time()
+
+        # Use ResourceContext for safe processing
+        with ResourceContext(validate_resources=False, cleanup_on_exit=True) as (temp_manager, resource_monitor):
+            try:
+                # Clear previous failed generations
+                self.failed_generations = []
+
+                # Use the existing PPTXAccessibilityProcessor with enhanced validation
+                result = self.pptx_processor.process_pptx(
+                    str(input_path),
+                    str(output_path),
+                    failed_generation_callback=self._log_failed_generation,
+                    debug=self.debug
+                )
+
+                processing_time = time.time() - start_time
+                result['processing_time'] = processing_time
+
+                # Ensure we have the processed_images count
+                if 'processed_images' not in result:
+                    result['processed_images'] = result.get('total_images', 0)
+
+                if result['success']:
+                    # Generate and log coverage report
+                    coverage_report = self._generate_coverage_report(result)
+                    result['coverage_report'] = coverage_report
+
+                    logger.info(f"✅ Successfully processed PPTX:")
+                    logger.info(f"   Input: {input_path.name}")
+                    logger.info(f"   Output: {output_path.name}")
+                    logger.info(f"   Images processed: {result['processed_images']}")
+                    logger.info(f"   Processing time: {processing_time:.2f}s")
+
+                    # Log coverage statistics
+                    self._log_coverage_report(coverage_report)
+
+                    # Generate coverage report file if requested
+                    if generate_coverage_report:
+                        self._save_coverage_report_file(coverage_report, input_path, output_path)
+
+                    # Optional PDF export
+                    if export_pdf:
+                        pdf_result = self._export_to_pdf(output_path)
+                        result['pdf_export'] = pdf_result
+
+                        if pdf_result['success']:
+                            logger.info(f"   PDF exported: {pdf_result['pdf_file']}")
+                        else:
+                            logger.warning(f"   PDF export failed: {pdf_result['error']}")
+                else:
+                    logger.error(f"❌ Processing failed:")
+                    for error in result.get('errors', []):
+                        logger.error(f"   - {error}")
+
+                # Log any failed generations for manual review
+                if self.failed_generations:
+                    self._log_failed_generations_summary()
+                    result['failed_generations'] = self.failed_generations
+
+                # Export session data if enhanced logging is available
+                if self.log_config:
+                    try:
+                        # Update processing stats
+                        self.log_config.update_processing_stats({
+                            'processing_time': time.time() - start_time,
+                            'input_file': str(input_path),
+                            'output_file': str(output_path),
+                            'success': True
+                        })
+                        # Export logs and data
+                        self.log_config.export_session_data()
+
+                        # Log session summary
+                        summary = self.log_config.get_session_summary()
+                        logger.info(f"📊 Session Summary:")
+                        logger.info(f"   ALT texts generated: {summary['total_alt_texts']}")
+                        logger.info(f"   Failed generations: {summary['total_failures']}")
+                        logger.info(f"   Success rate: {summary['success_rate']:.1f}%")
+                        logger.info(f"   Session logs saved to: logs/{self.log_config.session_id}*")
+
+                    except Exception as e:
+                        logger.warning(f"Failed to export session data: {e}")
+
+                return result
+
+            except Exception as e:
+                error_msg = f"Processing failed: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+
+                return {
+                    'success': False,
+                    'input_file': str(input_path),
+                    'output_file': str(output_path),
+                    'processing_time': time.time() - start_time,
+                    'errors': [error_msg]
+                }
     
     def process_directory(self, input_dir: str, output_dir: Optional[str] = None,
                          pattern: str = "*.pptx", export_pdf: bool = False) -> dict:
@@ -265,7 +281,21 @@ class PPTXAltProcessor:
         else:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
-        
+
+        # Pre-flight resource validation for batch processing
+        validation_result = validate_system_resources(required_memory_mb=400, required_disk_mb=500)
+        if not validation_result['sufficient']:
+            error_msg = "Insufficient system resources for batch processing: " + "; ".join(validation_result['errors'])
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'total_files': 0,
+                'processed_files': 0,
+                'failed_files': 0,
+                'files': [],
+                'errors': [error_msg]
+            }
+
         # Find PPTX files
         pptx_files = list(input_path.glob(pattern))
         if not pptx_files:
