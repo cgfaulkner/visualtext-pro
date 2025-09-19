@@ -21,22 +21,98 @@ def is_connector(shape):
     return bool(el is not None and el.tag.endswith('}cxnSp'))  # p:cxnSp
 
 
+def is_empty_placeholder_textbox(shape) -> bool:
+    """
+    Determine if a shape is an empty PowerPoint placeholder text box.
+
+    These are the "Click to add title" / "Click to add text" boxes that appear
+    in PowerPoint slide layouts but contain no actual content.
+
+    Args:
+        shape: python-pptx shape object
+
+    Returns:
+        True if shape is an empty placeholder that should be skipped
+    """
+    try:
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+    except ImportError:
+        return False
+
+    # Only check text boxes and placeholders
+    if not hasattr(shape, 'shape_type'):
+        return False
+
+    shape_type = getattr(shape, 'shape_type', None)
+    if shape_type not in [MSO_SHAPE_TYPE.TEXT_BOX, MSO_SHAPE_TYPE.PLACEHOLDER]:
+        return False
+
+    # Check if it has text content
+    if not hasattr(shape, 'text_frame') or not shape.text_frame:
+        return True  # No text frame = empty
+
+    try:
+        text_content = shape.text_frame.text.strip() if shape.text_frame.text else ""
+
+        # Empty text = placeholder
+        if not text_content:
+            return True
+
+        # Check for common PowerPoint placeholder text patterns
+        placeholder_patterns = [
+            "click to add title",
+            "click to add text",
+            "click here to add title",
+            "click here to add text",
+            "add title",
+            "add text",
+            "title",  # Sometimes just shows "Title"
+            "content placeholder",
+            "text placeholder"
+        ]
+
+        text_lower = text_content.lower()
+        for pattern in placeholder_patterns:
+            if pattern in text_lower:
+                return True
+
+        # Check if it's a single word that might be a placeholder
+        words = text_content.split()
+        if len(words) == 1 and len(words[0]) < 10:
+            # Single short words are often placeholders
+            common_placeholders = ["title", "subtitle", "content", "text", "body"]
+            if words[0].lower() in common_placeholders:
+                return True
+
+        return False
+
+    except Exception as e:
+        logger.debug(f"Error checking placeholder text: {e}")
+        return False  # When in doubt, don't skip
+
+
 def is_image_like(shape) -> bool:
     """
     Robust detector for image-like shapes in PPTX including vectors/groups.
-    
+
+    Now excludes empty PowerPoint placeholder text boxes.
+
     Treats the following as image-like:
     - Regular pictures (MSO_SHAPE_TYPE.PICTURE)
     - Vector shapes with picture fill (AUTO_SHAPE with picture fill)
     - Group shapes containing any picture children
     - Shapes with embedded blips in XML (WMF/EMF vectors)
-    
+
     Args:
         shape: python-pptx shape object
-        
+
     Returns:
         True if shape should be treated as image-like for ALT text purposes
     """
+    # First check if it's an empty placeholder - if so, not image-like
+    if is_empty_placeholder_textbox(shape):
+        return False
+
     try:
         from pptx.enum.shapes import MSO_SHAPE_TYPE
     except ImportError:

@@ -17,7 +17,7 @@ from alt_manifest import (
     AltManifest, AltManifestEntry, compute_image_hash, create_stable_key,
     create_instance_key, create_content_key, parse_min_shape_area, MANIFEST_SCHEMA_VERSION
 )
-from shape_utils import is_image_like, is_decorative_shape
+from shape_utils import is_image_like, is_decorative_shape, is_empty_placeholder_textbox
 from alt_text_reader import read_existing_alt
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,11 @@ class ManifestProcessor:
                 
                 for shape_idx, shape in enumerate(slide.shapes):
                     try:
+                        # Skip empty placeholder text boxes
+                        if is_empty_placeholder_textbox(shape):
+                            logger.debug(f"Skipping empty placeholder textbox on slide {slide_idx + 1}")
+                            continue
+
                         # Get shape ID (unique within slide)
                         shape_id = getattr(shape, 'shape_id', shape_idx)
                         
