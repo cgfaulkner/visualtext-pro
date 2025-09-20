@@ -611,7 +611,11 @@ class PPTXAccessibilityProcessor:
                                 if debug:
                                     logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key} and fallback failed: {generation_failure_reason}, fallback: {fallback_e}", exc_info=True)
                                 else:
-                                    error_msg = f"Error processing {visual_element.element_key}: {generation_failure_reason}"
+                                    # Provide specific error details instead of generic messages
+                                    if str(generation_failure_reason) == "None" or not str(generation_failure_reason).strip():
+                                        error_msg = f"Error processing {visual_element.element_key}: ALT text generation returned empty result"
+                                    else:
+                                        error_msg = f"Error processing {visual_element.element_key}: {generation_failure_reason}"
                                     logger.error(error_msg)
                                     result['errors'].append(error_msg)
                     else:
@@ -619,7 +623,11 @@ class PPTXAccessibilityProcessor:
                         if debug:
                             logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key}: {generation_failure_reason}", exc_info=True)
                         else:
-                            error_msg = f"Error processing {visual_element.element_key}: {generation_failure_reason}"
+                            # Provide specific error details instead of generic messages
+                            if str(generation_failure_reason) == "None" or not str(generation_failure_reason).strip():
+                                error_msg = f"Error processing {visual_element.element_key}: ALT text generation returned empty result"
+                            else:
+                                error_msg = f"Error processing {visual_element.element_key}: {generation_failure_reason}"
                             logger.error(error_msg)
                             result['errors'].append(error_msg)
                         

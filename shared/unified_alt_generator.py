@@ -653,7 +653,12 @@ class FlexibleAltGenerator:
         if force_provider:
             if force_provider not in self.providers:
                 logger.error(f"Forced provider {force_provider} not available")
-                return None if not return_metadata else (None, {"error": "Provider not available"})
+                from processing_exceptions import ProcessingError
+                raise ProcessingError(
+                    f"ALT text generation failed: forced provider '{force_provider}' not available",
+                    error_code="PROVIDER_NOT_AVAILABLE",
+                    category="configuration"
+                )
             providers_to_try = [force_provider]
         else:
             providers_to_try = [p for p in self.fallback_chain if p in self.providers]
@@ -796,10 +801,15 @@ class FlexibleAltGenerator:
         logger.error(f"❌ All providers failed for image: {image_path}")
         final_metadata["successful_provider"] = None
 
-        if return_metadata:
-            return None, final_metadata
-        else:
-            return None
+        from processing_exceptions import ProcessingError
+        raise ProcessingError(
+            f"ALT text generation failed: all providers failed for image {image_path}",
+            error_code="ALL_PROVIDERS_FAILED",
+            category="service",
+            details=final_metadata,
+            recoverable=True,
+            recovery_hint="Check provider connectivity and try again"
+        )
 
     def _classify_failure(self, error: Exception, status_code: Optional[int] = None) -> str:
         """
@@ -1567,7 +1577,15 @@ class FlexibleAltGenerator:
             
         except Exception as e:
             logger.error(f"Error in generate_text_response: {e}")
-            return None
+            from processing_exceptions import ProcessingError
+            raise ProcessingError(
+                f"ALT text generation failed: {str(e)}",
+                error_code="TEXT_GENERATION_ERROR",
+                category="processing",
+                cause=e,
+                recoverable=True,
+                recovery_hint="Try again or use a different generation method"
+            )
     
     def _create_shape_fallback_from_prompt(self, prompt: str) -> str:
         """
