@@ -1,8 +1,8 @@
-# PDF-Alt - PowerPoint Accessibility Toolkit
+# VisualText Pro - Multi-Format Accessibility Toolkit
 
 ## Overview
 
-pdf-alt is a comprehensive accessibility toolkit for extracting visual elements from PowerPoint presentations, generating high-quality alternative text using AI vision models, and injecting the descriptions back into slides. The toolkit focuses on meaningful accessibility improvements while filtering out placeholder content and handling complex grouped shapes intelligently.
+VisualText Pro is a comprehensive accessibility toolkit for extracting visual elements from PowerPoint presentations, generating high-quality alternative text using AI vision models, and injecting the descriptions back into slides. The toolkit focuses on meaningful accessibility improvements while filtering out placeholder content and handling complex grouped shapes intelligently.
 
 **Key Features:**
 - AI-powered ALT text generation using local LLaVA models
@@ -16,7 +16,7 @@ pdf-alt is a comprehensive accessibility toolkit for extracting visual elements 
 ## Repository Structure
 
 ```
-pdf-alt/
+visualtext-pro/
 ├── core/                    # Core processing pipelines and orchestration
 ├── shared/                  # Shared utilities, configuration, and manifest handling  
 ├── Documents to Review/     # Default input folder for presentations
@@ -32,8 +32,8 @@ pdf-alt/
 
 1. **Python Environment**: Use Python 3.12 in a fresh virtual environment
    ```bash
-   python3.12 -m venv pdf-alt
-   source pdf-alt/bin/activate  # On Windows: pdf-alt\Scripts\activate
+   python3.12 -m venv visualtext-pro
+   source visualtext-pro/bin/activate  # On Windows: visualtext-pro\Scripts\activate
    ```
 
 2. **Install Dependencies**:
@@ -226,8 +226,8 @@ prompts:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `LLAVA_ENDPOINT` | Override LLaVA API endpoint | `http://127.0.0.1:11434` |
-| `PDF_ALT_CONFIG` | Override config file path | `config.yaml` |
-| `PDF_ALT_LOG_LEVEL` | Set logging verbosity | `INFO` |
+| `VISUALTEXT_PRO_CONFIG` | Override config file path | `config.yaml` |
+| `VISUALTEXT_PRO_LOG_LEVEL` | Set logging verbosity | `INFO` |
 
 ## Processing Pipeline Details
 
@@ -385,8 +385,8 @@ pytest --cov=. --cov-report=html
 
 1. **Development Setup**:
    ```bash
-   git clone https://github.com/your-repo/pdf-alt
-   cd pdf-alt
+   git clone https://github.com/your-repo/visualtext-pro
+   cd visualtext-pro
    python -m venv venv
    source venv/bin/activate
    pip install -r requirements-dev.txt

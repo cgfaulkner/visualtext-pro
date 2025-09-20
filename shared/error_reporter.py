@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standardized Error Reporting for PDF-Alt Processing
+Standardized Error Reporting for VisualText Pro Processing
 ===================================================
 
 Consistent error reporting and JSON output across all processors,

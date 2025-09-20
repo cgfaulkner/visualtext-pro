@@ -107,7 +107,7 @@ class ConnectionPool:
 
         # Set common headers
         self.session.headers.update({
-            'User-Agent': 'pdf-alt-llava-client/1.0',
+            'User-Agent': 'visualtext-pro-llava-client/1.0',
             'Accept': 'application/json',
             'Content-Type': 'application/json'
         })

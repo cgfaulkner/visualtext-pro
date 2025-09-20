@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Smart Recovery Strategies for PDF-Alt Processing
+Smart Recovery Strategies for VisualText Pro Processing
 ================================================
 
 Leverages Session 1's resource cleanup and Session 2's LLaVA hardening

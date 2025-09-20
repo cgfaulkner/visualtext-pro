@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Resource Management for PDF-Alt Processing
+Resource Management for VisualText Pro Processing
 ==========================================
 
 Centralized resource cleanup and monitoring to prevent temp file leaks

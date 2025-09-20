@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Exception Hierarchy for PDF-Alt Processing
+Unified Exception Hierarchy for VisualText Pro Processing
 ================================================
 
 Common exception classes for all processors with consistent error codes,
