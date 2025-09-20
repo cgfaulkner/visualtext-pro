@@ -697,10 +697,17 @@ class PPTXAccessibilityProcessor:
 
                         # Report visual element coverage
                         if result['total_visual_elements'] > 0:
-                            coverage = (result['processed_visual_elements'] / result['total_visual_elements']) * 100
-                            logger.info(f"📊 Visual element ALT text coverage: {result['processed_visual_elements']}/{result['total_visual_elements']} ({coverage:.1f}%)")
+                            # Calculate actual success metrics
+                            total_elements = len(visual_elements)
+                            successful_elements = len(alt_text_mapping)
+                            failed_elements = total_elements - successful_elements
+                            coverage_percent = (successful_elements / total_elements * 100) if total_elements > 0 else 0
 
-                            if coverage == 100.0:
+                            logger.info(f"📊 Visual element ALT text coverage: {successful_elements}/{total_elements} ({coverage_percent:.1f}%)")
+                            logger.info(f"   ✅ Successfully processed: {successful_elements}")
+                            logger.info(f"   ❌ Failed to process: {failed_elements}")
+
+                            if coverage_percent == 100.0:
                                 logger.info("🎯 100% visual element ALT text coverage achieved!")
                         else:
                             logger.info("📊 No visual elements found to process")
