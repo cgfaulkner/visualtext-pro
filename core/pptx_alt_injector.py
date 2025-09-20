@@ -3120,24 +3120,29 @@ class PPTXAltTextInjector:
                 # Get current ALT text using all available methods
                 current_alt_text = self._get_existing_alt_text(shape)
                 
-                if current_alt_text == expected_alt_text:
-                    logger.info(f"🔍 DEBUG: ✅ VERIFIED: {image_key}")
-                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
-                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
+                # Normalize both texts for comparison
+                expected_normalized = self._normalize_for_comparison(expected_alt_text)
+                actual_normalized = self._normalize_for_comparison(current_alt_text)
+
+                if expected_normalized == actual_normalized:
+                    logger.info(f"🔍 DEBUG: ✅ VERIFIED (normalized): {image_key}")
+                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}' -> '{expected_normalized}'")
+                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}' -> '{actual_normalized}'")
                     successful_injections += 1
                 else:
                     logger.info(f"🔍 DEBUG: ❌ FAILED: {image_key}")
-                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
-                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
-                    
+                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}' -> '{expected_normalized}'")
+                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}' -> '{actual_normalized}'")
+
                     # REPAIR PASS: Check if actual text matches blocked fallback patterns
                     if self._is_blocked_fallback_pattern(current_alt_text):
                         logger.info(f"🔧 REPAIR: Detected blocked fallback pattern, attempting repair...")
                         repair_success = self._inject_alt(shape, expected_alt_text, image_key, "repair_injected")
                         if repair_success:
-                            # Re-verify after repair
+                            # Re-verify after repair using normalized comparison
                             repaired_text = self._get_existing_alt_text(shape)
-                            if repaired_text == expected_alt_text:
+                            repaired_normalized = self._normalize_for_comparison(repaired_text)
+                            if repaired_normalized == expected_normalized:
                                 logger.info(f"🔧 REPAIR: ✅ Successfully repaired {image_key}")
                                 successful_injections += 1
                                 continue
@@ -3145,7 +3150,7 @@ class PPTXAltTextInjector:
                                 logger.warning(f"🔧 REPAIR: ❌ Repair verification failed for {image_key}")
                         else:
                             logger.warning(f"🔧 REPAIR: ❌ Repair injection failed for {image_key}")
-                    
+
                     failed_injections += 1
                     
                     # Additional debug info for failed injections
