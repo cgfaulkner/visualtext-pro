@@ -6000,23 +6000,21 @@ class PPTXAccessibilityProcessor:
         logger.info(f"💾 Output file: {result['output_file']}")
         logger.info(f"📄 Total slides: {result['total_slides']}")
         
-        # Visual element processing summary
-        total_elements = result.get('total_visual_elements', 0)
-        processed_elements = result.get('processed_visual_elements', 0)
-        failed_elements = result.get('failed_visual_elements', 0)
-        
+        # Visual element processing summary - recalculate accurate success metrics
+        total_found = result.get('total_visual_elements', 0)
+        total_processed = len(result.get('final_alt_map', {}))
+        actual_failures = total_found - total_processed
+        success_rate = (total_processed / total_found * 100) if total_found > 0 else 0
+
         logger.info(f"\n🎯 Visual Element Processing:")
-        logger.info(f"   📊 Total elements found: {total_elements}")
-        logger.info(f"   ✅ Elements processed: {processed_elements}")
-        logger.info(f"   ❌ Failed elements: {failed_elements}")
-        
-        if total_elements > 0:
-            # Calculate actual success rate (only count truly successful elements)
-            successful_elements = processed_elements - failed_elements
-            success_rate = (successful_elements / total_elements) * 100 if total_elements > 0 else 0
-            logger.info(f"   🎯 Success rate: {success_rate:.1f}%")
-            logger.info(f"   📈 Elements per slide: {total_elements / result['total_slides']:.1f}")
-        
+        logger.info(f"   📊 Total elements found: {total_found}")
+        logger.info(f"   ✅ Elements processed: {total_processed}")
+        logger.info(f"   ❌ Failed elements: {actual_failures}")
+        logger.info(f"   🎯 Success rate: {success_rate:.1f}%")
+
+        if total_found > 0:
+            logger.info(f"   📈 Elements per slide: {total_found / result['total_slides']:.1f}")
+
         # Timing information
         logger.info(f"  Generation time: {result['generation_time']:.2f}s")
         logger.info(f"  Injection time: {result['injection_time']:.2f}s")
@@ -6024,16 +6022,18 @@ class PPTXAccessibilityProcessor:
             logger.info(f"  Decorative marking time: {result['decorative_marking_time']:.2f}s")
         logger.info(f"  Total processing time: {result['total_time']:.2f}s")
         logger.info(f"  Success: {result['success']}")
-        
+
         # Calculate and log coverage
-        if result.get('total_visual_elements', 0) > 0:
-            coverage_percent = (result.get('processed_visual_elements', 0) / result['total_visual_elements'] * 100)
-            logger.info(f"  Visual Element Coverage: {result.get('processed_visual_elements', 0)}/{result['total_visual_elements']} ({coverage_percent:.1f}%)")
-        
-        if result['errors']:
-            logger.warning(f"Errors encountered: {len(result['errors'])}")
-            for error in result['errors']:
+        if total_found > 0:
+            logger.info(f"  Visual Element Coverage: {total_processed}/{total_found} ({success_rate:.1f}%)")
+
+        # Only show error list if there are actual failures
+        if actual_failures > 0 and result.get('errors'):
+            logger.warning(f"Errors encountered: {actual_failures}")
+            for error in result['errors'][:3]:  # Show first 3 only
                 logger.warning(f"  - {error}")
+            if len(result['errors']) > 3:
+                logger.warning(f"  ... and {len(result['errors']) - 3} more errors")
 
 
 def debug_image_extraction(pptx_path: str):
