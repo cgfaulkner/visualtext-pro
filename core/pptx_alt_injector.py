@@ -3191,40 +3191,39 @@ class PPTXAltTextInjector:
     
     def _normalize_for_comparison(self, text: str) -> str:
         """
-        Normalize ALT text for comparison to avoid redundant updates.
-        
-        Args:
-            text: ALT text to normalize
-            
-        Returns:
-            Normalized text for comparison
+        Enhanced normalization for accurate comparison that handles:
+        - Capitalization differences
+        - Punctuation variations
+        - Whitespace normalization
         """
         if not text:
             return ""
-        
+
         import re
-        
-        # Normalize whitespace and case
-        normalized = re.sub(r'\s+', ' ', text.strip().lower())
-        
-        # Remove common punctuation variations
+
+        # Normalize whitespace first
+        normalized = re.sub(r'\s+', ' ', text.strip())
+
+        # Normalize case but preserve proper nouns (simple heuristic)
+        words = normalized.split()
+        normalized_words = []
+        for i, word in enumerate(words):
+            if i == 0:  # First word gets capitalized
+                normalized_words.append(word.capitalize())
+            elif word.lower() in ['powerpoint', 'microsoft', 'southwestern', 'medical', 'center']:
+                # Preserve known proper nouns
+                normalized_words.append(word.title())
+            else:
+                normalized_words.append(word.lower())
+
+        normalized = ' '.join(normalized_words)
+
+        # Normalize punctuation - ensure consistent ending
         normalized = re.sub(r'[.!?]+$', '', normalized)  # Remove trailing punctuation
-        
-        # Remove common prefixes that don't affect meaning
-        prefixes = [
-            'this is a powerpoint ',
-            'powerpoint ',
-            'a ',
-            'an ',
-            'the '
-        ]
-        
-        for prefix in prefixes:
-            if normalized.startswith(prefix):
-                normalized = normalized[len(prefix):]
-                break
-        
-        return normalized.strip()
+        if not normalized.endswith('.'):
+            normalized += '.'  # Add consistent ending
+
+        return normalized
     
     def _create_title_from_alt_text(self, alt_text: str) -> str:
         """
