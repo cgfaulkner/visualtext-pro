@@ -90,7 +90,7 @@ def setup_logging(output_dir: Path, cfg: Dict[str, Any]) -> logging.Logger:
     log_to_file = ((cfg.get("logging") or {}).get("log_to_file") is True)
     if log_to_file:
         output_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(output_dir / "batch_processor.log", encoding="utf-8")
+        fh = logging.FileHandler(output_dir / "batch_processor.txt", encoding="utf-8")
         fh.setLevel(level)
         fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
         logger.addHandler(fh)
