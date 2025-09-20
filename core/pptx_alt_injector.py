@@ -383,6 +383,11 @@ class PPTXAltTextInjector:
             r'\2', t, flags=re.IGNORECASE
         )
         t = self._ensure_terminal_punctuation(t)
+
+        # Ensure proper sentence case (capitalize first letter)
+        if t and t[0].islower():
+            t = t[0].upper() + t[1:]
+
         return t
 
     @staticmethod
