@@ -683,12 +683,13 @@ class PPTXAccessibilityProcessor:
                         for key, info in list(alt_text_mapping.items())[:3]:  # Show first 3
                             logger.info(f"🔍 DEBUG: {key} -> '{info['alt_text'][:30]}...'")
 
-                    injection_success, final_alt_map = self._inject_alt_text_to_pptx(
+                    injection_success, final_alt_map, injector_stats = self._inject_alt_text_to_pptx(
                         presentation, alt_text_mapping, str(output_path), debug
                     )
 
                     result['injection_time'] = time.time() - injection_start
                     result['final_alt_map'] = final_alt_map  # Store canonical mapping for approval docs
+                    result['injector_statistics'] = injector_stats  # Store injector statistics for accurate reporting
                     logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
 
                     if injection_success:
@@ -5835,17 +5836,17 @@ class PPTXAccessibilityProcessor:
         return validation_result
     
     def _inject_alt_text_to_pptx(self, presentation: Presentation,
-                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, Dict[str, Dict[str, Any]]]:
+                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, Dict[str, Dict[str, Any]], Dict[str, Any]]:
         """
         Inject ALT text into PPTX presentation using the dedicated injector.
-        
+
         Args:
             presentation: Presentation object
             alt_text_mapping: Mapping of image keys to ALT text and shape info
             output_path: Path to save modified PPTX
-            
+
         Returns:
-            Tuple containing success flag and enriched final ALT mapping
+            Tuple containing success flag, enriched final ALT mapping, and injector statistics
         """
         try:
             # Import the dedicated ALT text injector
@@ -5921,8 +5922,8 @@ class PPTXAccessibilityProcessor:
             logger.info(f"  Successfully injected: {stats['injected_successfully']}")
             logger.info(f"  Skipped (existing): {stats['skipped_existing']}")
             logger.info(f"  Failed: {stats['failed_injection']}")
-            
-            return result['success'], result.get('final_alt_map', enriched_mapping)
+
+            return result['success'], result.get('final_alt_map', enriched_mapping), stats
             
         except Exception as e:
             logger.error(f"Failed to inject ALT text via dedicated injector: {e}")
@@ -5944,7 +5945,14 @@ class PPTXAccessibilityProcessor:
                     'source_existing': None,
                     'source_generated': 'processor' if generated_meaningful else None,
                 }
-            return fallback_success, fallback_map
+            # Return empty statistics for fallback
+            fallback_stats = {
+                'total_images': len(fallback_map),
+                'injected_successfully': len([v for v in fallback_map.values() if v['decision'] == 'use_generated']),
+                'skipped_existing': 0,
+                'failed_injection': len([v for v in fallback_map.values() if v['decision'] == 'no_alt_available'])
+            }
+            return fallback_success, fallback_map, fallback_stats
     
     def _inject_alt_text_simple(self, presentation: Presentation, 
                               alt_text_mapping: Dict[str, Any], output_path: str) -> bool:
