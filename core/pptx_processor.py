@@ -5996,7 +5996,9 @@ class PPTXAccessibilityProcessor:
         logger.info(f"   ❌ Failed elements: {failed_elements}")
         
         if total_elements > 0:
-            success_rate = (processed_elements / total_elements) * 100
+            # Calculate actual success rate (only count truly successful elements)
+            successful_elements = processed_elements - failed_elements
+            success_rate = (successful_elements / total_elements) * 100 if total_elements > 0 else 0
             logger.info(f"   🎯 Success rate: {success_rate:.1f}%")
             logger.info(f"   📈 Elements per slide: {total_elements / result['total_slides']:.1f}")
         
