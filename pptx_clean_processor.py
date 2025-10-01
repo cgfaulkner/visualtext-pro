@@ -26,6 +26,9 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
+# Import path validation module (must come after sys.path setup)
+from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
+
 # Import clean pipeline components
 from pipeline_artifacts import RunArtifacts, normalize_final_alt_map
 from pipeline_phases import run_pipeline
@@ -225,12 +228,34 @@ Examples:
 
 def cmd_process(args) -> int:
     """Handle 'process' command - run full pipeline."""
-    input_path = Path(args.input_file)
+    # Validate input file path
+    try:
+        validated_input = sanitize_input_path(args.input_file)
+        input_path = validated_input
+    except SecurityError as e:
+        print(f"Security Error (input): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid input path: {e}")
+        return 1
+
     if not input_path.exists():
         print(f"❌ Input file not found: {args.input_file}")
         return 1
-    
-    output_path = args.output or str(input_path)
+
+    # Validate output path if provided
+    if args.output:
+        try:
+            validated_output = validate_output_path(args.output)
+            output_path = str(validated_output)
+        except SecurityError as e:
+            print(f"Security Error (output): {e}")
+            return 1
+        except ValueError as e:
+            print(f"Invalid output path: {e}")
+            return 1
+    else:
+        output_path = str(input_path)
     
     logger.info(f"Processing {input_path.name} with clean pipeline")
     start_time = time.time()
@@ -321,18 +346,49 @@ def cmd_process(args) -> int:
 
 def cmd_inject(args) -> int:
     """Handle 'inject' command - inject from existing final_alt_map."""
-    input_path = Path(args.input_file)
-    alt_map_path = Path(args.alt_map)
-    
+    # Validate input file path
+    try:
+        validated_input = sanitize_input_path(args.input_file)
+        input_path = validated_input
+    except SecurityError as e:
+        print(f"Security Error (input): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid input path: {e}")
+        return 1
+
+    # Validate ALT map path
+    try:
+        validated_alt_map = sanitize_input_path(args.alt_map)
+        alt_map_path = validated_alt_map
+    except SecurityError as e:
+        print(f"Security Error (ALT map): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid ALT map path: {e}")
+        return 1
+
     if not input_path.exists():
         print(f"❌ Input file not found: {args.input_file}")
         return 1
-        
+
     if not alt_map_path.exists():
         print(f"❌ ALT map file not found: {args.alt_map}")
         return 1
-    
-    output_path = args.output or str(input_path)
+
+    # Validate output path if provided
+    if args.output:
+        try:
+            validated_output = validate_output_path(args.output)
+            output_path = str(validated_output)
+        except SecurityError as e:
+            print(f"Security Error (output): {e}")
+            return 1
+        except ValueError as e:
+            print(f"Invalid output path: {e}")
+            return 1
+    else:
+        output_path = str(input_path)
     
     logger.info(f"Injecting ALT text from {alt_map_path.name} into {input_path.name}")
     
@@ -351,15 +407,36 @@ def cmd_inject(args) -> int:
 
 def cmd_review(args) -> int:
     """Handle 'review' command - generate review document from artifacts."""
-    # Check all required files exist
-    for path_arg, path_name in [
-        (args.visual_index, 'visual index'),
-        (args.current_alt, 'current ALT'),
-        (args.final_alt, 'final ALT')
+    # Validate and check all required files
+    try:
+        validated_visual_index = sanitize_input_path(args.visual_index)
+        validated_current_alt = sanitize_input_path(args.current_alt)
+        validated_final_alt = sanitize_input_path(args.final_alt)
+    except SecurityError as e:
+        print(f"Security Error: {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid path: {e}")
+        return 1
+
+    for path, path_name in [
+        (validated_visual_index, 'visual index'),
+        (validated_current_alt, 'current ALT'),
+        (validated_final_alt, 'final ALT')
     ]:
-        if not Path(path_arg).exists():
-            print(f"❌ {path_name} file not found: {path_arg}")
+        if not path.exists():
+            print(f"❌ {path_name} file not found: {path}")
             return 1
+
+    # Validate output path
+    try:
+        validated_output = validate_output_path(args.output)
+    except SecurityError as e:
+        print(f"Security Error (output): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid output path: {e}")
+        return 1
     
     logger.info(f"Generating review document from existing artifacts")
 
@@ -373,10 +450,10 @@ def cmd_review(args) -> int:
 
     try:
         generate_alt_review_doc(
-            args.visual_index,
-            args.current_alt,
-            args.final_alt,
-            args.output,
+            str(validated_visual_index),
+            str(validated_current_alt),
+            str(validated_final_alt),
+            str(validated_output),
             portrait=True,
             title=args.title,
             config_manager=config_manager

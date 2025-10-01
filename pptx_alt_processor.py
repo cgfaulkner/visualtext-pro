@@ -28,6 +28,9 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
+# Import path validation module (must come after sys.path setup)
+from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
+
 # Import system components
 from config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
@@ -1178,18 +1181,52 @@ Examples:
         return 1
     
     try:
+        # Validate config path if provided
+        config_path = args.config
+        if config_path:
+            try:
+                validated_config = sanitize_input_path(config_path)
+                config_path = str(validated_config)
+            except SecurityError as e:
+                print(f"Security Error (config): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid config path: {e}")
+                return 1
+
         # Initialize processor
         processor = PPTXAltProcessor(
-            args.config,
+            config_path,
             args.verbose,
             args.debug,
             fallback_policy_override=args.fallback_policy,
             mode_override=args.mode
         )
-        
+
         if args.command == 'process':
-            input_pptx = args.input_file
-            output_path = args.output
+            # Validate input file path
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_pptx = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            # Validate output path if provided
+            output_path = None
+            if args.output:
+                try:
+                    validated_output = validate_output_path(args.output)
+                    output_path = str(validated_output)
+                except SecurityError as e:
+                    print(f"Security Error (output): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output path: {e}")
+                    return 1
             
             # Handle new flags
             dry_run = getattr(args, 'dry_run', False)
@@ -1295,9 +1332,33 @@ Examples:
                         return 1
                 
         elif args.command == 'batch-process':
+            # Validate input directory
+            try:
+                validated_input_dir = sanitize_input_path(args.input_dir)
+                input_dir = str(validated_input_dir)
+            except SecurityError as e:
+                print(f"Security Error (input directory): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input directory: {e}")
+                return 1
+
+            # Validate output directory if provided
+            output_dir = None
+            if args.output_dir:
+                try:
+                    validated_output_dir = validate_output_path(args.output_dir)
+                    output_dir = str(validated_output_dir)
+                except SecurityError as e:
+                    print(f"Security Error (output directory): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output directory: {e}")
+                    return 1
+
             result = processor.process_directory(
-                args.input_dir,
-                args.output_dir,
+                input_dir,
+                output_dir,
                 args.pattern,
                 args.export_pdf
             )
@@ -1312,7 +1373,31 @@ Examples:
                 return 1
                 
         elif args.command == 'extract':
-            result = processor.extract_images_only(args.input_file, args.output)
+            # Validate input file
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_file = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            # Validate output file if provided
+            output_file = None
+            if args.output:
+                try:
+                    validated_output = validate_output_path(args.output)
+                    output_file = str(validated_output)
+                except SecurityError as e:
+                    print(f"Security Error (output): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output path: {e}")
+                    return 1
+
+            result = processor.extract_images_only(input_file, output_file)
             
             if result['success']:
                 print(f"✅ Extracted {result['images_extracted']} images")
@@ -1323,10 +1408,45 @@ Examples:
                 return 1
                 
         elif args.command == 'inject':
+            # Validate input file
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_file = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            # Validate alt text file
+            try:
+                validated_alt_text = sanitize_input_path(args.alt_text_file)
+                alt_text_file = str(validated_alt_text)
+            except SecurityError as e:
+                print(f"Security Error (alt text file): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid alt text file path: {e}")
+                return 1
+
+            # Validate output file if provided
+            output_file = None
+            if args.output:
+                try:
+                    validated_output = validate_output_path(args.output)
+                    output_file = str(validated_output)
+                except SecurityError as e:
+                    print(f"Security Error (output): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output path: {e}")
+                    return 1
+
             result = processor.inject_alt_text_from_file(
-                args.input_file,
-                args.alt_text_file,
-                args.output
+                input_file,
+                alt_text_file,
+                output_file
             )
             
             if result['success']:
@@ -1339,7 +1459,18 @@ Examples:
                 return 1
                 
         elif args.command == 'test-survival':
-            result = processor.test_pdf_export_survival(args.input_file)
+            # Validate input file
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_file = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            result = processor.test_pdf_export_survival(input_file)
             
             if result['success']:
                 print("✅ ALT text survival test completed:")

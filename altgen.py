@@ -73,6 +73,7 @@ class ProcessorDispatcher:
 
     def dispatch_analyze(self, file_path: str) -> int:
         """Dispatch analyze command to appropriate processor"""
+        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         if processor == PROCESSOR_MAP["clean"]:
@@ -89,6 +90,7 @@ class ProcessorDispatcher:
 
     def dispatch_process(self, file_path: str) -> int:
         """Dispatch process command to appropriate processor"""
+        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         # Build command: python processor.py [global-flags] process file.pptx [subcommand-flags]
@@ -125,6 +127,7 @@ class ProcessorDispatcher:
 
     def dispatch_inject(self, file_path: str) -> int:
         """Dispatch inject command to appropriate processor"""
+        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         if processor == PROCESSOR_MAP["manifest"]:
@@ -139,12 +142,14 @@ class ProcessorDispatcher:
 
     def dispatch_review(self, manifest_path: str, output_path: str) -> int:
         """Dispatch review command to manifest processor"""
+        # Pass paths directly to processor - it will validate
         cmd = ["python", PROCESSOR_MAP["manifest"], "review",
                "--manifest", manifest_path, "--out", output_path]
         return self._run_processor(cmd)
 
     def dispatch_audit(self, file_path: str) -> int:
         """Dispatch audit command to manifest processor"""
+        # Pass path directly to processor - it will validate
         # Manifest processor validate expects a manifest file, not the PPTX
         # For now, redirect to process with review-only to generate validation data
         cmd = ["python", PROCESSOR_MAP["manifest"], "process", file_path, "--review-only"]

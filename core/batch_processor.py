@@ -50,6 +50,10 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# Import path validation module
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError, is_safe_path
+
 # -----------------------------
 # Config loading (config_manager -> yaml fallback)
 # -----------------------------
@@ -109,7 +113,11 @@ SUPPORTED_EXTS = {".pptx", ".docx"}
 def is_supported(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_EXTS
 
-def discover_files(root: Path, recursive: bool) -> List[Path]:
+def discover_files(root: Path, recursive: bool, logger: logging.Logger) -> List[Path]:
+    """
+    Discover supported files in root directory.
+    Validates each discovered file to ensure it's within safe directories.
+    """
     def _is_real(path: Path) -> bool:
         name = path.name
         # Skip Office lock files and macOS dotfiles
@@ -117,10 +125,20 @@ def discover_files(root: Path, recursive: bool) -> List[Path]:
             return False
         return path.is_file() and is_supported(path)
 
+    discovered = []
     if recursive:
-        return [p for p in root.rglob("*") if _is_real(p)]
+        candidates = [p for p in root.rglob("*") if _is_real(p)]
     else:
-        return [p for p in root.glob("*") if _is_real(p)]
+        candidates = [p for p in root.glob("*") if _is_real(p)]
+
+    # Validate each discovered file
+    for path in candidates:
+        if is_safe_path(path):
+            discovered.append(path)
+        else:
+            logger.warning(f"Skipping file outside allowed directories: {path.name}")
+
+    return discovered
 
 def rel_output_path(infile: Path, input_root: Path, output_root: Path) -> Path:
     """
@@ -502,7 +520,38 @@ class BatchSummary:
 
 def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dict[str, Any], skip_existing: bool, logger: logging.Logger) -> FileResult:
     file_type = infile.suffix.lower().lstrip(".")
+
+    # Validate input file path (defense in depth)
+    try:
+        if not is_safe_path(infile):
+            logger.error(f"Security violation: file outside allowed directories: {infile}")
+            return FileResult(
+                file=str(infile), output_file=None, file_type=file_type,
+                success=False, error="Security: file outside allowed directories"
+            )
+    except Exception as e:
+        logger.error(f"Path validation error for {infile}: {e}")
+        return FileResult(
+            file=str(infile), output_file=None, file_type=file_type,
+            success=False, error=f"Path validation failed: {e}"
+        )
+
     out_path = rel_output_path(infile, input_root, output_root)
+
+    # Validate output path
+    try:
+        if not is_safe_path(out_path):
+            logger.error(f"Security violation: output path outside allowed directories: {out_path}")
+            return FileResult(
+                file=str(infile), output_file=None, file_type=file_type,
+                success=False, error="Security: output path outside allowed directories"
+            )
+    except Exception as e:
+        logger.error(f"Output path validation error for {out_path}: {e}")
+        return FileResult(
+            file=str(infile), output_file=None, file_type=file_type,
+            success=False, error=f"Output path validation failed: {e}"
+        )
 
     # Optionally skip if output already exists
     if skip_existing and out_path.exists():
@@ -540,15 +589,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="List files and exit without processing")
     args = p.parse_args(argv)
 
-    input_root = Path(args.folder).expanduser().resolve()
-    output_root = Path(args.output).expanduser().resolve()
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        # Prefer a root-level config.yaml if present
-        candidate = Path(__file__).resolve().parents[1] / config_path.name
-        if candidate.exists():
-            config_path = candidate
-    config_path = config_path.resolve()
+    # Validate input folder path
+    try:
+        input_root = sanitize_input_path(args.folder)
+    except SecurityError as e:
+        print(f"Security Error (input folder): {e}")
+        return 1
+    except (ValueError, Exception) as e:
+        print(f"Invalid input folder: {e}")
+        return 1
+
+    # Validate output folder path
+    try:
+        output_root = validate_output_path(args.output, create_parents=True)
+    except SecurityError as e:
+        print(f"Security Error (output folder): {e}")
+        return 1
+    except (ValueError, Exception) as e:
+        print(f"Invalid output folder: {e}")
+        return 1
+
+    # Validate config path
+    try:
+        config_path = sanitize_input_path(args.config)
+        # If not absolute in original args, look for root-level config
+        if not Path(args.config).is_absolute():
+            candidate = Path(__file__).resolve().parents[1] / Path(args.config).name
+            if candidate.exists():
+                config_path = sanitize_input_path(str(candidate))
+    except SecurityError as e:
+        print(f"Security Error (config): {e}")
+        return 1
+    except (ValueError, Exception) as e:
+        print(f"Invalid config path: {e}")
+        return 1
 
     cfg = load_config(config_path)
 
@@ -559,7 +633,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger = setup_logging(output_root, cfg)
     logger.info("Batch start | input=%s | output=%s | recursive=%s", input_root, output_root, args.recursive)
 
-    files = discover_files(input_root, recursive=args.recursive)
+    files = discover_files(input_root, recursive=args.recursive, logger=logger)
     files.sort()
     if not files:
         logger.warning("No supported files found in %s (recursive=%s).", input_root, args.recursive)
@@ -639,7 +713,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     combined_coverage = (elements_with_alt / total_elements) if total_elements else None
 
     # Generate unified JSON report
-    report_path = Path(args.report) if args.report else (output_root / "batch_report.json")
+    if args.report:
+        try:
+            report_path = validate_output_path(args.report)
+        except SecurityError as e:
+            logger.error(f"Security Error (report path): {e}")
+            return 1
+        except (ValueError, Exception) as e:
+            logger.error(f"Invalid report path: {e}")
+            return 1
+    else:
+        report_path = output_root / "batch_report.json"
+
     unified = {
         "batch": {
             "started_at": int(start_ts),
