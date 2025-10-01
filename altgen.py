@@ -269,6 +269,17 @@ def create_parser() -> argparse.ArgumentParser:
     audit_parser = subparsers.add_parser('audit', help='Audit files for compliance')
     audit_parser.add_argument('path', help='File or folder to audit')
 
+    # cleanup
+    cleanup_parser = subparsers.add_parser('cleanup', help='Clean up old artifact directories')
+    cleanup_parser.add_argument('--max-age-days', type=int, default=7,
+                               help='Maximum age in days before cleanup (default: 7)')
+    cleanup_parser.add_argument('--dry-run', action='store_true',
+                               help='Show what would be cleaned without actually cleaning')
+    cleanup_parser.add_argument('--report', action='store_true',
+                               help='Show disk usage report')
+    cleanup_parser.add_argument('--base-dir', default='.',
+                               help='Base directory to scan (default: current directory)')
+
     return parser
 
 
@@ -313,6 +324,43 @@ def main():
 
         elif args.command == 'audit':
             return dispatcher.dispatch_audit(args.path)
+
+        elif args.command == 'cleanup':
+            # Import cleanup utilities
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
+            from artifact_cleaner import cleanup_old_artifacts, print_usage_report, format_bytes
+            from pathlib import Path
+
+            base_dir = Path(args.base_dir).resolve()
+
+            if args.report:
+                print_usage_report(base_dir)
+                return 0
+
+            print(f"Scanning for artifacts older than {args.max_age_days} days in {base_dir}...")
+            if args.dry_run:
+                print("(DRY RUN - no files will be deleted)\n")
+
+            stats = cleanup_old_artifacts(base_dir, args.max_age_days, args.dry_run)
+
+            if stats['count'] > 0:
+                action = "Would clean" if args.dry_run else "Cleaned"
+                print(f"\n{action} {stats['count']} directories, freed {format_bytes(stats['bytes_freed'])}\n")
+
+                if stats['directories'] and args.dry_run:
+                    print("Directories to be cleaned:")
+                    for dir_info in stats['directories'][:20]:  # Show top 20
+                        age = f"{dir_info['age_days']:.1f} days"
+                        size = format_bytes(dir_info['size_bytes'])
+                        print(f"  {age:12s} {size:>10s}  {Path(dir_info['path']).name}")
+            else:
+                print("\nNo old artifact directories found.\n")
+
+            if stats['errors']:
+                print(f"⚠️  {len(stats['errors'])} errors encountered during cleanup")
+                return 1
+
+            return 0
 
         else:
             print(f"Error: Unknown command '{args.command}'")

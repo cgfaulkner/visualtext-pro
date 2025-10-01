@@ -538,114 +538,115 @@ class PPTXAltProcessor:
             raise FileNotFoundError(f"PPTX file not found: {pptx_file}")
         
         logger.info(f"Testing new pipeline with: {pptx_path.name}")
-        
+
         try:
             from shared.manifest_processor import ManifestProcessor
             from shared.alt_manifest import AltManifest, MANIFEST_SCHEMA_VERSION
             from shared.pipeline_artifacts import RunArtifacts
             import time
-            
+
             start_time = time.time()
-            
-            # Create test artifacts
-            artifacts = RunArtifacts.create_for_run(pptx_path)
-            
-            # Initialize processor with new configuration
-            processor = ManifestProcessor(
-                config_manager=self.config_manager,
-                alt_generator=None,  # Skip generation for dry run
-                llava_include_shapes=llava_include_shapes,
-                max_shapes_per_slide=max_shapes_per_slide,
-                min_shape_area=min_shape_area
-            )
-            
-            # Initialize manifest
-            manifest = AltManifest(artifacts.get_manifest_path())
-            
-            # Phase 1: Discovery and Classification
-            logger.info("Running Phase 1: Discovery and Classification")
-            phase1_result = processor.phase1_discover_and_classify(pptx_path, manifest)
-            
-            if not phase1_result['success']:
-                return {
-                    'success': False,
-                    'phase': 'discovery',
-                    'error': phase1_result.get('error', 'Unknown error'),
-                    'errors': [phase1_result.get('error', 'Unknown error')]
+
+            # Create test artifacts with automatic cleanup
+            # For dry-run, we always cleanup after
+            with RunArtifacts.create_for_run(pptx_path, cleanup_on_exit=True) as artifacts:
+                # Initialize processor with new configuration
+                processor = ManifestProcessor(
+                    config_manager=self.config_manager,
+                    alt_generator=None,  # Skip generation for dry run
+                    llava_include_shapes=llava_include_shapes,
+                    max_shapes_per_slide=max_shapes_per_slide,
+                    min_shape_area=min_shape_area
+                )
+
+                # Initialize manifest
+                manifest = AltManifest(artifacts.get_manifest_path())
+
+                # Phase 1: Discovery and Classification
+                logger.info("Running Phase 1: Discovery and Classification")
+                phase1_result = processor.phase1_discover_and_classify(pptx_path, manifest)
+
+                if not phase1_result['success']:
+                    return {
+                        'success': False,
+                        'phase': 'discovery',
+                        'error': phase1_result.get('error', 'Unknown error'),
+                        'errors': [phase1_result.get('error', 'Unknown error')]
+                    }
+
+                # Phase 2: Rendering and Crops (for testing, we'll simulate this)
+                logger.info("Running Phase 2: Rendering and Thumbnails (simulated for dry-run)")
+                # In a real run, this would call processor.phase2_render_and_generate_crops
+                # For dry-run, we'll simulate by setting placeholder paths
+                for entry in manifest.get_all_entries():
+                    entry.crop_path = f"crops/{entry.instance_key}.png"  # Placeholder
+                    entry.thumb_path = f"thumbs/{entry.instance_key}.jpg"  # Placeholder
+                    manifest.add_entry(entry)
+
+                # Phase 3: Inclusion Policy and Caching
+                logger.info("Running Phase 3: Inclusion Policy and Caching")
+                phase3_result = processor.phase3_inclusion_policy_and_caching(manifest, mode="preserve")
+
+                if not phase3_result['success']:
+                    return {
+                        'success': False,
+                        'phase': 'inclusion_policy',
+                        'error': phase3_result.get('error', 'Unknown error'),
+                        'errors': [phase3_result.get('error', 'Unknown error')]
+                    }
+
+                # Phase 4: LLaVA Generation (skipped for dry-run unless explicitly requested)
+                logger.info("Phase 4: LLaVA Generation (skipped for dry-run)")
+                phase4_result = {
+                    'success': True,
+                    'generated_count': 0,
+                    'skipped_count': phase3_result.get('needs_generation_count', 0),
+                    'message': 'Skipped for dry-run mode'
                 }
-            
-            # Phase 2: Rendering and Crops (for testing, we'll simulate this)
-            logger.info("Running Phase 2: Rendering and Thumbnails (simulated for dry-run)")
-            # In a real run, this would call processor.phase2_render_and_generate_crops
-            # For dry-run, we'll simulate by setting placeholder paths
-            for entry in manifest.get_all_entries():
-                entry.crop_path = f"crops/{entry.instance_key}.png"  # Placeholder
-                entry.thumb_path = f"thumbs/{entry.instance_key}.jpg"  # Placeholder
-                manifest.add_entry(entry)
-            
-            # Phase 3: Inclusion Policy and Caching
-            logger.info("Running Phase 3: Inclusion Policy and Caching")
-            phase3_result = processor.phase3_inclusion_policy_and_caching(manifest, mode="preserve")
-            
-            if not phase3_result['success']:
-                return {
-                    'success': False,
-                    'phase': 'inclusion_policy',
-                    'error': phase3_result.get('error', 'Unknown error'),
-                    'errors': [phase3_result.get('error', 'Unknown error')]
+
+                # Save manifest after all phases
+                manifest.save()
+
+                processing_time = time.time() - start_time
+
+                # Get manifest statistics
+                stats = manifest.get_statistics()
+
+                result = {
+                    'success': True,
+                    'schema_version': MANIFEST_SCHEMA_VERSION,
+                    'pptx_file': str(pptx_path),
+                    'manifest_path': str(artifacts.get_manifest_path()),
+                    'processing_time': processing_time,
+                    # Phase 1 results
+                    'discovered_elements': phase1_result['discovered_elements'],
+                    'classified_elements': phase1_result['classified_elements'],
+                    'include_strategy': phase1_result['include_strategy'],
+                    'min_area_threshold': phase1_result['min_area_threshold'],
+                    # Phase 3 results
+                    'preserved_count': phase3_result['preserved_count'],
+                    'cached_count': phase3_result['cached_count'],
+                    'needs_generation_count': phase3_result['needs_generation_count'],
+                    'excluded_count': phase3_result['excluded_count'],
+                    # Phase 4 results
+                    'generated_count': phase4_result['generated_count'],
+                    # Manifest statistics
+                    'manifest_stats': stats,
+                    'total_entries': stats['total_entries'],
+                    'with_existing_alt': stats['with_current_alt']
                 }
-            
-            # Phase 4: LLaVA Generation (skipped for dry-run unless explicitly requested)
-            logger.info("Phase 4: LLaVA Generation (skipped for dry-run)")
-            phase4_result = {
-                'success': True,
-                'generated_count': 0,
-                'skipped_count': phase3_result.get('needs_generation_count', 0),
-                'message': 'Skipped for dry-run mode'
-            }
-            
-            # Save manifest after all phases
-            manifest.save()
-            
-            processing_time = time.time() - start_time
-            
-            # Get manifest statistics
-            stats = manifest.get_statistics()
-            
-            result = {
-                'success': True,
-                'schema_version': MANIFEST_SCHEMA_VERSION,
-                'pptx_file': str(pptx_path),
-                'manifest_path': str(artifacts.get_manifest_path()),
-                'processing_time': processing_time,
-                # Phase 1 results
-                'discovered_elements': phase1_result['discovered_elements'],
-                'classified_elements': phase1_result['classified_elements'],
-                'include_strategy': phase1_result['include_strategy'],
-                'min_area_threshold': phase1_result['min_area_threshold'],
-                # Phase 3 results
-                'preserved_count': phase3_result['preserved_count'],
-                'cached_count': phase3_result['cached_count'],
-                'needs_generation_count': phase3_result['needs_generation_count'],
-                'excluded_count': phase3_result['excluded_count'],
-                # Phase 4 results
-                'generated_count': phase4_result['generated_count'],
-                # Manifest statistics
-                'manifest_stats': stats,
-                'total_entries': stats['total_entries'],
-                'with_existing_alt': stats['with_current_alt']
-            }
-            
-            logger.info(f"✅ Dry run completed successfully in {processing_time:.2f}s")
-            logger.info(f"   Schema version: {MANIFEST_SCHEMA_VERSION}")
-            logger.info(f"   Elements discovered: {phase1_result['discovered_elements']}")
-            logger.info(f"   Elements classified: {phase1_result['classified_elements']}")
-            logger.info(f"   Strategy: {phase1_result['include_strategy']}")
-            logger.info(f"   Threshold: {phase1_result['min_area_threshold']:.0f} sq pts")
-            logger.info(f"   With existing ALT: {stats['with_current_alt']}")
-            logger.info(f"   Manifest: {artifacts.get_manifest_path()}")
-            
-            return result
+
+                logger.info(f"✅ Dry run completed successfully in {processing_time:.2f}s")
+                logger.info(f"   Schema version: {MANIFEST_SCHEMA_VERSION}")
+                logger.info(f"   Elements discovered: {phase1_result['discovered_elements']}")
+                logger.info(f"   Elements classified: {phase1_result['classified_elements']}")
+                logger.info(f"   Strategy: {phase1_result['include_strategy']}")
+                logger.info(f"   Threshold: {phase1_result['min_area_threshold']:.0f} sq pts")
+                logger.info(f"   With existing ALT: {stats['with_current_alt']}")
+                logger.info(f"   Manifest: {artifacts.get_manifest_path()}")
+
+                return result
+            # Context manager automatically cleans up here
             
         except Exception as e:
             error_msg = f"Dry run failed: {str(e)}"

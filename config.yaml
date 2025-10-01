@@ -181,6 +181,15 @@ approval_docs:
   review_suffix: "_ALT_Review"
   image_max_width_px: 600
 
+# Artifact Management Configuration
+artifact_management:
+  auto_cleanup: true              # Automatically cleanup artifacts after processing
+  keep_finals: true               # Keep final_alt_map.json and visual_index.json
+  max_age_days: 7                 # Maximum age before auto-cleanup (days)
+  cleanup_on_success: true        # Cleanup temporary artifacts on successful processing
+  cleanup_on_failure: false       # Keep artifacts on failure for debugging
+  warn_threshold_gb: 5.0          # Warn if total artifact disk usage exceeds this (GB)
+
 # --- Profiles ---
 profiles:
   scientific_strict:
