@@ -74,7 +74,7 @@ class EnhancedLoggingConfig:
         root_logger.addHandler(console_handler)
         
         # Main rotating file handler
-        main_log_file = self.log_dir / f"{self.session_id}.log"
+        main_log_file = self.log_dir / f"{self.session_id}.txt"
         file_handler = logging.handlers.RotatingFileHandler(
             main_log_file,
             maxBytes=self.max_bytes,
@@ -86,7 +86,7 @@ class EnhancedLoggingConfig:
         root_logger.addHandler(file_handler)
         
         # Error-only file handler
-        error_log_file = self.log_dir / f"{self.session_id}-errors.log"
+        error_log_file = self.log_dir / f"{self.session_id}-errors.txt"
         error_handler = logging.handlers.RotatingFileHandler(
             error_log_file,
             maxBytes=self.max_bytes // 2,  # Smaller for errors only

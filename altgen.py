@@ -73,6 +73,7 @@ class ProcessorDispatcher:
 
     def dispatch_analyze(self, file_path: str) -> int:
         """Dispatch analyze command to appropriate processor"""
+        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         if processor == PROCESSOR_MAP["clean"]:
@@ -89,6 +90,7 @@ class ProcessorDispatcher:
 
     def dispatch_process(self, file_path: str) -> int:
         """Dispatch process command to appropriate processor"""
+        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         # Build command: python processor.py [global-flags] process file.pptx [subcommand-flags]
@@ -121,10 +123,15 @@ class ProcessorDispatcher:
             else:
                 cmd.append("--dry-run")
 
+        # Add artifact management flag if specified
+        if hasattr(self.args, 'no_artifacts') and self.args.no_artifacts:
+            cmd.append("--no-artifacts")
+
         return self._run_processor(cmd)
 
     def dispatch_inject(self, file_path: str) -> int:
         """Dispatch inject command to appropriate processor"""
+        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         if processor == PROCESSOR_MAP["manifest"]:
@@ -139,12 +146,14 @@ class ProcessorDispatcher:
 
     def dispatch_review(self, manifest_path: str, output_path: str) -> int:
         """Dispatch review command to manifest processor"""
+        # Pass paths directly to processor - it will validate
         cmd = ["python", PROCESSOR_MAP["manifest"], "review",
                "--manifest", manifest_path, "--out", output_path]
         return self._run_processor(cmd)
 
     def dispatch_audit(self, file_path: str) -> int:
         """Dispatch audit command to manifest processor"""
+        # Pass path directly to processor - it will validate
         # Manifest processor validate expects a manifest file, not the PPTX
         # For now, redirect to process with review-only to generate validation data
         cmd = ["python", PROCESSOR_MAP["manifest"], "process", file_path, "--review-only"]
@@ -250,6 +259,8 @@ def create_parser() -> argparse.ArgumentParser:
     # process
     process_parser = subparsers.add_parser('process', help='Process files and make alt text decisions')
     process_parser.add_argument('path', help='File or folder to process')
+    process_parser.add_argument('--no-artifacts', action='store_true',
+                               help='Disable artifact directory creation (no intermediate files saved)')
 
     # inject
     inject_parser = subparsers.add_parser('inject', help='Inject alt text into files')
@@ -263,6 +274,26 @@ def create_parser() -> argparse.ArgumentParser:
     # audit
     audit_parser = subparsers.add_parser('audit', help='Audit files for compliance')
     audit_parser.add_argument('path', help='File or folder to audit')
+
+    # cleanup
+    cleanup_parser = subparsers.add_parser('cleanup', help='Clean up old artifact directories')
+    cleanup_parser.add_argument('--max-age-days', type=int, default=7,
+                               help='Maximum age in days before cleanup (default: 7)')
+    cleanup_parser.add_argument('--dry-run', action='store_true',
+                               help='Show what would be cleaned without actually cleaning')
+    cleanup_parser.add_argument('--report', action='store_true',
+                               help='Show disk usage report')
+    cleanup_parser.add_argument('--base-dir', default='.',
+                               help='Base directory to scan (default: current directory)')
+
+    # locks
+    locks_parser = subparsers.add_parser('locks', help='Show file lock status')
+    locks_parser.add_argument('--directory', default='.',
+                             help='Directory to check for locks (default: current directory)')
+    locks_parser.add_argument('--clean-stale', action='store_true',
+                             help='Remove stale lock files')
+    locks_parser.add_argument('--max-age-hours', type=int, default=1,
+                             help='Age threshold for stale locks in hours (default: 1)')
 
     return parser
 
@@ -308,6 +339,75 @@ def main():
 
         elif args.command == 'audit':
             return dispatcher.dispatch_audit(args.path)
+
+        elif args.command == 'cleanup':
+            # Import cleanup utilities
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
+            from artifact_cleaner import cleanup_old_artifacts, print_usage_report, format_bytes
+            from pathlib import Path
+
+            base_dir = Path(args.base_dir).resolve()
+
+            if args.report:
+                print_usage_report(base_dir)
+                return 0
+
+            print(f"Scanning for artifacts older than {args.max_age_days} days in {base_dir}...")
+            if args.dry_run:
+                print("(DRY RUN - no files will be deleted)\n")
+
+            stats = cleanup_old_artifacts(base_dir, args.max_age_days, args.dry_run)
+
+            if stats['count'] > 0:
+                action = "Would clean" if args.dry_run else "Cleaned"
+                print(f"\n{action} {stats['count']} directories, freed {format_bytes(stats['bytes_freed'])}\n")
+
+                if stats['directories'] and args.dry_run:
+                    print("Directories to be cleaned:")
+                    for dir_info in stats['directories'][:20]:  # Show top 20
+                        age = f"{dir_info['age_days']:.1f} days"
+                        size = format_bytes(dir_info['size_bytes'])
+                        print(f"  {age:12s} {size:>10s}  {Path(dir_info['path']).name}")
+            else:
+                print("\nNo old artifact directories found.\n")
+
+            if stats['errors']:
+                print(f"⚠️  {len(stats['errors'])} errors encountered during cleanup")
+                return 1
+
+            return 0
+
+        elif args.command == 'locks':
+            # Import lock utilities
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
+            from lock_monitor import print_lock_status
+            from artifact_cleaner import cleanup_stale_locks
+            from pathlib import Path
+
+            directory = Path(args.directory).resolve()
+
+            if args.clean_stale:
+                print(f"Cleaning stale locks (older than {args.max_age_hours} hours) in {directory}...\n")
+                stats = cleanup_stale_locks(directory, args.max_age_hours)
+
+                if stats['count'] > 0:
+                    print(f"✅ Removed {stats['count']} stale lock(s)\n")
+                    if stats['stale_locks']:
+                        print("Removed locks:")
+                        for lock_info in stats['stale_locks']:
+                            print(f"  {Path(lock_info['file']).name} (age: {lock_info['age_hours']}h, PID: {lock_info['pid']})")
+                else:
+                    print("No stale locks found.\n")
+
+                if stats['errors']:
+                    print(f"\n⚠️  {len(stats['errors'])} errors encountered")
+                    return 1
+
+                return 0
+            else:
+                # Show lock status
+                print_lock_status(directory)
+                return 0
 
         else:
             print(f"Error: Unknown command '{args.command}'")

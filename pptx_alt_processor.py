@@ -28,10 +28,22 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
+# Import path validation, file locking, and artifact management modules (must come after sys.path setup)
+from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
+from shared.file_lock_manager import FileLock, LockError
+from shared.pipeline_artifacts import RunArtifacts
+
 # Import system components
 from config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
 from pptx_alt_injector import PPTXAltTextInjector
+from resource_manager import ResourceContext, validate_system_resources
+from processing_exceptions import (
+    ProcessingError, InsufficientMemoryError, InsufficientDiskSpaceError,
+    PPTXParsingError, FileAccessError
+)
+from error_reporter import ProcessingResult, StandardizedLogger, handle_processing_exception
+from recovery_strategies import SmartRecoveryManager, smart_recovery_context
 
 # Set up enhanced logging (will be replaced by enhanced config if enabled)
 logging.basicConfig(
@@ -57,16 +69,17 @@ class PPTXAltProcessor:
     
     def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False,
                  enable_file_logging: bool = True, fallback_policy_override: Optional[str] = None,
-                 mode_override: Optional[str] = None):
+                 mode_override: Optional[str] = None, use_artifacts: bool = True):
         """
         Initialize the PPTX ALT text processor.
-        
+
         Args:
             config_path: Optional path to configuration file
             verbose: Enable verbose logging
             debug: Enable detailed debug logging for generation attempts
             enable_file_logging: Enable enhanced file logging with rotation
             fallback_policy_override: Override fallback policy from CLI (none|doc-only|ppt-gated)
+            use_artifacts: Enable artifact directory creation for intermediate files (default: True)
         """
         # Setup enhanced logging if available and requested
         self.log_config = None
@@ -115,7 +128,11 @@ class PPTXAltProcessor:
         
         # Setup failed generation logging
         self.failed_generations = []
-        
+
+        # Store artifact management settings
+        self.use_artifacts = use_artifacts
+        self._current_artifacts = None  # Will hold RunArtifacts instance during processing
+
         logger.info("PPTX ALT Text Processor initialized")
         logger.info(f"Configuration: {self.config_manager.config_path or 'default'}")
         if debug:
@@ -124,123 +141,178 @@ class PPTXAltProcessor:
     def process_single_file(self, input_file: str, output_file: Optional[str] = None,
                           export_pdf: bool = False, generate_coverage_report: bool = True) -> dict:
         """
-        Process a single PPTX file with complete ALT text workflow.
-        
+        Process a single PPTX file with complete ALT text workflow and smart error recovery.
+
         Args:
             input_file: Path to input PPTX file
             output_file: Optional output path (defaults to overwriting input)
             export_pdf: Whether to export to PDF after processing
-            
+            generate_coverage_report: Whether to generate detailed coverage report
+
         Returns:
             Dictionary with processing results
         """
         input_path = Path(input_file)
-        if not input_path.exists():
-            raise FileNotFoundError(f"Input file not found: {input_file}")
-        
         if output_file is None:
             output_file = str(input_path)
-        
         output_path = Path(output_file)
-        
-        logger.info(f"Processing PPTX: {input_path.name}")
-        logger.info(f"Output: {output_path.name}")
-        
-        start_time = time.time()
-        
-        try:
-            # Clear previous failed generations
-            self.failed_generations = []
-            
-            # Use the existing PPTXAccessibilityProcessor with enhanced validation
-            result = self.pptx_processor.process_pptx(
-                str(input_path), 
-                str(output_path), 
-                failed_generation_callback=self._log_failed_generation,
-                debug=self.debug
-            )
-            
-            processing_time = time.time() - start_time
-            result['processing_time'] = processing_time
-            
-            # Ensure we have the processed_images count
-            if 'processed_images' not in result:
-                result['processed_images'] = result.get('total_images', 0)
-            
-            if result['success']:
-                # Generate and log coverage report
-                coverage_report = self._generate_coverage_report(result)
-                result['coverage_report'] = coverage_report
-                
-                logger.info(f"✅ Successfully processed PPTX:")
-                logger.info(f"   Input: {input_path.name}")
-                logger.info(f"   Output: {output_path.name}")
-                logger.info(f"   Images processed: {result['processed_images']}")
-                logger.info(f"   Processing time: {processing_time:.2f}s")
-                
-                # Log coverage statistics
-                self._log_coverage_report(coverage_report)
-                
-                # Generate coverage report file if requested
-                if generate_coverage_report:
-                    self._save_coverage_report_file(coverage_report, input_path, output_path)
-                
-                # Optional PDF export
-                if export_pdf:
-                    pdf_result = self._export_to_pdf(output_path)
-                    result['pdf_export'] = pdf_result
-                    
-                    if pdf_result['success']:
-                        logger.info(f"   PDF exported: {pdf_result['pdf_file']}")
-                    else:
-                        logger.warning(f"   PDF export failed: {pdf_result['error']}")
+
+        # Create standardized result object
+        result_obj = ProcessingResult("PPTX Processing", input_path, output_path)
+        StandardizedLogger.log_processing_start("PPTX Processing", input_path, output_path)
+
+        # Validate input file
+        if not input_path.exists():
+            error = FileAccessError(input_path, "read")
+            result_obj.mark_failure(error)
+            return result_obj.to_dict()
+
+        # Pre-flight resource validation with structured errors
+        validation_result = validate_system_resources(required_memory_mb=250, required_disk_mb=300)
+        if not validation_result['sufficient']:
+            if 'memory' in '; '.join(validation_result['errors']).lower():
+                error = InsufficientMemoryError(250, 0)  # Approximate values
             else:
-                logger.error(f"❌ Processing failed:")
-                for error in result.get('errors', []):
-                    logger.error(f"   - {error}")
-            
-            # Log any failed generations for manual review
-            if self.failed_generations:
-                self._log_failed_generations_summary()
-                result['failed_generations'] = self.failed_generations
-            
-            # Export session data if enhanced logging is available
-            if self.log_config:
-                try:
-                    # Update processing stats
-                    self.log_config.update_processing_stats({
-                        'processing_time': time.time() - start_time,
-                        'input_file': str(input_path),
-                        'output_file': str(output_path),
-                        'success': True
-                    })
-                    # Export logs and data
-                    self.log_config.export_session_data()
-                    
-                    # Log session summary
-                    summary = self.log_config.get_session_summary()
-                    logger.info(f"📊 Session Summary:")
-                    logger.info(f"   ALT texts generated: {summary['total_alt_texts']}")
-                    logger.info(f"   Failed generations: {summary['total_failures']}")
-                    logger.info(f"   Success rate: {summary['success_rate']:.1f}%")
-                    logger.info(f"   Session logs saved to: logs/{self.log_config.session_id}*")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to export session data: {e}")
-            
-            return result
-            
+                error = InsufficientDiskSpaceError(300, 0, output_path.parent)
+            result_obj.mark_failure(error)
+            return result_obj.to_dict()
+
+        # Get file locking configuration
+        lock_config = self.config_manager.config.get("file_locking", {})
+        locking_enabled = lock_config.get("enabled", True)
+        lock_timeout = lock_config.get("timeout_seconds", 30)
+
+        # Wrap processing with file locking to prevent concurrent access corruption
+        try:
+            if locking_enabled:
+                lock = FileLock(input_path, timeout=lock_timeout)
+                lock.acquire(blocking=True)
+            else:
+                lock = None
+        except LockError as e:
+            error_msg = f"File locked by another process (timeout after {lock_timeout}s)"
+            logger.warning(f"File locked, cannot process: {input_path.name}")
+            result_obj.mark_failure(error_msg)
+            return result_obj.to_dict()
+
+        # Determine if we should use artifacts
+        artifact_config = self.config_manager.config.get('artifact_management', {})
+        cleanup_on_exit = artifact_config.get('auto_cleanup', True)
+        should_use_artifacts = self.use_artifacts
+
+        # Use enhanced resource context with smart recovery
+        recovery_manager = SmartRecoveryManager()
+
+        # Wrap processing with RunArtifacts if enabled
+        if should_use_artifacts:
+            artifacts = RunArtifacts.create_for_run(input_path, cleanup_on_exit=cleanup_on_exit)
+            artifacts.__enter__()
+            self._current_artifacts = artifacts
+        else:
+            artifacts = None
+            self._current_artifacts = None
+
+        try:
+            with smart_recovery_context(
+                result_obj,
+                recovery_manager,
+                config=self.config_manager.config,
+                required_memory_mb=250,
+                required_disk_mb=300,
+                llava_connectivity=getattr(self.pptx_processor, 'llava_connectivity', None)
+            ) as (recovery_mgr, context):
+
+                with ResourceContext(validate_resources=False, cleanup_on_exit=True) as (temp_manager, resource_monitor):
+                    try:
+                        # Clear previous failed generations
+                        self.failed_generations = []
+
+                        # Process with the existing processor
+                        processor_result = self.pptx_processor.process_pptx(
+                            str(input_path),
+                            str(output_path),
+                            failed_generation_callback=self._log_failed_generation,
+                            debug=self.debug
+                        )
+
+                        # Convert processor result to standardized format
+                        self._populate_result_from_processor(result_obj, processor_result)
+
+                        if processor_result['success']:
+                            # Generate and log coverage report
+                            coverage_report = self._generate_coverage_report(processor_result)
+                            result_obj.set_processing_details({'coverage_report': coverage_report})
+
+                            # Set metrics
+                            result_obj.set_metrics({
+                                'total_images': processor_result.get('total_images', 0),
+                                'processed_images': processor_result.get('processed_images', 0),
+                                'coverage_percent': coverage_report.get('coverage_percent', 0),
+                                'failed_generations': len(self.failed_generations)
+                            })
+
+                            # Log coverage statistics with new format
+                            self._log_coverage_report(coverage_report)
+
+                            # Generate coverage report file if requested
+                            if generate_coverage_report:
+                                self._save_coverage_report_file(coverage_report, input_path, output_path)
+
+                            # Optional PDF export
+                            if export_pdf:
+                                pdf_result = self._export_to_pdf(output_path)
+                                result_obj.processing_details['pdf_export'] = pdf_result
+                                if not pdf_result['success']:
+                                    result_obj.add_warning(f"PDF export failed: {pdf_result.get('error', 'Unknown error')}")
+
+                            # Log session data if available
+                            self._handle_session_logging(result_obj)
+
+                            result_obj.mark_success()
+
+                        else:
+                            # Processing failed - add errors from processor result
+                            for error_msg in processor_result.get('errors', []):
+                                result_obj.add_error(error_msg)
+                            result_obj.mark_failure()
+
+                    except ProcessingError as e:
+                        # Let smart recovery handle this
+                        raise
+                    except Exception as e:
+                        # Convert to ProcessingError for recovery
+                        if "parse" in str(e).lower() or "xml" in str(e).lower():
+                            structured_error = PPTXParsingError(input_path, str(e))
+                        else:
+                            from processing_exceptions import wrap_exception
+                            structured_error = wrap_exception(e, 'PPTX_PROCESSING_ERROR')
+                        raise structured_error
+
+        except ProcessingError as e:
+            # Error was not recovered
+            result_obj.mark_failure(e)
         except Exception as e:
-            error_msg = f"Processing failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            
-            return {
-                'success': False,
-                'input_file': str(input_path),
-                'output_file': str(output_path),
-                'processing_time': time.time() - start_time,
-                'errors': [error_msg]
-            }
+            # Unexpected error that couldn't be converted
+            result_obj.mark_failure(f"Unexpected error: {str(e)}")
+        finally:
+            # Mark success and cleanup artifacts if enabled
+            if artifacts is not None:
+                # Mark success if processing succeeded
+                if result_obj.success:
+                    artifacts.mark_success()
+                # Exit artifact context (triggers cleanup)
+                artifacts.__exit__(None, None, None)
+                self._current_artifacts = None
+
+            # Always release the lock
+            if lock is not None:
+                lock.release()
+
+        # Log final result
+        StandardizedLogger.log_processing_complete(result_obj)
+
+        # Convert to legacy format for backward compatibility
+        return self._convert_to_legacy_format(result_obj)
     
     def process_directory(self, input_dir: str, output_dir: Optional[str] = None,
                          pattern: str = "*.pptx", export_pdf: bool = False) -> dict:
@@ -265,7 +337,21 @@ class PPTXAltProcessor:
         else:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
-        
+
+        # Pre-flight resource validation for batch processing
+        validation_result = validate_system_resources(required_memory_mb=400, required_disk_mb=500)
+        if not validation_result['sufficient']:
+            error_msg = "Insufficient system resources for batch processing: " + "; ".join(validation_result['errors'])
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'total_files': 0,
+                'processed_files': 0,
+                'failed_files': 0,
+                'files': [],
+                'errors': [error_msg]
+            }
+
         # Find PPTX files
         pptx_files = list(input_path.glob(pattern))
         if not pptx_files:
@@ -504,114 +590,115 @@ class PPTXAltProcessor:
             raise FileNotFoundError(f"PPTX file not found: {pptx_file}")
         
         logger.info(f"Testing new pipeline with: {pptx_path.name}")
-        
+
         try:
             from shared.manifest_processor import ManifestProcessor
             from shared.alt_manifest import AltManifest, MANIFEST_SCHEMA_VERSION
             from shared.pipeline_artifacts import RunArtifacts
             import time
-            
+
             start_time = time.time()
-            
-            # Create test artifacts
-            artifacts = RunArtifacts.create_for_run(pptx_path)
-            
-            # Initialize processor with new configuration
-            processor = ManifestProcessor(
-                config_manager=self.config_manager,
-                alt_generator=None,  # Skip generation for dry run
-                llava_include_shapes=llava_include_shapes,
-                max_shapes_per_slide=max_shapes_per_slide,
-                min_shape_area=min_shape_area
-            )
-            
-            # Initialize manifest
-            manifest = AltManifest(artifacts.get_manifest_path())
-            
-            # Phase 1: Discovery and Classification
-            logger.info("Running Phase 1: Discovery and Classification")
-            phase1_result = processor.phase1_discover_and_classify(pptx_path, manifest)
-            
-            if not phase1_result['success']:
-                return {
-                    'success': False,
-                    'phase': 'discovery',
-                    'error': phase1_result.get('error', 'Unknown error'),
-                    'errors': [phase1_result.get('error', 'Unknown error')]
+
+            # Create test artifacts with automatic cleanup
+            # For dry-run, we always cleanup after
+            with RunArtifacts.create_for_run(pptx_path, cleanup_on_exit=True) as artifacts:
+                # Initialize processor with new configuration
+                processor = ManifestProcessor(
+                    config_manager=self.config_manager,
+                    alt_generator=None,  # Skip generation for dry run
+                    llava_include_shapes=llava_include_shapes,
+                    max_shapes_per_slide=max_shapes_per_slide,
+                    min_shape_area=min_shape_area
+                )
+
+                # Initialize manifest
+                manifest = AltManifest(artifacts.get_manifest_path())
+
+                # Phase 1: Discovery and Classification
+                logger.info("Running Phase 1: Discovery and Classification")
+                phase1_result = processor.phase1_discover_and_classify(pptx_path, manifest)
+
+                if not phase1_result['success']:
+                    return {
+                        'success': False,
+                        'phase': 'discovery',
+                        'error': phase1_result.get('error', 'Unknown error'),
+                        'errors': [phase1_result.get('error', 'Unknown error')]
+                    }
+
+                # Phase 2: Rendering and Crops (for testing, we'll simulate this)
+                logger.info("Running Phase 2: Rendering and Thumbnails (simulated for dry-run)")
+                # In a real run, this would call processor.phase2_render_and_generate_crops
+                # For dry-run, we'll simulate by setting placeholder paths
+                for entry in manifest.get_all_entries():
+                    entry.crop_path = f"crops/{entry.instance_key}.png"  # Placeholder
+                    entry.thumb_path = f"thumbs/{entry.instance_key}.jpg"  # Placeholder
+                    manifest.add_entry(entry)
+
+                # Phase 3: Inclusion Policy and Caching
+                logger.info("Running Phase 3: Inclusion Policy and Caching")
+                phase3_result = processor.phase3_inclusion_policy_and_caching(manifest, mode="preserve")
+
+                if not phase3_result['success']:
+                    return {
+                        'success': False,
+                        'phase': 'inclusion_policy',
+                        'error': phase3_result.get('error', 'Unknown error'),
+                        'errors': [phase3_result.get('error', 'Unknown error')]
+                    }
+
+                # Phase 4: LLaVA Generation (skipped for dry-run unless explicitly requested)
+                logger.info("Phase 4: LLaVA Generation (skipped for dry-run)")
+                phase4_result = {
+                    'success': True,
+                    'generated_count': 0,
+                    'skipped_count': phase3_result.get('needs_generation_count', 0),
+                    'message': 'Skipped for dry-run mode'
                 }
-            
-            # Phase 2: Rendering and Crops (for testing, we'll simulate this)
-            logger.info("Running Phase 2: Rendering and Thumbnails (simulated for dry-run)")
-            # In a real run, this would call processor.phase2_render_and_generate_crops
-            # For dry-run, we'll simulate by setting placeholder paths
-            for entry in manifest.get_all_entries():
-                entry.crop_path = f"crops/{entry.instance_key}.png"  # Placeholder
-                entry.thumb_path = f"thumbs/{entry.instance_key}.jpg"  # Placeholder
-                manifest.add_entry(entry)
-            
-            # Phase 3: Inclusion Policy and Caching
-            logger.info("Running Phase 3: Inclusion Policy and Caching")
-            phase3_result = processor.phase3_inclusion_policy_and_caching(manifest, mode="preserve")
-            
-            if not phase3_result['success']:
-                return {
-                    'success': False,
-                    'phase': 'inclusion_policy',
-                    'error': phase3_result.get('error', 'Unknown error'),
-                    'errors': [phase3_result.get('error', 'Unknown error')]
+
+                # Save manifest after all phases
+                manifest.save()
+
+                processing_time = time.time() - start_time
+
+                # Get manifest statistics
+                stats = manifest.get_statistics()
+
+                result = {
+                    'success': True,
+                    'schema_version': MANIFEST_SCHEMA_VERSION,
+                    'pptx_file': str(pptx_path),
+                    'manifest_path': str(artifacts.get_manifest_path()),
+                    'processing_time': processing_time,
+                    # Phase 1 results
+                    'discovered_elements': phase1_result['discovered_elements'],
+                    'classified_elements': phase1_result['classified_elements'],
+                    'include_strategy': phase1_result['include_strategy'],
+                    'min_area_threshold': phase1_result['min_area_threshold'],
+                    # Phase 3 results
+                    'preserved_count': phase3_result['preserved_count'],
+                    'cached_count': phase3_result['cached_count'],
+                    'needs_generation_count': phase3_result['needs_generation_count'],
+                    'excluded_count': phase3_result['excluded_count'],
+                    # Phase 4 results
+                    'generated_count': phase4_result['generated_count'],
+                    # Manifest statistics
+                    'manifest_stats': stats,
+                    'total_entries': stats['total_entries'],
+                    'with_existing_alt': stats['with_current_alt']
                 }
-            
-            # Phase 4: LLaVA Generation (skipped for dry-run unless explicitly requested)
-            logger.info("Phase 4: LLaVA Generation (skipped for dry-run)")
-            phase4_result = {
-                'success': True,
-                'generated_count': 0,
-                'skipped_count': phase3_result.get('needs_generation_count', 0),
-                'message': 'Skipped for dry-run mode'
-            }
-            
-            # Save manifest after all phases
-            manifest.save()
-            
-            processing_time = time.time() - start_time
-            
-            # Get manifest statistics
-            stats = manifest.get_statistics()
-            
-            result = {
-                'success': True,
-                'schema_version': MANIFEST_SCHEMA_VERSION,
-                'pptx_file': str(pptx_path),
-                'manifest_path': str(artifacts.get_manifest_path()),
-                'processing_time': processing_time,
-                # Phase 1 results
-                'discovered_elements': phase1_result['discovered_elements'],
-                'classified_elements': phase1_result['classified_elements'],
-                'include_strategy': phase1_result['include_strategy'],
-                'min_area_threshold': phase1_result['min_area_threshold'],
-                # Phase 3 results
-                'preserved_count': phase3_result['preserved_count'],
-                'cached_count': phase3_result['cached_count'],
-                'needs_generation_count': phase3_result['needs_generation_count'],
-                'excluded_count': phase3_result['excluded_count'],
-                # Phase 4 results
-                'generated_count': phase4_result['generated_count'],
-                # Manifest statistics
-                'manifest_stats': stats,
-                'total_entries': stats['total_entries'],
-                'with_existing_alt': stats['with_current_alt']
-            }
-            
-            logger.info(f"✅ Dry run completed successfully in {processing_time:.2f}s")
-            logger.info(f"   Schema version: {MANIFEST_SCHEMA_VERSION}")
-            logger.info(f"   Elements discovered: {phase1_result['discovered_elements']}")
-            logger.info(f"   Elements classified: {phase1_result['classified_elements']}")
-            logger.info(f"   Strategy: {phase1_result['include_strategy']}")
-            logger.info(f"   Threshold: {phase1_result['min_area_threshold']:.0f} sq pts")
-            logger.info(f"   With existing ALT: {stats['with_current_alt']}")
-            logger.info(f"   Manifest: {artifacts.get_manifest_path()}")
-            
-            return result
+
+                logger.info(f"✅ Dry run completed successfully in {processing_time:.2f}s")
+                logger.info(f"   Schema version: {MANIFEST_SCHEMA_VERSION}")
+                logger.info(f"   Elements discovered: {phase1_result['discovered_elements']}")
+                logger.info(f"   Elements classified: {phase1_result['classified_elements']}")
+                logger.info(f"   Strategy: {phase1_result['include_strategy']}")
+                logger.info(f"   Threshold: {phase1_result['min_area_threshold']:.0f} sq pts")
+                logger.info(f"   With existing ALT: {stats['with_current_alt']}")
+                logger.info(f"   Manifest: {artifacts.get_manifest_path()}")
+
+                return result
+            # Context manager automatically cleans up here
             
         except Exception as e:
             error_msg = f"Dry run failed: {str(e)}"
@@ -752,46 +839,58 @@ class PPTXAltProcessor:
     
     def _generate_coverage_report(self, result: dict) -> dict:
         """
-        Generate honest coverage report with distinct buckets for each status.
-        
+        Generate accurate coverage report using injector statistics as canonical source.
+
         Args:
-            result: Processing result dictionary
-            
+            result: Processing result dictionary with injector_statistics
+
         Returns:
-            Coverage report dictionary with honest metrics
+            Coverage report dictionary with accurate metrics that match reality
         """
-        # Get honest stats from injector if available
+        # Use injector statistics as the canonical source of truth
         injector_stats = result.get('injector_statistics', {})
-        
-        # Count buckets: preserved, generated, needs_alt, fallback_injected, decorative_skipped
-        preserved = injector_stats.get('skipped_existing', 0)
-        generated = injector_stats.get('injected', 0)
-        needs_alt = injector_stats.get('failed', 0)  # Failed generations without fallback
-        fallback_injected = injector_stats.get('fallback_injected', 0)
-        decorative_skipped = injector_stats.get('decorative_skipped', 0)
-        
-        # Legacy fallback for compatibility
-        if not injector_stats:
+
+        if injector_stats:
+            # Get accurate counts from injector (what actually happened)
+            total_images = injector_stats.get('total_images', 0)
+            preserved = injector_stats.get('skipped_existing', 0)
+            generated = injector_stats.get('injected_successfully', 0)
+            failed_injection = injector_stats.get('failed_injection', 0)
+            skipped_invalid = injector_stats.get('skipped_invalid', 0)
+
+            # Calculate coverage based on actual injection results
+            successfully_processed = preserved + generated
+            coverage_percent = (successfully_processed / total_images * 100) if total_images > 0 else 0
+
+            # Map to new structure with clear categories
+            needs_alt = failed_injection + skipped_invalid  # Images that need manual attention
+            decorative_skipped = 0  # This would come from preprocessing, not injector
+            fallback_injected = 0   # Not tracked separately in current injector
+            covered = successfully_processed
+
+        else:
+            # Fallback to legacy structure if injector stats not available
             total_images = result.get('total_images', 0)
             processed_images = result.get('processed_images', 0)
             decorative_images = result.get('decorative_images', 0)
             failed_images = result.get('failed_images', 0)
             fallback_decorative = result.get('fallback_decorative', 0)
-            
-            # Map legacy to new structure
+
+            # Map legacy to new structure with best approximation
+            preserved = 0  # Cannot distinguish from legacy data
             generated = processed_images
             decorative_skipped = decorative_images + fallback_decorative
             needs_alt = failed_images
-            preserved = 0
             fallback_injected = 0
+            total = total_images
+            covered = generated
+            coverage_percent = (covered / total * 100) if total > 0 else 0
         
-        total = preserved + generated + needs_alt + fallback_injected + decorative_skipped
-        
-        # Calculate honest coverage - only count generated + preserved + fallback_injected as "covered"
-        covered = preserved + generated + fallback_injected
-        coverage_percent = (covered / total * 100) if total > 0 else 0
-        
+        # Build accurate coverage report
+        total = total_images  # Use actual count, not calculated sum
+
         return {
+            # Canonical metrics - what actually happened
             'total_elements': total,
             'preserved': preserved,
             'generated': generated,
@@ -801,8 +900,8 @@ class PPTXAltProcessor:
             'covered_elements': covered,
             'coverage_percent': coverage_percent,
             'failed_generations_count': len(getattr(self, 'failed_generations', [])),
-            
-            # Legacy fields for compatibility
+
+            # Legacy fields for compatibility - but use accurate numbers
             'total_images': total,
             'descriptive_images': generated,
             'decorative_images': decorative_skipped,
@@ -814,22 +913,42 @@ class PPTXAltProcessor:
     
     def _log_coverage_report(self, coverage_report: dict):
         """
-        Log the honest coverage report to console.
-        
+        Log the accurate coverage report with clear, non-confusing metrics.
+
         Args:
             coverage_report: Coverage report dictionary
         """
-        logger.info("📊 Honest ALT Text Coverage Report:")
-        logger.info(f"   Total elements: {coverage_report['total_elements']}")
-        logger.info(f"   Preserved existing: {coverage_report['preserved']}")
-        logger.info(f"   Generated new: {coverage_report['generated']}")
-        logger.info(f"   Fallback injected: {coverage_report['fallback_injected']}")
-        logger.info(f"   Decorative (skipped): {coverage_report['decorative_skipped']}")
-        logger.info(f"   Needs ALT text: {coverage_report['needs_alt']}")
-        logger.info(f"   ACTUAL COVERAGE: {coverage_report['coverage_percent']:.1f}% ({coverage_report['covered_elements']}/{coverage_report['total_elements']})")
-        
+        total = coverage_report['total_elements']
+        covered = coverage_report['covered_elements']
+        preserved = coverage_report['preserved']
+        generated = coverage_report['generated']
+        needs_alt = coverage_report['needs_alt']
+        decorative = coverage_report['decorative_skipped']
+
+        logger.info("📊 ALT Text Processing Report:")
+        logger.info(f"   Total images found: {total}")
+
+        if total > 0:
+            logger.info(f"   Successfully processed: {covered} ({coverage_report['coverage_percent']:.1f}%)")
+
+            if preserved > 0:
+                logger.info(f"     - Preserved existing ALT text: {preserved}")
+            if generated > 0:
+                logger.info(f"     - Generated new ALT text: {generated}")
+            if decorative > 0:
+                logger.info(f"     - Decorative (no ALT needed): {decorative}")
+            if needs_alt > 0:
+                logger.warning(f"   ⚠️  Need manual attention: {needs_alt}")
+
+            # Show overall success clearly
+            if needs_alt == 0:
+                logger.info(f"   ✅ All images have appropriate ALT text!")
+            else:
+                completion_rate = ((total - needs_alt) / total * 100)
+                logger.info(f"   📈 Completion rate: {completion_rate:.1f}% ({total - needs_alt}/{total})")
+
         if coverage_report['failed_generations_count'] > 0:
-            logger.warning(f"   Failed generations logged: {coverage_report['failed_generations_count']} (see coverage report file)")
+            logger.warning(f"   🔍 Failed generation attempts: {coverage_report['failed_generations_count']} (see coverage report file)")
     
     def _save_coverage_report_file(self, coverage_report: dict, input_path: Path, output_path: Path):
         """
@@ -918,6 +1037,111 @@ class PPTXAltProcessor:
         
         logger.warning("   See coverage report file for complete details.")
 
+    def _populate_result_from_processor(self, result_obj: ProcessingResult, processor_result: dict):
+        """
+        Populate standardized result object from processor output.
+
+        Args:
+            result_obj: StandardizedResult to populate
+            processor_result: Output from pptx_processor
+        """
+        # Get accurate counts from injector statistics (canonical source)
+        injector_stats = processor_result.get('injector_statistics', {})
+        if injector_stats:
+            processed_images = (
+                injector_stats.get('injected_successfully', 0) +
+                injector_stats.get('skipped_existing', 0)
+            )
+            total_images = injector_stats.get('total_images', 0)
+        else:
+            # Fallback to processor counts if injector stats not available
+            processed_images = processor_result.get('processed_visual_elements', 0)
+            total_images = processor_result.get('total_visual_elements', 0)
+
+        # Update processor result with accurate counts
+        processor_result['processed_images'] = processed_images
+        processor_result['total_images'] = total_images
+
+    def _handle_session_logging(self, result_obj: ProcessingResult):
+        """
+        Handle enhanced session logging if available.
+
+        Args:
+            result_obj: Result object to update with session info
+        """
+        if not self.log_config:
+            return
+
+        try:
+            # Update processing stats
+            self.log_config.update_processing_stats({
+                'processing_time': result_obj.processing_time,
+                'input_file': result_obj.input_file,
+                'output_file': result_obj.output_file,
+                'success': result_obj.success
+            })
+
+            # Export logs and data
+            self.log_config.export_session_data()
+
+            # Get and log session summary
+            summary = self.log_config.get_session_summary()
+            session_details = {
+                'session_id': self.log_config.session_id,
+                'total_alt_texts': summary['total_alt_texts'],
+                'total_failures': summary['total_failures'],
+                'success_rate': summary['success_rate']
+            }
+            result_obj.set_processing_details({'session_summary': session_details})
+
+            logger.info(f"📊 Session Summary:")
+            logger.info(f"   ALT texts generated: {summary['total_alt_texts']}")
+            logger.info(f"   Failed generations: {summary['total_failures']}")
+            logger.info(f"   Success rate: {summary['success_rate']:.1f}%")
+            logger.info(f"   Session logs saved to: logs/{self.log_config.session_id}*")
+
+        except Exception as e:
+            result_obj.add_warning(f"Failed to export session data: {e}")
+
+    def _convert_to_legacy_format(self, result_obj: ProcessingResult) -> dict:
+        """
+        Convert standardized result back to legacy format for backward compatibility.
+
+        Args:
+            result_obj: StandardizedResult object
+
+        Returns:
+            Dictionary in legacy format
+        """
+        legacy_result = {
+            'success': result_obj.success,
+            'input_file': result_obj.input_file,
+            'output_file': result_obj.output_file,
+            'processing_time': result_obj.processing_time or 0,
+        }
+
+        # Add metrics
+        if result_obj.metrics:
+            legacy_result.update(result_obj.metrics)
+
+        # Add processing details
+        if result_obj.processing_details:
+            legacy_result.update(result_obj.processing_details)
+
+        # Convert errors to legacy format
+        if result_obj.errors:
+            legacy_result['errors'] = [
+                error.get('message', str(error)) for error in result_obj.errors
+            ]
+        else:
+            legacy_result['errors'] = []
+
+        # Add failed generations if available
+        if self.failed_generations:
+            legacy_result['failed_generations'] = self.failed_generations
+
+        return legacy_result
+
 
 def main():
     """Command-line interface for PPTX ALT text processing."""
@@ -1002,6 +1226,8 @@ Examples:
                        help='Override fallback policy for this run (none|doc-only|ppt-gated)')
     parser.add_argument('--mode', choices=['preserve', 'replace'],
                        help='Whether to preserve or replace existing ALT text in PPTX (overrides config)')
+    parser.add_argument('--no-artifacts', action='store_true',
+                       help='Disable artifact directory creation (no intermediate files saved)')
 
     args = parser.parse_args()
     
@@ -1010,18 +1236,53 @@ Examples:
         return 1
     
     try:
+        # Validate config path if provided
+        config_path = args.config
+        if config_path:
+            try:
+                validated_config = sanitize_input_path(config_path)
+                config_path = str(validated_config)
+            except SecurityError as e:
+                print(f"Security Error (config): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid config path: {e}")
+                return 1
+
         # Initialize processor
         processor = PPTXAltProcessor(
-            args.config,
+            config_path,
             args.verbose,
             args.debug,
             fallback_policy_override=args.fallback_policy,
-            mode_override=args.mode
+            mode_override=args.mode,
+            use_artifacts=not args.no_artifacts
         )
-        
+
         if args.command == 'process':
-            input_pptx = args.input_file
-            output_path = args.output
+            # Validate input file path
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_pptx = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            # Validate output path if provided
+            output_path = None
+            if args.output:
+                try:
+                    validated_output = validate_output_path(args.output)
+                    output_path = str(validated_output)
+                except SecurityError as e:
+                    print(f"Security Error (output): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output path: {e}")
+                    return 1
             
             # Handle new flags
             dry_run = getattr(args, 'dry_run', False)
@@ -1127,9 +1388,33 @@ Examples:
                         return 1
                 
         elif args.command == 'batch-process':
+            # Validate input directory
+            try:
+                validated_input_dir = sanitize_input_path(args.input_dir)
+                input_dir = str(validated_input_dir)
+            except SecurityError as e:
+                print(f"Security Error (input directory): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input directory: {e}")
+                return 1
+
+            # Validate output directory if provided
+            output_dir = None
+            if args.output_dir:
+                try:
+                    validated_output_dir = validate_output_path(args.output_dir)
+                    output_dir = str(validated_output_dir)
+                except SecurityError as e:
+                    print(f"Security Error (output directory): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output directory: {e}")
+                    return 1
+
             result = processor.process_directory(
-                args.input_dir,
-                args.output_dir,
+                input_dir,
+                output_dir,
                 args.pattern,
                 args.export_pdf
             )
@@ -1144,7 +1429,31 @@ Examples:
                 return 1
                 
         elif args.command == 'extract':
-            result = processor.extract_images_only(args.input_file, args.output)
+            # Validate input file
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_file = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            # Validate output file if provided
+            output_file = None
+            if args.output:
+                try:
+                    validated_output = validate_output_path(args.output)
+                    output_file = str(validated_output)
+                except SecurityError as e:
+                    print(f"Security Error (output): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output path: {e}")
+                    return 1
+
+            result = processor.extract_images_only(input_file, output_file)
             
             if result['success']:
                 print(f"✅ Extracted {result['images_extracted']} images")
@@ -1155,10 +1464,45 @@ Examples:
                 return 1
                 
         elif args.command == 'inject':
+            # Validate input file
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_file = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            # Validate alt text file
+            try:
+                validated_alt_text = sanitize_input_path(args.alt_text_file)
+                alt_text_file = str(validated_alt_text)
+            except SecurityError as e:
+                print(f"Security Error (alt text file): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid alt text file path: {e}")
+                return 1
+
+            # Validate output file if provided
+            output_file = None
+            if args.output:
+                try:
+                    validated_output = validate_output_path(args.output)
+                    output_file = str(validated_output)
+                except SecurityError as e:
+                    print(f"Security Error (output): {e}")
+                    return 1
+                except ValueError as e:
+                    print(f"Invalid output path: {e}")
+                    return 1
+
             result = processor.inject_alt_text_from_file(
-                args.input_file,
-                args.alt_text_file,
-                args.output
+                input_file,
+                alt_text_file,
+                output_file
             )
             
             if result['success']:
@@ -1171,7 +1515,18 @@ Examples:
                 return 1
                 
         elif args.command == 'test-survival':
-            result = processor.test_pdf_export_survival(args.input_file)
+            # Validate input file
+            try:
+                validated_input = sanitize_input_path(args.input_file)
+                input_file = str(validated_input)
+            except SecurityError as e:
+                print(f"Security Error (input): {e}")
+                return 1
+            except ValueError as e:
+                print(f"Invalid input path: {e}")
+                return 1
+
+            result = processor.test_pdf_export_survival(input_file)
             
             if result['success']:
                 print("✅ ALT text survival test completed:")

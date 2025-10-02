@@ -50,6 +50,11 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# Import path validation and file locking modules
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError, is_safe_path
+from shared.file_lock_manager import FileLock, LockError
+
 # -----------------------------
 # Config loading (config_manager -> yaml fallback)
 # -----------------------------
@@ -90,7 +95,7 @@ def setup_logging(output_dir: Path, cfg: Dict[str, Any]) -> logging.Logger:
     log_to_file = ((cfg.get("logging") or {}).get("log_to_file") is True)
     if log_to_file:
         output_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(output_dir / "batch_processor.log", encoding="utf-8")
+        fh = logging.FileHandler(output_dir / "batch_processor.txt", encoding="utf-8")
         fh.setLevel(level)
         fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
         logger.addHandler(fh)
@@ -109,7 +114,11 @@ SUPPORTED_EXTS = {".pptx", ".docx"}
 def is_supported(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_EXTS
 
-def discover_files(root: Path, recursive: bool) -> List[Path]:
+def discover_files(root: Path, recursive: bool, logger: logging.Logger) -> List[Path]:
+    """
+    Discover supported files in root directory.
+    Validates each discovered file to ensure it's within safe directories.
+    """
     def _is_real(path: Path) -> bool:
         name = path.name
         # Skip Office lock files and macOS dotfiles
@@ -117,10 +126,20 @@ def discover_files(root: Path, recursive: bool) -> List[Path]:
             return False
         return path.is_file() and is_supported(path)
 
+    discovered = []
     if recursive:
-        return [p for p in root.rglob("*") if _is_real(p)]
+        candidates = [p for p in root.rglob("*") if _is_real(p)]
     else:
-        return [p for p in root.glob("*") if _is_real(p)]
+        candidates = [p for p in root.glob("*") if _is_real(p)]
+
+    # Validate each discovered file
+    for path in candidates:
+        if is_safe_path(path):
+            discovered.append(path)
+        else:
+            logger.warning(f"Skipping file outside allowed directories: {path.name}")
+
+    return discovered
 
 def rel_output_path(infile: Path, input_root: Path, output_root: Path) -> Path:
     """
@@ -500,9 +519,40 @@ class BatchSummary:
     by_type: Dict[str, Dict[str, int]] = field(default_factory=lambda: {"pptx": {"total":0,"succeeded":0,"failed":0}, "docx":{"total":0,"succeeded":0,"failed":0}})
     duration_sec: float = 0.0
 
-def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dict[str, Any], skip_existing: bool, logger: logging.Logger) -> FileResult:
+def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dict[str, Any], skip_existing: bool, logger: logging.Logger, cfg: Dict[str, Any] = None) -> FileResult:
     file_type = infile.suffix.lower().lstrip(".")
+
+    # Validate input file path (defense in depth)
+    try:
+        if not is_safe_path(infile):
+            logger.error(f"Security violation: file outside allowed directories: {infile}")
+            return FileResult(
+                file=str(infile), output_file=None, file_type=file_type,
+                success=False, error="Security: file outside allowed directories"
+            )
+    except Exception as e:
+        logger.error(f"Path validation error for {infile}: {e}")
+        return FileResult(
+            file=str(infile), output_file=None, file_type=file_type,
+            success=False, error=f"Path validation failed: {e}"
+        )
+
     out_path = rel_output_path(infile, input_root, output_root)
+
+    # Validate output path
+    try:
+        if not is_safe_path(out_path):
+            logger.error(f"Security violation: output path outside allowed directories: {out_path}")
+            return FileResult(
+                file=str(infile), output_file=None, file_type=file_type,
+                success=False, error="Security: output path outside allowed directories"
+            )
+    except Exception as e:
+        logger.error(f"Output path validation error for {out_path}: {e}")
+        return FileResult(
+            file=str(infile), output_file=None, file_type=file_type,
+            success=False, error=f"Output path validation failed: {e}"
+        )
 
     # Optionally skip if output already exists
     if skip_existing and out_path.exists():
@@ -518,8 +568,31 @@ def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dic
     # Ensure out directories exist
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    result = adapter.process(infile, out_path)
-    return result
+    # Get file locking configuration
+    lock_config = (cfg or {}).get("file_locking", {}) if cfg else {}
+    locking_enabled = lock_config.get("enabled", True)
+    lock_timeout = lock_config.get("timeout_seconds", 30)
+
+    # Process with file locking to prevent concurrent access corruption
+    if locking_enabled:
+        try:
+            with FileLock(infile, timeout=lock_timeout) as lock:
+                result = adapter.process(infile, out_path)
+                return result
+        except LockError as e:
+            logger.warning(f"File locked, skipping: {infile.name}")
+            return FileResult(
+                file=str(infile),
+                output_file=None,
+                file_type=file_type,
+                success=False,
+                error=f"File locked by another process (timeout after {lock_timeout}s)",
+                timing_sec=0.0
+            )
+    else:
+        # Locking disabled, process directly
+        result = adapter.process(infile, out_path)
+        return result
 
 def format_progress(done: int, total: int, start_ts: float) -> str:
     now = time.time()
@@ -540,15 +613,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="List files and exit without processing")
     args = p.parse_args(argv)
 
-    input_root = Path(args.folder).expanduser().resolve()
-    output_root = Path(args.output).expanduser().resolve()
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        # Prefer a root-level config.yaml if present
-        candidate = Path(__file__).resolve().parents[1] / config_path.name
-        if candidate.exists():
-            config_path = candidate
-    config_path = config_path.resolve()
+    # Validate input folder path
+    try:
+        input_root = sanitize_input_path(args.folder)
+    except SecurityError as e:
+        print(f"Security Error (input folder): {e}")
+        return 1
+    except (ValueError, Exception) as e:
+        print(f"Invalid input folder: {e}")
+        return 1
+
+    # Validate output folder path
+    try:
+        output_root = validate_output_path(args.output, create_parents=True)
+    except SecurityError as e:
+        print(f"Security Error (output folder): {e}")
+        return 1
+    except (ValueError, Exception) as e:
+        print(f"Invalid output folder: {e}")
+        return 1
+
+    # Validate config path
+    try:
+        config_path = sanitize_input_path(args.config)
+        # If not absolute in original args, look for root-level config
+        if not Path(args.config).is_absolute():
+            candidate = Path(__file__).resolve().parents[1] / Path(args.config).name
+            if candidate.exists():
+                config_path = sanitize_input_path(str(candidate))
+    except SecurityError as e:
+        print(f"Security Error (config): {e}")
+        return 1
+    except (ValueError, Exception) as e:
+        print(f"Invalid config path: {e}")
+        return 1
 
     cfg = load_config(config_path)
 
@@ -559,7 +657,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger = setup_logging(output_root, cfg)
     logger.info("Batch start | input=%s | output=%s | recursive=%s", input_root, output_root, args.recursive)
 
-    files = discover_files(input_root, recursive=args.recursive)
+    files = discover_files(input_root, recursive=args.recursive, logger=logger)
     files.sort()
     if not files:
         logger.warning("No supported files found in %s (recursive=%s).", input_root, args.recursive)
@@ -596,7 +694,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Thread pool parallelism
     with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
         fut_to_path = {
-            ex.submit(process_one, f, input_root, output_root, adapters, args.skip_existing, logger): f
+            ex.submit(process_one, f, input_root, output_root, adapters, args.skip_existing, logger, cfg): f
             for f in files
         }
         for fut in cf.as_completed(fut_to_path):
@@ -639,7 +737,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     combined_coverage = (elements_with_alt / total_elements) if total_elements else None
 
     # Generate unified JSON report
-    report_path = Path(args.report) if args.report else (output_root / "batch_report.json")
+    if args.report:
+        try:
+            report_path = validate_output_path(args.report)
+        except SecurityError as e:
+            logger.error(f"Security Error (report path): {e}")
+            return 1
+        except (ValueError, Exception) as e:
+            logger.error(f"Invalid report path: {e}")
+            return 1
+    else:
+        report_path = output_root / "batch_report.json"
+
     unified = {
         "batch": {
             "started_at": int(start_ts),

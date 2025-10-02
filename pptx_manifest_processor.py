@@ -26,6 +26,9 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
+# Import path validation module (must come after sys.path setup)
+from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
+
 # Import manifest-based components
 from manifest_processor import ManifestProcessor
 from manifest_injector import inject_from_manifest, validate_manifest_for_injection
@@ -150,16 +153,46 @@ Key Benefits:
 
 def cmd_process(args) -> int:
     """Handle 'process' command - full pipeline."""
-    input_path = Path(args.input_file)
+    # Validate input file path
+    try:
+        validated_input = sanitize_input_path(args.input_file)
+        input_path = validated_input
+    except SecurityError as e:
+        print(f"Security Error (input): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid input path: {e}")
+        return 1
+
     if not input_path.exists():
         print(f"❌ Input file not found: {args.input_file}")
         return 1
-    
-    output_path = args.output or str(input_path)
-    
-    # Determine manifest path
+
+    # Validate output path if provided
+    if args.output:
+        try:
+            validated_output = validate_output_path(args.output)
+            output_path = str(validated_output)
+        except SecurityError as e:
+            print(f"Security Error (output): {e}")
+            return 1
+        except ValueError as e:
+            print(f"Invalid output path: {e}")
+            return 1
+    else:
+        output_path = str(input_path)
+
+    # Determine and validate manifest path
     if args.manifest:
-        manifest_path = Path(args.manifest)
+        try:
+            validated_manifest = validate_output_path(args.manifest)
+            manifest_path = validated_manifest
+        except SecurityError as e:
+            print(f"Security Error (manifest): {e}")
+            return 1
+        except ValueError as e:
+            print(f"Invalid manifest path: {e}")
+            return 1
     else:
         manifest_path = input_path.parent / f"{input_path.stem}_alt_manifest.jsonl"
     
@@ -261,18 +294,49 @@ def cmd_process(args) -> int:
 
 def cmd_inject(args) -> int:
     """Handle 'inject' command - inject from existing manifest."""
-    input_path = Path(args.input_file)
-    manifest_path = Path(args.manifest)
-    
+    # Validate input file path
+    try:
+        validated_input = sanitize_input_path(args.input_file)
+        input_path = validated_input
+    except SecurityError as e:
+        print(f"Security Error (input): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid input path: {e}")
+        return 1
+
+    # Validate manifest path
+    try:
+        validated_manifest = sanitize_input_path(args.manifest)
+        manifest_path = validated_manifest
+    except SecurityError as e:
+        print(f"Security Error (manifest): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid manifest path: {e}")
+        return 1
+
     if not input_path.exists():
         print(f"❌ Input file not found: {args.input_file}")
         return 1
-        
+
     if not manifest_path.exists():
         print(f"❌ Manifest file not found: {args.manifest}")
         return 1
-    
-    output_path = args.output or str(input_path)
+
+    # Validate output path if provided
+    if args.output:
+        try:
+            validated_output = validate_output_path(args.output)
+            output_path = str(validated_output)
+        except SecurityError as e:
+            print(f"Security Error (output): {e}")
+            return 1
+        except ValueError as e:
+            print(f"Invalid output path: {e}")
+            return 1
+    else:
+        output_path = str(input_path)
 
     logger.info(f"Injecting from manifest: {manifest_path.name}")
     run_id = str(uuid.uuid4())
@@ -310,8 +374,27 @@ def cmd_inject(args) -> int:
 
 def cmd_review(args) -> int:
     """Handle 'review' command - generate review document from manifest."""
-    manifest_path = Path(args.manifest)
-    
+    # Validate manifest path
+    try:
+        validated_manifest = sanitize_input_path(args.manifest)
+        manifest_path = validated_manifest
+    except SecurityError as e:
+        print(f"Security Error (manifest): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid manifest path: {e}")
+        return 1
+
+    # Validate output path
+    try:
+        validated_output = validate_output_path(args.output)
+    except SecurityError as e:
+        print(f"Security Error (output): {e}")
+        return 1
+    except ValueError as e:
+        print(f"Invalid output path: {e}")
+        return 1
+
     if not manifest_path.exists():
         print(f"❌ Manifest file not found: {args.manifest}")
         return 1
@@ -322,7 +405,7 @@ def cmd_review(args) -> int:
     try:
         generate_review_from_manifest(
             str(manifest_path),
-            args.output,
+            str(validated_output),
             title=args.title,
             portrait=True,
             run_id=run_id,

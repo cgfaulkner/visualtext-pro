@@ -383,6 +383,11 @@ class PPTXAltTextInjector:
             r'\2', t, flags=re.IGNORECASE
         )
         t = self._ensure_terminal_punctuation(t)
+
+        # Ensure proper sentence case (capitalize first letter)
+        if t and t[0].islower():
+            t = t[0].upper() + t[1:]
+
         return t
 
     @staticmethod
@@ -3115,24 +3120,29 @@ class PPTXAltTextInjector:
                 # Get current ALT text using all available methods
                 current_alt_text = self._get_existing_alt_text(shape)
                 
-                if current_alt_text == expected_alt_text:
-                    logger.info(f"🔍 DEBUG: ✅ VERIFIED: {image_key}")
-                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
-                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
+                # Normalize both texts for comparison
+                expected_normalized = self._normalize_for_comparison(expected_alt_text)
+                actual_normalized = self._normalize_for_comparison(current_alt_text)
+
+                if expected_normalized == actual_normalized:
+                    logger.info(f"🔍 DEBUG: ✅ VERIFIED (normalized): {image_key}")
+                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}' -> '{expected_normalized}'")
+                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}' -> '{actual_normalized}'")
                     successful_injections += 1
                 else:
                     logger.info(f"🔍 DEBUG: ❌ FAILED: {image_key}")
-                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}'")
-                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}'")
-                    
+                    logger.info(f"🔍 DEBUG:   Expected: '{expected_alt_text}' -> '{expected_normalized}'")
+                    logger.info(f"🔍 DEBUG:   Actual: '{current_alt_text}' -> '{actual_normalized}'")
+
                     # REPAIR PASS: Check if actual text matches blocked fallback patterns
                     if self._is_blocked_fallback_pattern(current_alt_text):
                         logger.info(f"🔧 REPAIR: Detected blocked fallback pattern, attempting repair...")
                         repair_success = self._inject_alt(shape, expected_alt_text, image_key, "repair_injected")
                         if repair_success:
-                            # Re-verify after repair
+                            # Re-verify after repair using normalized comparison
                             repaired_text = self._get_existing_alt_text(shape)
-                            if repaired_text == expected_alt_text:
+                            repaired_normalized = self._normalize_for_comparison(repaired_text)
+                            if repaired_normalized == expected_normalized:
                                 logger.info(f"🔧 REPAIR: ✅ Successfully repaired {image_key}")
                                 successful_injections += 1
                                 continue
@@ -3140,7 +3150,7 @@ class PPTXAltTextInjector:
                                 logger.warning(f"🔧 REPAIR: ❌ Repair verification failed for {image_key}")
                         else:
                             logger.warning(f"🔧 REPAIR: ❌ Repair injection failed for {image_key}")
-                    
+
                     failed_injections += 1
                     
                     # Additional debug info for failed injections
@@ -3181,40 +3191,39 @@ class PPTXAltTextInjector:
     
     def _normalize_for_comparison(self, text: str) -> str:
         """
-        Normalize ALT text for comparison to avoid redundant updates.
-        
-        Args:
-            text: ALT text to normalize
-            
-        Returns:
-            Normalized text for comparison
+        Enhanced normalization for accurate comparison that handles:
+        - Capitalization differences
+        - Punctuation variations
+        - Whitespace normalization
         """
         if not text:
             return ""
-        
+
         import re
-        
-        # Normalize whitespace and case
-        normalized = re.sub(r'\s+', ' ', text.strip().lower())
-        
-        # Remove common punctuation variations
+
+        # Normalize whitespace first
+        normalized = re.sub(r'\s+', ' ', text.strip())
+
+        # Normalize case but preserve proper nouns (simple heuristic)
+        words = normalized.split()
+        normalized_words = []
+        for i, word in enumerate(words):
+            if i == 0:  # First word gets capitalized
+                normalized_words.append(word.capitalize())
+            elif word.lower() in ['powerpoint', 'microsoft', 'southwestern', 'medical', 'center']:
+                # Preserve known proper nouns
+                normalized_words.append(word.title())
+            else:
+                normalized_words.append(word.lower())
+
+        normalized = ' '.join(normalized_words)
+
+        # Normalize punctuation - ensure consistent ending
         normalized = re.sub(r'[.!?]+$', '', normalized)  # Remove trailing punctuation
-        
-        # Remove common prefixes that don't affect meaning
-        prefixes = [
-            'this is a powerpoint ',
-            'powerpoint ',
-            'a ',
-            'an ',
-            'the '
-        ]
-        
-        for prefix in prefixes:
-            if normalized.startswith(prefix):
-                normalized = normalized[len(prefix):]
-                break
-        
-        return normalized.strip()
+        if not normalized.endswith('.'):
+            normalized += '.'  # Add consistent ending
+
+        return normalized
     
     def _create_title_from_alt_text(self, alt_text: str) -> str:
         """

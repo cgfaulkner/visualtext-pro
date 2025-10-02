@@ -1,4 +1,4 @@
-# AGENTS Instructions for pdf-alt
+# AGENTS Instructions for VisualText Pro
 
 This project provides tools to extract, clean, and rebuild presentations and PDFs with improved
 alternative text for accessibility.

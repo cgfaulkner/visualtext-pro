@@ -21,6 +21,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from pipeline_artifacts import RunArtifacts
 from alt_manifest import AltManifest, create_instance_key, create_content_key
+from resource_manager import ResourceContext, validate_system_resources
 
 try:  # Prefer shared helper from dedicated injector module when available
     from core.pptx_alt_injector import _is_meaningful
@@ -364,53 +365,70 @@ def phase3_resolve(artifacts: RunArtifacts) -> Dict[str, Any]:
         }
 
 
-def run_pipeline(pptx_path: Path, config, alt_generator, 
-                force_regenerate: bool = False) -> RunArtifacts:
+def run_pipeline(pptx_path: Path, config, alt_generator,
+                force_regenerate: bool = False,
+                cleanup_on_exit: bool = True) -> RunArtifacts:
     """
-    Run the complete three-phase pipeline.
-    
+    Run the complete three-phase pipeline with automatic cleanup.
+
     Args:
-        pptx_path: Path to PPTX file  
+        pptx_path: Path to PPTX file
         config: Configuration object
         alt_generator: ALT text generation provider
         force_regenerate: Force regeneration even if cache exists
-        
+        cleanup_on_exit: If True, cleanup artifacts after processing (from config)
+
     Returns:
         RunArtifacts with all pipeline outputs
+
+    Note:
+        Artifacts are automatically cleaned up based on config settings.
+        Use cleanup_on_exit=False to keep all artifacts for debugging.
     """
     logger.info(f"Starting pipeline for {pptx_path.name}")
     start_time = time.time()
-    
-    # Create artifacts structure
-    artifacts = RunArtifacts.create_for_run(pptx_path)
-    
-    try:
-        # Phase 1: Scan
-        scan_result = phase1_scan(pptx_path, artifacts)
-        if not scan_result['success']:
-            raise RuntimeError(f"Phase 1 failed: {scan_result.get('error', 'Unknown error')}")
-        
-        # Phase 2: Generate (only if images need ALT text)
-        if scan_result['total_images'] > scan_result['images_with_current_alt']:
-            generate_result = phase2_generate(artifacts, alt_generator, force_regenerate)
-            if not generate_result['success']:
-                logger.warning(f"Phase 2 had issues: {generate_result.get('error', 'Unknown error')}")
-        else:
-            logger.info("Phase 2 skipped: All images already have ALT text")
-            artifacts.save_generated_alt_by_key({})
-        
-        # Phase 3: Resolve
-        resolve_result = phase3_resolve(artifacts)
-        if not resolve_result['success']:
-            raise RuntimeError(f"Phase 3 failed: {resolve_result.get('error', 'Unknown error')}")
-        
-        elapsed = time.time() - start_time
-        logger.info(f"Pipeline completed in {elapsed:.2f}s")
-        
-        return artifacts
-        
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-        # Clean up on failure
-        artifacts.cleanup(keep_finals=False)
-        raise
+
+    # Pre-flight resource validation
+    validation_result = validate_system_resources(required_memory_mb=300, required_disk_mb=200)
+    if not validation_result['sufficient']:
+        error_msg = "Insufficient system resources for pipeline: " + "; ".join(validation_result['errors'])
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    # Create artifacts structure with context manager for automatic cleanup
+    with RunArtifacts.create_for_run(pptx_path, cleanup_on_exit=cleanup_on_exit) as artifacts:
+        # Use ResourceContext for safe operation
+        with ResourceContext(validate_resources=False, cleanup_on_exit=True) as (temp_manager, resource_monitor):
+            try:
+                # Phase 1: Scan
+                scan_result = phase1_scan(pptx_path, artifacts)
+                if not scan_result['success']:
+                    raise RuntimeError(f"Phase 1 failed: {scan_result.get('error', 'Unknown error')}")
+
+                # Phase 2: Generate (only if images need ALT text)
+                if scan_result['total_images'] > scan_result['images_with_current_alt']:
+                    generate_result = phase2_generate(artifacts, alt_generator, force_regenerate)
+                    if not generate_result['success']:
+                        logger.warning(f"Phase 2 had issues: {generate_result.get('error', 'Unknown error')}")
+                else:
+                    logger.info("Phase 2 skipped: All images already have ALT text")
+                    artifacts.save_generated_alt_by_key({})
+
+                # Phase 3: Resolve
+                resolve_result = phase3_resolve(artifacts)
+                if not resolve_result['success']:
+                    raise RuntimeError(f"Phase 3 failed: {resolve_result.get('error', 'Unknown error')}")
+
+                # Mark processing as successful (keeps finals on cleanup)
+                artifacts.mark_success()
+
+                elapsed = time.time() - start_time
+                logger.info(f"Pipeline completed successfully in {elapsed:.2f}s")
+
+                return artifacts
+
+            except Exception as e:
+                logger.error(f"Pipeline failed: {e}", exc_info=True)
+                # Don't mark success - context manager will cleanup without keeping finals
+                raise
+        # Context manager automatically cleans up artifacts here

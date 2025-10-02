@@ -88,7 +88,7 @@ def setup_logging(level: str = "INFO", log_dir: str = None) -> logging.Logger:
         root = Path(__file__).resolve().parents[1]  # project root
         logs_dir = Path(log_dir).resolve() if log_dir else (root / "logs")
         logs_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(str(logs_dir / "docx_processor.log"), encoding="utf-8")
+        fh = logging.FileHandler(str(logs_dir / "docx_processor.txt"), encoding="utf-8")
         fh.setLevel(logger.level)
         fh.setFormatter(fmt)
         logger.addHandler(fh)

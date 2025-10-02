@@ -71,6 +71,7 @@ from decorative_filter import (
     get_image_hash,
     validate_decorative_config
 )
+from resource_manager import ResourceContext, get_temp_manager, validate_system_resources
 # Support both package and top-level imports when running as a script
 try:
     from .pptx_alt_injector import _is_meaningful
@@ -408,80 +409,90 @@ class PPTXAccessibilityProcessor:
         
         logger.info(f"Processing PPTX: {pptx_path.name}")
         logger.info(f"Output will be saved to: {output_path}")
-        
-        try:
-            # Step 1: Extract all visual elements from PPTX
-            logger.info("Step 1: Extracting all visual elements from PPTX...")
-            extraction_start = time.time()
-            
-            presentation, visual_elements = self._extract_all_visual_elements(str(pptx_path))
-            
-            extraction_time = time.time() - extraction_start
-            logger.info(f"Visual element extraction completed in {extraction_time:.2f}s")
-            
-            result['total_slides'] = len(presentation.slides)
-            result['total_visual_elements'] = len(visual_elements)
-            
-            if not visual_elements:
-                logger.warning(f"No visual elements found in PPTX: {pptx_path.name}")
-                result['success'] = True  # Not an error, just no visual elements to process
-                result['total_time'] = time.time() - start_time
-                return result
-            
-            logger.info(f"Found {len(visual_elements)} visual elements across {result['total_slides']} slides")
-            
-            # Step 2: Generate ALT text for all visual elements
-            logger.info("Step 2: Generating ALT text for all visual elements...")
-            generation_start = time.time()
-            
-            alt_text_mapping = {}
-            element_tracker = defaultdict(list)  # Track duplicate elements
-            
-            for visual_element in visual_elements:
-                # Track element occurrences for duplicate detection
-                element_key = getattr(visual_element, 'element_hash', str(visual_element.element_key))
-                element_tracker[element_key].append(visual_element)
-            
-            for visual_element in visual_elements:
-                generation_failure_reason = None
-                
-                try:
-                    # Generate ALT text for ALL visual elements - let LLaVa decide if decorative
-                    if debug:
-                        logger.info(f"🔍 DEBUG: Processing {visual_element.element_type}: {visual_element.element_key}")
-                        logger.info(f"🔍 DEBUG: Size: {visual_element.width_px}x{visual_element.height_px}px")
-                        if visual_element.filename:
-                            logger.info(f"🔍 DEBUG: Filename: {visual_element.filename}")
-                        logger.info(f"🔍 DEBUG: Slide text: {visual_element.slide_text[:100]}...")
-                    
-                    alt_text, failure_reason = self._generate_alt_text_for_visual_element(visual_element, debug)
-                    
-                    if alt_text and alt_text.strip() and alt_text.strip() != "":
-                        # Check for LLaVA errors and handle them
-                        if self._is_llava_error(alt_text.strip()):
-                            # LLaVA returned error - try fallback
-                            fallback_description = self._handle_llava_error_with_fallback(visual_element, debug)
-                            if fallback_description:
-                                alt_text = fallback_description
-                                if debug:
-                                    logger.info(f"🔄 DEBUG: LLaVA error handled with fallback for {visual_element.element_key}")
-                        
-                        # Successfully generated valid ALT text - normalize to remove duplications
-                        normalized_alt_text = self._normalize_alt(alt_text.strip())
-                        alt_text_mapping[visual_element.element_key] = {
-                            'alt_text': normalized_alt_text,
-                            'shape': visual_element.shape,
-                            'slide_idx': visual_element.slide_idx,
-                            'shape_idx': visual_element.shape_idx
-                        }
-                        result['processed_visual_elements'] += 1
+
+        # Pre-flight resource validation
+        validation_result = validate_system_resources(required_memory_mb=200, required_disk_mb=500)
+        if not validation_result['sufficient']:
+            error_msg = "Insufficient system resources: " + "; ".join(validation_result['errors'])
+            logger.error(error_msg)
+            result['errors'].append(error_msg)
+            return result
+
+        # Use ResourceContext for safe temp file management
+        with ResourceContext(validate_resources=False, cleanup_on_exit=True) as (temp_manager, resource_monitor):
+            try:
+                # Step 1: Extract all visual elements from PPTX
+                logger.info("Step 1: Extracting all visual elements from PPTX...")
+                extraction_start = time.time()
+
+                presentation, visual_elements = self._extract_all_visual_elements(str(pptx_path))
+
+                extraction_time = time.time() - extraction_start
+                logger.info(f"Visual element extraction completed in {extraction_time:.2f}s")
+
+                result['total_slides'] = len(presentation.slides)
+                result['total_visual_elements'] = len(visual_elements)
+
+                if not visual_elements:
+                    logger.warning(f"No visual elements found in PPTX: {pptx_path.name}")
+                    result['success'] = True  # Not an error, just no visual elements to process
+                    result['total_time'] = time.time() - start_time
+                    return result
+
+                logger.info(f"Found {len(visual_elements)} visual elements across {result['total_slides']} slides")
+
+                # Step 2: Generate ALT text for all visual elements
+                logger.info("Step 2: Generating ALT text for all visual elements...")
+                generation_start = time.time()
+
+                alt_text_mapping = {}
+                element_tracker = defaultdict(list)  # Track duplicate elements
+
+                for visual_element in visual_elements:
+                    # Track element occurrences for duplicate detection
+                    element_key = getattr(visual_element, 'element_hash', str(visual_element.element_key))
+                    element_tracker[element_key].append(visual_element)
+
+                for visual_element in visual_elements:
+                    generation_failure_reason = None
+
+                    try:
+                        # Generate ALT text for ALL visual elements - let LLaVa decide if decorative
                         if debug:
-                            logger.info(f"✅ DEBUG: Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
+                            logger.info(f"🔍 DEBUG: Processing {visual_element.element_type}: {visual_element.element_key}")
+                            logger.info(f"🔍 DEBUG: Size: {visual_element.width_px}x{visual_element.height_px}px")
+                            if visual_element.filename:
+                                logger.info(f"🔍 DEBUG: Filename: {visual_element.filename}")
+                            logger.info(f"🔍 DEBUG: Slide text: {visual_element.slide_text[:100]}...")
+
+                        alt_text, failure_reason = self._generate_alt_text_for_visual_element(visual_element, debug)
+
+                        if alt_text and alt_text.strip() and alt_text.strip() != "":
+                            # Check for LLaVA errors and handle them
+                            if self._is_llava_error(alt_text.strip()):
+                                # LLaVA returned error - try fallback
+                                fallback_description = self._handle_llava_error_with_fallback(visual_element, debug)
+                                if fallback_description:
+                                    alt_text = fallback_description
+                                    if debug:
+                                        logger.info(f"🔄 DEBUG: LLaVA error handled with fallback for {visual_element.element_key}")
+
+                            # Successfully generated valid ALT text - normalize to remove duplications
+                            normalized_alt_text = self._normalize_alt(alt_text.strip())
+                            alt_text_mapping[visual_element.element_key] = {
+                                'alt_text': normalized_alt_text,
+                                'shape': visual_element.shape,
+                                'slide_idx': visual_element.slide_idx,
+                                'shape_idx': visual_element.shape_idx
+                            }
+                            result['processed_visual_elements'] += 1
+                            if debug:
+                                logger.info(f"✅ DEBUG: Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
+                            else:
+                                logger.info(f"Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
                         else:
-                            logger.info(f"Generated ALT text for {visual_element.element_key}: {alt_text[:50]}...")
-                    else:
-                        # Generation failed - try creating fallback descriptive ALT text
-                        generation_failure_reason = failure_reason or "Empty or invalid ALT text returned"
+                            # Generation failed - try creating fallback descriptive ALT text
+                            generation_failure_reason = failure_reason or "Empty or invalid ALT text returned"
                         
                         # Instead of generic "PowerPoint shape element", use descriptive text
                         if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
@@ -527,10 +538,10 @@ class PPTXAccessibilityProcessor:
                         else:
                             # For other element types, still count as failed
                             result['failed_visual_elements'] += 1
-                            
+
                             if debug:
                                 logger.warning(f"❌ DEBUG: Generation failed for {visual_element.element_key}: {generation_failure_reason}")
-                                
+
                             # Log failed generation for manual review
                             if failed_generation_callback:
                                 failed_generation_callback(
@@ -546,71 +557,87 @@ class PPTXAccessibilityProcessor:
                                     },
                                     f"ALT text generation failed: {generation_failure_reason}"
                                 )
-                
-                except Exception as e:
-                    generation_failure_reason = f"Exception during generation: {str(e)}"
-                    
-                    # Try fallback description even for exceptions on shapes
-                    if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
-                        try:
-                            fallback_description = self._create_enhanced_fallback_description(visual_element)
-                            
-                            # Add bypass annotation for session data visibility
-                            bypass_reason = self._check_element_bypass(visual_element)
-                            if bypass_reason:
-                                # Mark as bypassed for session data
-                                # HOTPATCH FIX 2: Use compose_alt at join point instead of simple concatenation
-                                bypass_annotation = f"[BYPASS: {bypass_reason}]"
-                                composed_description = self._compose_alt([bypass_annotation, fallback_description])
-                                normalized_description = composed_description
-                                alt_text_mapping[visual_element.element_key] = {
-                                    'alt_text': normalized_description,
-                                    'shape': visual_element.shape,
-                                    'slide_idx': visual_element.slide_idx,
-                                    'shape_idx': visual_element.shape_idx,
-                                    'bypass_reason': bypass_reason,
-                                    'bypassed': True,
-                                    'fallback_used': True,
-                                    'exception_fallback': True
-                                }
-                                if debug:
-                                    logger.info(f"🚧 DEBUG: Used bypassed fallback after exception for {visual_element.element_key}: {bypass_reason}")
+
+                    except Exception as e:
+                        generation_failure_reason = f"Exception during generation: {str(e)}"
+
+                        # Try fallback description even for exceptions on shapes
+                        if visual_element.element_type in ['shape', 'text_placeholder', 'text_box', 'line', 'connector']:
+                            try:
+                                fallback_description = self._create_enhanced_fallback_description(visual_element)
+
+                                # Add bypass annotation for session data visibility
+                                bypass_reason = self._check_element_bypass(visual_element)
+                                if bypass_reason:
+                                    # Mark as bypassed for session data
+                                    # HOTPATCH FIX 2: Use compose_alt at join point instead of simple concatenation
+                                    bypass_annotation = f"[BYPASS: {bypass_reason}]"
+                                    composed_description = self._compose_alt([bypass_annotation, fallback_description])
+                                    normalized_description = composed_description
+                                    alt_text_mapping[visual_element.element_key] = {
+                                        'alt_text': normalized_description,
+                                        'shape': visual_element.shape,
+                                        'slide_idx': visual_element.slide_idx,
+                                        'shape_idx': visual_element.shape_idx,
+                                        'bypass_reason': bypass_reason,
+                                        'bypassed': True,
+                                        'fallback_used': True,
+                                        'exception_fallback': True
+                                    }
+                                    if debug:
+                                        logger.info(f"🚧 DEBUG: Used bypassed fallback after exception for {visual_element.element_key}: {bypass_reason}")
+                                    else:
+                                        logger.info(f"Used bypassed fallback after exception for {visual_element.element_key}: {bypass_reason}")
                                 else:
-                                    logger.info(f"Used bypassed fallback after exception for {visual_element.element_key}: {bypass_reason}")
-                            else:
-                                # Normal fallback without bypass - HOTPATCH FIX 2: Use compose_alt for consistency
-                                normalized_description = self._compose_alt([fallback_description])
-                                alt_text_mapping[visual_element.element_key] = {
-                                    'alt_text': normalized_description,
-                                    'shape': visual_element.shape,
-                                    'slide_idx': visual_element.slide_idx,
-                                    'shape_idx': visual_element.shape_idx,
-                                    'fallback_used': True,
-                                    'exception_fallback': True
-                                }
+                                    # Normal fallback without bypass - HOTPATCH FIX 2: Use compose_alt for consistency
+                                    normalized_description = self._compose_alt([fallback_description])
+                                    alt_text_mapping[visual_element.element_key] = {
+                                        'alt_text': normalized_description,
+                                        'shape': visual_element.shape,
+                                        'slide_idx': visual_element.slide_idx,
+                                        'shape_idx': visual_element.shape_idx,
+                                        'fallback_used': True,
+                                        'exception_fallback': True
+                                    }
                                 if debug:
                                     logger.info(f"✅ DEBUG: Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
                                 else:
                                     logger.info(f"Used fallback description after exception for {visual_element.element_key}: {fallback_description}")
-                            
+
+                                result['processed_visual_elements'] += 1
+                            except Exception as fallback_e:
+                                # Fallback failed too
+                                result['failed_visual_elements'] += 1
+                                if debug:
+                                    logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key} and fallback failed: {generation_failure_reason}, fallback: {fallback_e}", exc_info=True)
+                                else:
+                                    # Provide specific error details instead of generic messages
+                                    if str(generation_failure_reason) == "None" or not str(generation_failure_reason).strip():
+                                        error_msg = f"Error processing {visual_element.element_key}: ALT text generation returned empty result"
+                                    else:
+                                        error_msg = f"Error processing {visual_element.element_key}: {generation_failure_reason}"
+                                    logger.error(error_msg)
+                                    result['errors'].append(error_msg)
+                    else:
+                        # Check if we actually have ALT text despite the "failure"
+                        if visual_element.element_key in alt_text_mapping:
+                            # Success with fallback - log as info, not error
+                            alt_info = alt_text_mapping[visual_element.element_key]
+                            logger.info(f"Generated ALT text for {visual_element.element_key}: {alt_info['alt_text'][:50]}...")
                             result['processed_visual_elements'] += 1
-                        except Exception as fallback_e:
-                            # Fallback failed too
+                        else:
+                            # Actual failure - log as error
                             result['failed_visual_elements'] += 1
                             if debug:
-                                logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key} and fallback failed: {e}, fallback: {fallback_e}", exc_info=True)
+                                logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key}: {generation_failure_reason}", exc_info=True)
                             else:
-                                error_msg = f"Error processing {visual_element.element_key}: {str(e)}"
+                                # Provide specific error details instead of generic messages
+                                if str(generation_failure_reason) == "None" or not str(generation_failure_reason).strip():
+                                    error_msg = f"Error processing {visual_element.element_key}: ALT text generation returned empty result"
+                                else:
+                                    error_msg = f"Error processing {visual_element.element_key}: {generation_failure_reason}"
                                 logger.error(error_msg)
                                 result['errors'].append(error_msg)
-                    else:
-                        result['failed_visual_elements'] += 1
-                        if debug:
-                            logger.error(f"💥 DEBUG: Exception processing {visual_element.element_key}: {e}", exc_info=True)
-                        else:
-                            error_msg = f"Error processing {visual_element.element_key}: {str(e)}"
-                            logger.error(error_msg)
-                            result['errors'].append(error_msg)
                         
                     # Log failed generation for manual review (only if no fallback was used)
                     if visual_element.element_key not in alt_text_mapping and failed_generation_callback:
@@ -625,71 +652,79 @@ class PPTXAccessibilityProcessor:
                                 'height_px': visual_element.height_px,
                                 'slide_text': visual_element.slide_text
                             },
-                            f"Exception during generation: {str(e)}"
+                            generation_failure_reason
                         )
-            
-            result['generation_time'] = time.time() - generation_start
-            logger.info(f"ALT text generation completed in {result['generation_time']:.2f}s")
-            
-            # Step 3: Validate ALT text coverage before injection
-            logger.info("Step 3: Validating visual element ALT text coverage...")
-            validation_result = self._validate_visual_element_coverage(visual_elements, alt_text_mapping, debug)
-            
-            if not validation_result['complete_coverage']:
-                missing_count = validation_result['missing_count']
-                error_msg = f"Incomplete ALT text coverage: {missing_count} visual elements missing ALT text"
-                logger.error(error_msg)
-                result['errors'].append(error_msg)
-                
-                if debug:
-                    logger.error("❌ DEBUG: Visual elements missing ALT text:")
-                    for missing_key in validation_result['missing_elements']:
-                        logger.error(f"   - {missing_key}")
-            
-            # Step 4: Inject ALT text into PPTX
-            if alt_text_mapping:
-                logger.info("Step 4: Adding ALT text to PPTX...")
-                injection_start = time.time()
-                
-                if debug:
-                    logger.info(f"🔍 DEBUG: Injecting {len(alt_text_mapping)} ALT text mappings")
-                    for key, info in list(alt_text_mapping.items())[:3]:  # Show first 3
-                        logger.info(f"🔍 DEBUG: {key} -> '{info['alt_text'][:30]}...'")
-                
-                injection_success, final_alt_map = self._inject_alt_text_to_pptx(
-                    presentation, alt_text_mapping, str(output_path), debug
-                )
-                
-                result['injection_time'] = time.time() - injection_start
-                result['final_alt_map'] = final_alt_map  # Store canonical mapping for approval docs
-                logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
-                
-                if injection_success:
-                    result['success'] = True
-                    logger.info("✅ PPTX processing completed successfully!")
-                    
-                    # Report visual element coverage
-                    if result['total_visual_elements'] > 0:
-                        coverage = (result['processed_visual_elements'] / result['total_visual_elements']) * 100
-                        logger.info(f"📊 Visual element ALT text coverage: {result['processed_visual_elements']}/{result['total_visual_elements']} ({coverage:.1f}%)")
-                        
-                        if coverage == 100.0:
-                            logger.info("🎯 100% visual element ALT text coverage achieved!")
-                    else:
-                        logger.info("📊 No visual elements found to process")
-                else:
-                    error_msg = "ALT text injection failed"
+
+                result['generation_time'] = time.time() - generation_start
+                logger.info(f"ALT text generation completed in {result['generation_time']:.2f}s")
+
+                # Step 3: Validate ALT text coverage before injection
+                logger.info("Step 3: Validating visual element ALT text coverage...")
+                validation_result = self._validate_visual_element_coverage(visual_elements, alt_text_mapping, debug)
+
+                if not validation_result['complete_coverage']:
+                    missing_count = validation_result['missing_count']
+                    error_msg = f"Incomplete ALT text coverage: {missing_count} visual elements missing ALT text"
                     logger.error(error_msg)
                     result['errors'].append(error_msg)
-            else:
-                logger.warning("No ALT text to inject - this should not happen with proper fallback")
-                result['success'] = False
-                result['errors'].append("No ALT text mappings generated - fallback system failed")
-            
-        except Exception as e:
-            error_msg = f"Unexpected error during PPTX processing: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            result['errors'].append(error_msg)
+
+                    if debug:
+                        logger.error("❌ DEBUG: Visual elements missing ALT text:")
+                        for missing_key in validation_result['missing_elements']:
+                            logger.error(f"   - {missing_key}")
+
+                # Step 4: Inject ALT text into PPTX
+                if alt_text_mapping:
+                    logger.info("Step 4: Adding ALT text to PPTX...")
+                    injection_start = time.time()
+
+                    if debug:
+                        logger.info(f"🔍 DEBUG: Injecting {len(alt_text_mapping)} ALT text mappings")
+                        for key, info in list(alt_text_mapping.items())[:3]:  # Show first 3
+                            logger.info(f"🔍 DEBUG: {key} -> '{info['alt_text'][:30]}...'")
+
+                    injection_success, final_alt_map, injector_stats = self._inject_alt_text_to_pptx(
+                        presentation, alt_text_mapping, str(output_path), debug
+                    )
+
+                    result['injection_time'] = time.time() - injection_start
+                    result['final_alt_map'] = final_alt_map  # Store canonical mapping for approval docs
+                    result['injector_statistics'] = injector_stats  # Store injector statistics for accurate reporting
+                    logger.info(f"ALT text injection completed in {result['injection_time']:.2f}s")
+
+                    if injection_success:
+                        result['success'] = True
+                        logger.info("✅ PPTX processing completed successfully!")
+
+                        # Report visual element coverage
+                        if result['total_visual_elements'] > 0:
+                            # Calculate actual success metrics
+                            total_elements = len(visual_elements)
+                            successful_elements = len(alt_text_mapping)
+                            failed_elements = total_elements - successful_elements
+                            coverage_percent = (successful_elements / total_elements * 100) if total_elements > 0 else 0
+
+                            logger.info(f"📊 Visual element ALT text coverage: {successful_elements}/{total_elements} ({coverage_percent:.1f}%)")
+                            logger.info(f"   ✅ Successfully processed: {successful_elements}")
+                            logger.info(f"   ❌ Failed to process: {failed_elements}")
+
+                            if coverage_percent == 100.0:
+                                logger.info("🎯 100% visual element ALT text coverage achieved!")
+                        else:
+                            logger.info("📊 No visual elements found to process")
+                    else:
+                        error_msg = "ALT text injection failed"
+                        logger.error(error_msg)
+                        result['errors'].append(error_msg)
+                else:
+                    logger.warning("No ALT text to inject - this should not happen with proper fallback")
+                    result['success'] = False
+                    result['errors'].append("No ALT text mappings generated - fallback system failed")
+
+            except Exception as e:
+                error_msg = f"Unexpected error during PPTX processing: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                result['errors'].append(error_msg)
         
         # Calculate total processing time
         result['total_time'] = time.time() - start_time
@@ -4546,11 +4581,12 @@ class PPTXAccessibilityProcessor:
             # Normalize image format before processing
             try:
                 normalized_image_data = self._normalize_image_format(image_info.image_data, image_info.filename)
-                
+
                 # Save normalized image to temporary file for ALT text generation
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_manager = get_temp_manager()
+                temp_image_path = temp_manager.create_temp_file(suffix='.png')
+                with open(temp_image_path, 'wb') as temp_file:
                     temp_file.write(normalized_image_data)
-                    temp_image_path = temp_file.name
                     
             except Exception as norm_error:
                 # Check if this is a vector format conversion failure OR any WMF/EMF processing failure
@@ -4581,13 +4617,10 @@ class PPTXAccessibilityProcessor:
                 )
                 
                 return alt_text
-                
+
             finally:
-                # Clean up temporary file
-                try:
-                    os.unlink(temp_image_path)
-                except OSError:
-                    pass  # File cleanup failure is not critical
+                # Temp file cleanup is handled by resource manager
+                pass
         
         except Exception as e:
             logger.error(f"Failed to generate ALT text for {image_info.image_key}: {e}")
@@ -4727,13 +4760,13 @@ class PPTXAccessibilityProcessor:
         
         # Create temporary files for input and output
         input_suffix = '.wmf' if filename.lower().endswith('.wmf') else '.emf'
-        
-        with tempfile.NamedTemporaryFile(suffix=input_suffix, delete=False) as input_file:
+
+        temp_manager = get_temp_manager()
+        input_path = temp_manager.create_temp_file(suffix=input_suffix)
+        with open(input_path, 'wb') as input_file:
             input_file.write(image_data)
-            input_path = input_file.name
-            
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as output_file:
-            output_path = output_file.name
+
+        output_path = temp_manager.create_temp_file(suffix='.png')
         
         try:
             # Strategy 1: Inkscape (best quality for vector formats)
@@ -4833,37 +4866,37 @@ class PPTXAccessibilityProcessor:
                         logger.debug(f"Trying LibreOffice conversion for {filename}")
                     
                     # LibreOffice needs a directory to work in
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        temp_input = os.path.join(temp_dir, f"input{input_suffix}")
-                        shutil.copy2(input_path, temp_input)
-                        
-                        cmd = [
-                            'libreoffice',
-                            '--headless',
-                            '--convert-to', 'png',
-                            '--outdir', temp_dir,
-                            temp_input
-                        ]
-                        
-                        result = subprocess.run(
-                            cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=60,
-                            check=False
-                        )
-                        
-                        # LibreOffice creates input.png
-                        lo_output = os.path.join(temp_dir, "input.png")
-                        if result.returncode == 0 and os.path.exists(lo_output):
-                            with open(lo_output, 'rb') as f:
-                                converted_data = f.read()
-                            if len(converted_data) > 100:
-                                if debug:
-                                    logger.debug(f"LibreOffice conversion successful: {len(converted_data)} bytes")
-                                return converted_data
-                        elif debug:
-                            logger.debug(f"LibreOffice failed: {result.stderr}")
+                    temp_dir = temp_manager.create_temp_dir()
+                    temp_input = os.path.join(temp_dir, f"input{input_suffix}")
+                    shutil.copy2(str(input_path), temp_input)
+
+                    cmd = [
+                        'libreoffice',
+                        '--headless',
+                        '--convert-to', 'png',
+                        '--outdir', str(temp_dir),
+                        temp_input
+                    ]
+
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        check=False
+                    )
+
+                    # LibreOffice creates input.png
+                    lo_output = os.path.join(temp_dir, "input.png")
+                    if result.returncode == 0 and os.path.exists(lo_output):
+                        with open(lo_output, 'rb') as f:
+                            converted_data = f.read()
+                        if len(converted_data) > 100:
+                            if debug:
+                                logger.debug(f"LibreOffice conversion successful: {len(converted_data)} bytes")
+                            return converted_data
+                    elif debug:
+                        logger.debug(f"LibreOffice failed: {result.stderr}")
                             
                 except subprocess.TimeoutExpired:
                     logger.warning(f"LibreOffice conversion timed out for {filename}")
@@ -5452,11 +5485,12 @@ class PPTXAccessibilityProcessor:
             # Normalize image format before processing
             try:
                 normalized_image_data = self._normalize_image_format(image_info.image_data, image_info.filename, debug)
-                
+
                 # Save normalized image to temporary file for ALT text generation
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_manager = get_temp_manager()
+                temp_image_path = temp_manager.create_temp_file(suffix='.png')
+                with open(temp_image_path, 'wb') as temp_file:
                     temp_file.write(normalized_image_data)
-                    temp_image_path = temp_file.name
                     
             except Exception as norm_error:
                 # Check if this is a vector format conversion failure OR any WMF/EMF processing failure
@@ -5556,13 +5590,10 @@ class PPTXAccessibilityProcessor:
                     logger.info(f"✅ DEBUG: Generated and normalized ALT text: '{normalized_alt_text[:50]}...'")
                 
                 return normalized_alt_text, None
-                
+
             finally:
-                # Clean up temporary file
-                try:
-                    os.unlink(temp_image_path)
-                except OSError:
-                    pass  # File cleanup failure is not critical
+                # Temp file cleanup is handled by resource manager
+                pass
         
         except Exception as e:
             failure_reason = f"Exception during generation: {str(e)}"
@@ -5805,17 +5836,17 @@ class PPTXAccessibilityProcessor:
         return validation_result
     
     def _inject_alt_text_to_pptx(self, presentation: Presentation,
-                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, Dict[str, Dict[str, Any]]]:
+                               alt_text_mapping: Dict[str, Any], output_path: str, debug: bool = False) -> tuple[bool, Dict[str, Dict[str, Any]], Dict[str, Any]]:
         """
         Inject ALT text into PPTX presentation using the dedicated injector.
-        
+
         Args:
             presentation: Presentation object
             alt_text_mapping: Mapping of image keys to ALT text and shape info
             output_path: Path to save modified PPTX
-            
+
         Returns:
-            Tuple containing success flag and enriched final ALT mapping
+            Tuple containing success flag, enriched final ALT mapping, and injector statistics
         """
         try:
             # Import the dedicated ALT text injector
@@ -5874,22 +5905,16 @@ class PPTXAccessibilityProcessor:
             )
             
             # Save presentation to temp file for injector processing
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            presentation.save(temp_path)
+            temp_manager = get_temp_manager()
+            temp_path = temp_manager.create_temp_file(suffix='.pptx')
+            presentation.save(str(temp_path))
             
             # Use injector to perform robust ALT text injection
             result = injector.inject_alt_text_from_mapping(
-                temp_path, enriched_mapping, output_path, mode="replace"
+                str(temp_path), enriched_mapping, output_path, mode="replace"
             )
-            
-            # Clean up temp file
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+
+            # Temp file cleanup is handled by resource manager
             
             # Log injector statistics
             stats = result['statistics']
@@ -5897,8 +5922,8 @@ class PPTXAccessibilityProcessor:
             logger.info(f"  Successfully injected: {stats['injected_successfully']}")
             logger.info(f"  Skipped (existing): {stats['skipped_existing']}")
             logger.info(f"  Failed: {stats['failed_injection']}")
-            
-            return result['success'], result.get('final_alt_map', enriched_mapping)
+
+            return result['success'], result.get('final_alt_map', enriched_mapping), stats
             
         except Exception as e:
             logger.error(f"Failed to inject ALT text via dedicated injector: {e}")
@@ -5920,7 +5945,14 @@ class PPTXAccessibilityProcessor:
                     'source_existing': None,
                     'source_generated': 'processor' if generated_meaningful else None,
                 }
-            return fallback_success, fallback_map
+            # Return empty statistics for fallback
+            fallback_stats = {
+                'total_images': len(fallback_map),
+                'injected_successfully': len([v for v in fallback_map.values() if v['decision'] == 'use_generated']),
+                'skipped_existing': 0,
+                'failed_injection': len([v for v in fallback_map.values() if v['decision'] == 'no_alt_available'])
+            }
+            return fallback_success, fallback_map, fallback_stats
     
     def _inject_alt_text_simple(self, presentation: Presentation, 
                               alt_text_mapping: Dict[str, Any], output_path: str) -> bool:
@@ -5976,21 +6008,21 @@ class PPTXAccessibilityProcessor:
         logger.info(f"💾 Output file: {result['output_file']}")
         logger.info(f"📄 Total slides: {result['total_slides']}")
         
-        # Visual element processing summary
-        total_elements = result.get('total_visual_elements', 0)
-        processed_elements = result.get('processed_visual_elements', 0)
-        failed_elements = result.get('failed_visual_elements', 0)
-        
+        # Visual element processing summary - recalculate accurate success metrics
+        total_found = result.get('total_visual_elements', 0)
+        total_processed = len(result.get('final_alt_map', {}))
+        actual_failures = total_found - total_processed
+        success_rate = (total_processed / total_found * 100) if total_found > 0 else 0
+
         logger.info(f"\n🎯 Visual Element Processing:")
-        logger.info(f"   📊 Total elements found: {total_elements}")
-        logger.info(f"   ✅ Elements processed: {processed_elements}")
-        logger.info(f"   ❌ Failed elements: {failed_elements}")
-        
-        if total_elements > 0:
-            success_rate = (processed_elements / total_elements) * 100
-            logger.info(f"   🎯 Success rate: {success_rate:.1f}%")
-            logger.info(f"   📈 Elements per slide: {total_elements / result['total_slides']:.1f}")
-        
+        logger.info(f"   📊 Total elements found: {total_found}")
+        logger.info(f"   ✅ Elements processed: {total_processed}")
+        logger.info(f"   ❌ Failed elements: {actual_failures}")
+        logger.info(f"   🎯 Success rate: {success_rate:.1f}%")
+
+        if total_found > 0:
+            logger.info(f"   📈 Elements per slide: {total_found / result['total_slides']:.1f}")
+
         # Timing information
         logger.info(f"  Generation time: {result['generation_time']:.2f}s")
         logger.info(f"  Injection time: {result['injection_time']:.2f}s")
@@ -5998,16 +6030,18 @@ class PPTXAccessibilityProcessor:
             logger.info(f"  Decorative marking time: {result['decorative_marking_time']:.2f}s")
         logger.info(f"  Total processing time: {result['total_time']:.2f}s")
         logger.info(f"  Success: {result['success']}")
-        
+
         # Calculate and log coverage
-        if result.get('total_visual_elements', 0) > 0:
-            coverage_percent = (result.get('processed_visual_elements', 0) / result['total_visual_elements'] * 100)
-            logger.info(f"  Visual Element Coverage: {result.get('processed_visual_elements', 0)}/{result['total_visual_elements']} ({coverage_percent:.1f}%)")
-        
-        if result['errors']:
-            logger.warning(f"Errors encountered: {len(result['errors'])}")
-            for error in result['errors']:
+        if total_found > 0:
+            logger.info(f"  Visual Element Coverage: {total_processed}/{total_found} ({success_rate:.1f}%)")
+
+        # Only show error list if there are actual failures
+        if actual_failures > 0 and result.get('errors'):
+            logger.warning(f"Errors encountered: {actual_failures}")
+            for error in result['errors'][:3]:  # Show first 3 only
                 logger.warning(f"  - {error}")
+            if len(result['errors']) > 3:
+                logger.warning(f"  ... and {len(result['errors']) - 3} more errors")
 
 
 def debug_image_extraction(pptx_path: str):
