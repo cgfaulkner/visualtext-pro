@@ -123,6 +123,10 @@ class ProcessorDispatcher:
             else:
                 cmd.append("--dry-run")
 
+        # Add artifact management flag if specified
+        if hasattr(self.args, 'no_artifacts') and self.args.no_artifacts:
+            cmd.append("--no-artifacts")
+
         return self._run_processor(cmd)
 
     def dispatch_inject(self, file_path: str) -> int:
@@ -255,6 +259,8 @@ def create_parser() -> argparse.ArgumentParser:
     # process
     process_parser = subparsers.add_parser('process', help='Process files and make alt text decisions')
     process_parser.add_argument('path', help='File or folder to process')
+    process_parser.add_argument('--no-artifacts', action='store_true',
+                               help='Disable artifact directory creation (no intermediate files saved)')
 
     # inject
     inject_parser = subparsers.add_parser('inject', help='Inject alt text into files')

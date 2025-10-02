@@ -28,9 +28,10 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
-# Import path validation and file locking modules (must come after sys.path setup)
+# Import path validation, file locking, and artifact management modules (must come after sys.path setup)
 from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
 from shared.file_lock_manager import FileLock, LockError
+from shared.pipeline_artifacts import RunArtifacts
 
 # Import system components
 from config_manager import ConfigManager
@@ -68,16 +69,17 @@ class PPTXAltProcessor:
     
     def __init__(self, config_path: Optional[str] = None, verbose: bool = False, debug: bool = False,
                  enable_file_logging: bool = True, fallback_policy_override: Optional[str] = None,
-                 mode_override: Optional[str] = None):
+                 mode_override: Optional[str] = None, use_artifacts: bool = True):
         """
         Initialize the PPTX ALT text processor.
-        
+
         Args:
             config_path: Optional path to configuration file
             verbose: Enable verbose logging
             debug: Enable detailed debug logging for generation attempts
             enable_file_logging: Enable enhanced file logging with rotation
             fallback_policy_override: Override fallback policy from CLI (none|doc-only|ppt-gated)
+            use_artifacts: Enable artifact directory creation for intermediate files (default: True)
         """
         # Setup enhanced logging if available and requested
         self.log_config = None
@@ -126,7 +128,11 @@ class PPTXAltProcessor:
         
         # Setup failed generation logging
         self.failed_generations = []
-        
+
+        # Store artifact management settings
+        self.use_artifacts = use_artifacts
+        self._current_artifacts = None  # Will hold RunArtifacts instance during processing
+
         logger.info("PPTX ALT Text Processor initialized")
         logger.info(f"Configuration: {self.config_manager.config_path or 'default'}")
         if debug:
@@ -189,8 +195,22 @@ class PPTXAltProcessor:
             result_obj.mark_failure(error_msg)
             return result_obj.to_dict()
 
+        # Determine if we should use artifacts
+        artifact_config = self.config_manager.config.get('artifact_management', {})
+        cleanup_on_exit = artifact_config.get('auto_cleanup', True)
+        should_use_artifacts = self.use_artifacts
+
         # Use enhanced resource context with smart recovery
         recovery_manager = SmartRecoveryManager()
+
+        # Wrap processing with RunArtifacts if enabled
+        if should_use_artifacts:
+            artifacts = RunArtifacts.create_for_run(input_path, cleanup_on_exit=cleanup_on_exit)
+            artifacts.__enter__()
+            self._current_artifacts = artifacts
+        else:
+            artifacts = None
+            self._current_artifacts = None
 
         try:
             with smart_recovery_context(
@@ -275,6 +295,15 @@ class PPTXAltProcessor:
             # Unexpected error that couldn't be converted
             result_obj.mark_failure(f"Unexpected error: {str(e)}")
         finally:
+            # Mark success and cleanup artifacts if enabled
+            if artifacts is not None:
+                # Mark success if processing succeeded
+                if result_obj.success:
+                    artifacts.mark_success()
+                # Exit artifact context (triggers cleanup)
+                artifacts.__exit__(None, None, None)
+                self._current_artifacts = None
+
             # Always release the lock
             if lock is not None:
                 lock.release()
@@ -1197,6 +1226,8 @@ Examples:
                        help='Override fallback policy for this run (none|doc-only|ppt-gated)')
     parser.add_argument('--mode', choices=['preserve', 'replace'],
                        help='Whether to preserve or replace existing ALT text in PPTX (overrides config)')
+    parser.add_argument('--no-artifacts', action='store_true',
+                       help='Disable artifact directory creation (no intermediate files saved)')
 
     args = parser.parse_args()
     
@@ -1224,7 +1255,8 @@ Examples:
             args.verbose,
             args.debug,
             fallback_policy_override=args.fallback_policy,
-            mode_override=args.mode
+            mode_override=args.mode,
+            use_artifacts=not args.no_artifacts
         )
 
         if args.command == 'process':
