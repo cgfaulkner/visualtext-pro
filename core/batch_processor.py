@@ -11,10 +11,13 @@ Features:
 - Graceful error handling (one failure doesn't stop batch)
 - File locking integration
 - Progress reporting
+- Auto-generated output folders in Complete/
 """
 
+import os
 import sys
 import time
+import yaml
 import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -25,8 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.batch_queue import BatchQueue, QueueItem, QueueStatus
 from shared.batch_manifest import BatchManifest
-from shared.file_lock_manager import FileLock, LockError
-from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
+from shared.path_validator import sanitize_input_path, SecurityError
 
 logger = logging.getLogger(__name__)
 
@@ -75,20 +77,91 @@ class PPTXBatchProcessor:
             if not self.processor_path:
                 raise FileNotFoundError("Could not locate pptx_alt_processor.py")
 
-        # Load config for error thresholds
+        # Load config for error thresholds and output settings
         self.stop_on_error_threshold = 0.5  # Default 50%
         self.progress_update_interval = 5  # Default every 5 files
+        self.config = {}
 
         if config_path:
             try:
-                import yaml
                 with open(config_path) as f:
-                    config = yaml.safe_load(f) or {}
-                    batch_config = config.get('batch_processing', {})
+                    self.config = yaml.safe_load(f) or {}
+                    batch_config = self.config.get('batch_processing', {})
                     self.stop_on_error_threshold = batch_config.get('stop_on_error_threshold', 0.5)
                     self.progress_update_interval = batch_config.get('progress_update_interval', 5)
             except Exception as e:
                 logger.warning(f"Could not load config: {e}, using defaults")
+
+    def _generate_output_path(self, input_path: Path) -> Path:
+        """
+        Generate timestamped output folder in Complete/.
+
+        Args:
+            input_path: Input directory or first file path
+
+        Returns:
+            Path to output folder (Complete/<name>_<timestamp>/)
+        """
+        # Get folder name from input
+        if input_path.is_dir():
+            folder_name = input_path.name
+        else:
+            # For file lists, use "batch" as folder name
+            folder_name = "batch"
+
+        # Generate timestamp
+        timestamp_format = self.config.get('batch_processing', {}).get(
+            'output_timestamp_format',
+            '%Y%m%d_%H%M%S'
+        )
+        timestamp = datetime.now().strftime(timestamp_format)
+
+        # Create output folder name
+        output_folder_name = f"{folder_name}_{timestamp}"
+
+        # Get project root and create Complete path
+        project_root = Path(__file__).resolve().parents[1]
+        complete_folder_name = self.config.get('batch_processing', {}).get(
+            'complete_folder_name',
+            'Complete'
+        )
+        complete_dir = project_root / complete_folder_name
+
+        output_path = complete_dir / output_folder_name
+
+        return output_path
+
+    def _get_relative_output_path(
+        self,
+        input_file: Path,
+        input_root: Path,
+        output_root: Path
+    ) -> Path:
+        """
+        Calculate output path preserving folder structure.
+
+        Args:
+            input_file: Individual file being processed
+            input_root: Root input directory
+            output_root: Root output directory
+
+        Returns:
+            Output path with preserved structure
+        """
+        try:
+            # Get relative path from input root
+            relative_path = input_file.relative_to(input_root)
+        except ValueError:
+            # File is not relative to input_root, use just filename
+            relative_path = Path(input_file.name)
+
+        # Recreate in output root
+        output_path = output_root / relative_path
+
+        # Ensure parent directories exist
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        return output_path
 
     def process_batch(
         self,
@@ -102,32 +175,64 @@ class PPTXBatchProcessor:
 
         Args:
             input_files: List of PPTX files to process
-            output_dir: Directory for output files and manifest
+            output_dir: Optional output directory (default: auto-generated in Complete/)
             resume: Resume from existing manifest
             batch_id: Optional batch ID for resume
 
         Returns:
             Dict with batch results and statistics
         """
-        # Validate and setup output directory
-        if output_dir is None:
-            output_dir = Path.cwd() / "batch_output"
+        # Determine input_root for preserving structure
+        input_root = None
+        if resume and batch_id:
+            # Load existing manifest to get output_dir and input_root
+            manifest = self._load_manifest(batch_id, output_dir)
+            output_dir = manifest.output_dir
+            input_root = manifest.input_root
+            logger.info(f"Resuming batch {manifest.batch_id}")
+        else:
+            # Determine input_root from input_files
+            if input_files:
+                if len(input_files) > 1:
+                    # Find common parent directory
+                    input_root = Path(os.path.commonpath([str(f.parent) for f in input_files]))
+                else:
+                    input_root = input_files[0].parent
+            else:
+                raise ValueError("No input files provided")
 
+            # Determine output directory
+            if output_dir is None:
+                # Auto-generate output path
+                input_reference = input_root
+                output_dir = self._generate_output_path(input_reference)
+
+        # Validate and setup output directory
         try:
-            output_dir = validate_output_path(str(output_dir), create_parents=True)
+            # Use sanitize_input_path with allow_absolute=True for Complete/ folder
+            output_dir = sanitize_input_path(str(output_dir), allow_absolute=True)
+
+            # Create parent directories if needed
+            if not output_dir.exists():
+                output_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created output directory: {output_dir}")
+
         except SecurityError as e:
             return {
                 'success': False,
                 'error': f"Security error with output directory: {e}",
                 'statistics': {}
             }
+        except OSError as e:
+            return {
+                'success': False,
+                'error': f"Failed to create output directory: {e}",
+                'statistics': {}
+            }
 
-        # Create or load manifest
-        if resume:
-            manifest = self._load_manifest(batch_id, output_dir)
-            logger.info(f"Resuming batch {manifest.batch_id}")
-        else:
-            manifest = self._create_manifest(input_files, output_dir)
+        # Create manifest if not resuming
+        if not resume:
+            manifest = self._create_manifest(input_files, output_dir, input_root)
             logger.info(f"Starting new batch {manifest.batch_id}")
 
         manifest.start()
@@ -153,7 +258,7 @@ class PPTXBatchProcessor:
                     break
 
                 # Process single file
-                self._process_single_file(item, manifest, output_dir)
+                self._process_single_file(item, manifest, output_dir, input_root)
 
                 # Progress reporting
                 files_processed += 1
@@ -191,56 +296,52 @@ class PPTXBatchProcessor:
         self,
         item: QueueItem,
         manifest: BatchManifest,
-        output_dir: Path
+        output_dir: Path,
+        input_root: Path
     ) -> None:
         """
-        Process a single file with error handling.
+        Process a single file with error handling and structure preservation.
 
         Args:
             item: Queue item to process
             manifest: Batch manifest for tracking
-            output_dir: Output directory
+            output_dir: Output root directory
+            input_root: Input root directory (for preserving structure)
         """
         file_path = item.path_obj
         item.mark_started()
         manifest.save()
 
         try:
-            # Validate input path
+            # Validate input path (allow absolute paths for batch processing)
             try:
-                validated_path = sanitize_input_path(str(file_path))
+                validated_path = sanitize_input_path(str(file_path), allow_absolute=True)
             except SecurityError as e:
                 manifest.queue.mark_failed(item, f"Security error: {e}")
                 logger.error(f"Security error for {file_path.name}: {e}")
                 return
 
-            # Try to acquire lock
-            try:
-                lock = FileLock(validated_path, timeout=self.max_lock_wait)
-                lock.acquire(blocking=True)
-            except LockError as e:
-                manifest.queue.mark_skipped(item, f"File locked: {e}")
-                logger.warning(f"Skipping locked file: {file_path.name}")
-                return
+            # Calculate output path preserving structure
+            output_path = self._get_relative_output_path(
+                file_path,
+                input_root,
+                output_dir
+            )
 
-            try:
-                # Process file
-                if self.dry_run:
-                    result = self._dry_run_validate(validated_path)
-                else:
-                    result = self._process_file(validated_path, output_dir)
+            # Process file (subprocess handles its own locking)
+            if self.dry_run:
+                result = self._dry_run_validate(validated_path)
+            else:
+                result = self._process_file(validated_path, output_path.parent)
 
-                # Mark complete
-                if result.get('success'):
-                    manifest.queue.mark_complete(item, result)
-                    logger.info(f"✅ Completed: {file_path.name}")
-                else:
-                    error_msg = result.get('error', 'Unknown error')
-                    manifest.queue.mark_failed(item, error_msg)
-                    logger.error(f"❌ Failed: {file_path.name} - {error_msg}")
-
-            finally:
-                lock.release()
+            # Mark complete/failed
+            if result.get('success'):
+                manifest.queue.mark_complete(item, result)
+                logger.info(f"✅ Completed: {file_path.name}")
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                manifest.queue.mark_failed(item, error_msg)
+                logger.error(f"❌ Failed: {file_path.name} - {error_msg}")
 
         except Exception as e:
             manifest.queue.mark_failed(item, str(e))
@@ -296,16 +397,21 @@ class PPTXBatchProcessor:
         """
         import subprocess
 
-        # Build command
+        # Build command with global flags BEFORE subcommand
         cmd = [
             sys.executable,
-            str(self.processor_path),
-            'process',
-            str(file_path)
+            str(self.processor_path)
         ]
 
+        # Add global flags before subcommand
         if self.config_path:
             cmd.extend(['--config', self.config_path])
+
+        # Now add subcommand and positional arguments
+        cmd.extend([
+            'process',
+            str(file_path)
+        ])
 
         # Execute processor
         try:
@@ -340,9 +446,9 @@ class PPTXBatchProcessor:
                 'error': f'Subprocess error: {e}'
             }
 
-    def _create_manifest(self, files: List[Path], output_dir: Path) -> BatchManifest:
+    def _create_manifest(self, files: List[Path], output_dir: Path, input_root: Path) -> BatchManifest:
         """Create new batch manifest."""
-        manifest = BatchManifest.create_new(output_dir=output_dir, files=files)
+        manifest = BatchManifest.create_new(output_dir=output_dir, input_root=input_root, files=files)
         manifest.add_metadata('processor', str(self.processor_path))
         manifest.add_metadata('dry_run', self.dry_run)
         manifest.add_metadata('max_workers', self.max_workers)

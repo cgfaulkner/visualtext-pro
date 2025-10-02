@@ -208,6 +208,11 @@ batch_processing:
   stop_on_error_threshold: 0.5    # Stop batch if failure rate exceeds this (0.0-1.0, 0.5 = 50%)
   dry_run_validates_ollama: true  # Check LLaVA connectivity during dry-run
 
+  # Output configuration
+  complete_folder_name: "Complete"           # Folder name at project root
+  output_timestamp_format: "%Y%m%d_%H%M%S"  # Timestamp format for folders
+  preserve_folder_structure: true            # Keep nested folders in output
+
 # --- Profiles ---
 profiles:
   scientific_strict:

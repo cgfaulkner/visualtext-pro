@@ -287,10 +287,17 @@ def create_parser() -> argparse.ArgumentParser:
                                help='Base directory to scan (default: current directory)')
 
     # batch
-    batch_parser = subparsers.add_parser('batch', help='Batch process multiple presentations')
+    batch_parser = subparsers.add_parser(
+        'batch',
+        help='Batch process multiple presentations',
+        description=(
+            'Process multiple presentations. Output is automatically generated in '
+            'Complete/<foldername>_<timestamp>/ unless --output-dir is specified.'
+        )
+    )
     batch_parser.add_argument('--input-dir', help='Directory containing PPTX files')
     batch_parser.add_argument('--input-files', nargs='+', help='Specific files to process')
-    batch_parser.add_argument('--output-dir', help='Output directory for processed files and manifest')
+    batch_parser.add_argument('--output-dir', help='Output directory (default: auto-generated in Complete/)')
     batch_parser.add_argument('--dry-run', action='store_true',
                              help='Validate files without processing')
     batch_parser.add_argument('--resume', action='store_true',
@@ -419,8 +426,6 @@ def main():
                     print("No PPTX files found")
                     return 0
 
-                print(f"Found {len(input_files)} file(s) to process\n")
-
             # Create batch processor
             processor = PPTXBatchProcessor(
                 config_path=args.config,
@@ -429,10 +434,67 @@ def main():
                 max_lock_wait=args.max_lock_wait
             )
 
+            # Determine output directory for preview
+            output_dir = None
+            if args.output_dir:
+                output_dir = Path(args.output_dir)
+            elif not args.resume:
+                # Show auto-generated path (only for non-resume)
+                if args.input_dir:
+                    input_reference = Path(args.input_dir)
+                elif input_files:
+                    # Find common parent
+                    if len(input_files) > 1:
+                        # os is already imported at module level
+                        input_reference = Path(os.path.commonpath([str(f.parent) for f in input_files]))
+                    else:
+                        input_reference = input_files[0].parent
+                else:
+                    input_reference = Path.cwd()
+
+                output_dir = processor._generate_output_path(input_reference)
+
+            # Enhanced dry-run preview
+            if args.dry_run and not args.resume:
+                print("\nBatch Preview (DRY RUN)")
+                print("─" * 60)
+                print(f"Input:  {args.input_dir or 'Multiple files'} ({len(input_files)} files)")
+                print(f"Output: {output_dir}")
+                print()
+
+                # Show folder structure preservation
+                if args.input_dir:
+                    input_root = Path(args.input_dir)
+                    print("Folder structure will be preserved:")
+                    print()
+
+                    # Show first few files with paths
+                    for i, f in enumerate(input_files[:5]):
+                        try:
+                            rel_path = f.relative_to(input_root)
+                        except ValueError:
+                            rel_path = f.name
+                        out_path = output_dir / rel_path
+                        print(f"  {rel_path} → {rel_path}")
+
+                    if len(input_files) > 5:
+                        print(f"  ... and {len(input_files) - 5} more files")
+                else:
+                    # File list mode
+                    print("Files to process:")
+                    for i, f in enumerate(input_files[:5]):
+                        print(f"  {f.name}")
+                    if len(input_files) > 5:
+                        print(f"  ... and {len(input_files) - 5} more files")
+
+                print()
+                print("Run without --dry-run to process files.")
+                return 0
+
             # Process batch
             result = processor.process_batch(
                 input_files=input_files,
-                output_dir=Path(args.output_dir) if args.output_dir else None,
+                output_dir=output_dir,
                 resume=args.resume,
                 batch_id=args.batch_id
             )

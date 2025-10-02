@@ -1260,9 +1260,9 @@ Examples:
         )
 
         if args.command == 'process':
-            # Validate input file path
+            # Validate input file path (allow absolute paths for batch processing)
             try:
-                validated_input = sanitize_input_path(args.input_file)
+                validated_input = sanitize_input_path(args.input_file, allow_absolute=True)
                 input_pptx = str(validated_input)
             except SecurityError as e:
                 print(f"Security Error (input): {e}")
@@ -1388,9 +1388,9 @@ Examples:
                         return 1
                 
         elif args.command == 'batch-process':
-            # Validate input directory
+            # Validate input directory (allow absolute paths)
             try:
-                validated_input_dir = sanitize_input_path(args.input_dir)
+                validated_input_dir = sanitize_input_path(args.input_dir, allow_absolute=True)
                 input_dir = str(validated_input_dir)
             except SecurityError as e:
                 print(f"Security Error (input directory): {e}")
@@ -1429,9 +1429,9 @@ Examples:
                 return 1
                 
         elif args.command == 'extract':
-            # Validate input file
+            # Validate input file (allow absolute paths for batch processing)
             try:
-                validated_input = sanitize_input_path(args.input_file)
+                validated_input = sanitize_input_path(args.input_file, allow_absolute=True)
                 input_file = str(validated_input)
             except SecurityError as e:
                 print(f"Security Error (input): {e}")
@@ -1464,9 +1464,9 @@ Examples:
                 return 1
                 
         elif args.command == 'inject':
-            # Validate input file
+            # Validate input file (allow absolute paths for batch processing)
             try:
-                validated_input = sanitize_input_path(args.input_file)
+                validated_input = sanitize_input_path(args.input_file, allow_absolute=True)
                 input_file = str(validated_input)
             except SecurityError as e:
                 print(f"Security Error (input): {e}")
@@ -1475,9 +1475,9 @@ Examples:
                 print(f"Invalid input path: {e}")
                 return 1
 
-            # Validate alt text file
+            # Validate alt text file (allow absolute paths for batch processing)
             try:
-                validated_alt_text = sanitize_input_path(args.alt_text_file)
+                validated_alt_text = sanitize_input_path(args.alt_text_file, allow_absolute=True)
                 alt_text_file = str(validated_alt_text)
             except SecurityError as e:
                 print(f"Security Error (alt text file): {e}")
@@ -1515,9 +1515,9 @@ Examples:
                 return 1
                 
         elif args.command == 'test-survival':
-            # Validate input file
+            # Validate input file (allow absolute paths for batch processing)
             try:
-                validated_input = sanitize_input_path(args.input_file)
+                validated_input = sanitize_input_path(args.input_file, allow_absolute=True)
                 input_file = str(validated_input)
             except SecurityError as e:
                 print(f"Security Error (input): {e}")

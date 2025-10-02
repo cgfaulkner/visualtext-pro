@@ -27,16 +27,18 @@ from batch_queue import BatchQueue, QueueItem
 class BatchManifest:
     """Tracks batch processing progress with resume capability."""
 
-    def __init__(self, batch_id: str, output_dir: Path):
+    def __init__(self, batch_id: str, output_dir: Path, input_root: Optional[Path] = None):
         """
         Initialize batch manifest.
 
         Args:
             batch_id: Unique identifier for this batch
             output_dir: Directory for output files and manifest
+            input_root: Root input directory (for structure preservation)
         """
         self.batch_id = batch_id
         self.output_dir = Path(output_dir)
+        self.input_root = Path(input_root) if input_root else None
         self.manifest_path = self.output_dir / f"batch_{batch_id}_manifest.json"
         self.queue = BatchQueue(manifest_path=self.manifest_path)
         self.start_time: Optional[datetime] = None
@@ -73,6 +75,7 @@ class BatchManifest:
             'version': '1.0',
             'batch_id': self.batch_id,
             'output_dir': str(self.output_dir),
+            'input_root': str(self.input_root) if self.input_root else None,
             'start_time': self.start_time.isoformat() if self.start_time else None,
             'end_time': self.end_time.isoformat() if self.end_time else None,
             'metadata': self.metadata,
@@ -106,8 +109,9 @@ class BatchManifest:
 
         batch_id = data.get('batch_id')
         output_dir = Path(data.get('output_dir', manifest_path.parent))
+        input_root = Path(data.get('input_root')) if data.get('input_root') else None
 
-        manifest = cls(batch_id=batch_id, output_dir=output_dir)
+        manifest = cls(batch_id=batch_id, output_dir=output_dir, input_root=input_root)
 
         # Load timestamps
         if data.get('start_time'):
@@ -131,12 +135,13 @@ class BatchManifest:
         return manifest
 
     @classmethod
-    def create_new(cls, output_dir: Path, files: Optional[List[Path]] = None) -> 'BatchManifest':
+    def create_new(cls, output_dir: Path, input_root: Optional[Path] = None, files: Optional[List[Path]] = None) -> 'BatchManifest':
         """
         Create new batch manifest with auto-generated ID.
 
         Args:
             output_dir: Directory for output files and manifest
+            input_root: Root input directory (for structure preservation)
             files: Optional list of files to add immediately
 
         Returns:
@@ -147,7 +152,7 @@ class BatchManifest:
         short_uuid = str(uuid.uuid4())[:8]
         batch_id = f"{timestamp}_{short_uuid}"
 
-        manifest = cls(batch_id=batch_id, output_dir=output_dir)
+        manifest = cls(batch_id=batch_id, output_dir=output_dir, input_root=input_root)
 
         if files:
             manifest.add_files(files)

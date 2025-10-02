@@ -193,11 +193,109 @@ Comprehensive test suite with 20+ test cases.
 - ✅ Error threshold detection
 - ✅ Crash recovery (processing items reset)
 
+## Auto-Generated Output Folders (Phase 2B.1 Enhancement)
+
+### Overview
+Batch processing automatically creates organized output folders without requiring user specification. Output is auto-generated in `Complete/<foldername>_<timestamp>/` unless `--output-dir` is explicitly provided.
+
+### Default Behavior
+
+**Simple Command**:
+```bash
+python altgen.py batch --input-dir "Documents to Review/Fall2024_Cardiology"
+```
+
+**Auto-Generated Output**:
+```
+Complete/Fall2024_Cardiology_20251002_143022/
+├── batch_20251002_143022_<uuid>_manifest.json
+├── Week_01/
+│   └── Lecture_01.pptx
+└── Week_02/
+    └── Lecture_02.pptx
+```
+
+### Folder Structure Preservation
+
+Input nested folders are automatically preserved in output:
+
+**Input Structure**:
+```
+Documents to Review/Fall2024_Cardiology/
+├── Week_01/
+│   └── Lecture_01.pptx
+└── Week_02/
+    └── Lecture_02.pptx
+```
+
+**Output Structure** (auto-created in Complete/):
+```
+Complete/Fall2024_Cardiology_20251002_143022/
+├── batch_20251002_143022_<uuid>_manifest.json
+├── Week_01/
+│   └── Lecture_01.pptx
+└── Week_02/
+    └── Lecture_02.pptx
+```
+
+### Naming Logic
+
+- **Input folder**: Extract last folder name from path
+- **Timestamp format**: `YYYYMMDD_HHMMSS` (configurable)
+- **Output folder**: `<input_folder_name>_<timestamp>`
+- **Special cases**:
+  - Flat file list (`--input-files`): Uses `batch_<timestamp>`
+  - User override: `--output-dir` bypasses auto-generation
+
+### Configuration
+
+Control auto-output behavior in `config.yaml`:
+
+```yaml
+batch_processing:
+  complete_folder_name: "Complete"           # Folder name at project root
+  output_timestamp_format: "%Y%m%d_%H%M%S"  # Timestamp format
+  preserve_folder_structure: true            # Keep nested folders
+```
+
+### Override Behavior
+
+Custom output locations still work:
+
+```bash
+python altgen.py batch --input-dir "Input/" --output-dir "Custom/Location/"
+```
+
+### Dry-Run Preview
+
+Enhanced dry-run shows exact output paths:
+
+```bash
+python altgen.py batch --input-dir "Documents to Review/Fall2024" --dry-run
+```
+
+**Output**:
+```
+Batch Preview (DRY RUN)
+────────────────────────────────────────────────────────
+Input:  Documents to Review/Fall2024 (26 files)
+Output: Complete/Fall2024_20251002_143022/
+
+Folder structure will be preserved:
+
+  Week_01/Lecture_01.pptx → Week_01/Lecture_01.pptx
+  Week_01/Lecture_02.pptx → Week_01/Lecture_02.pptx
+  Week_02/Lecture_03.pptx → Week_02/Lecture_03.pptx
+  ... and 23 more files
+
+Run without --dry-run to process files.
+```
+
 ## Usage Examples
 
-### 1. Process Directory
+### 1. Process Directory (Auto-Output)
 ```bash
-# Process all PPTX files in directory
+# Output automatically goes to Complete/<folder>_<timestamp>/
 python altgen.py batch --input-dir "Presentations/Fall2024"
 ```
 
@@ -432,10 +530,10 @@ batch_processing:
 ## Commands Quick Reference
 
 ```bash
-# Process directory
+# Process directory (auto-output to Complete/)
 python altgen.py batch --input-dir "Presentations/"
 
-# Dry-run validation
+# Dry-run validation (shows exact output path)
 python altgen.py batch --input-dir "Presentations/" --dry-run
 
 # Process specific files
@@ -444,7 +542,7 @@ python altgen.py batch --input-files file1.pptx file2.pptx
 # Resume from crash
 python altgen.py batch --resume --batch-id <batch-id>
 
-# Custom output
+# Custom output (override auto-generation)
 python altgen.py batch --input-dir "Input/" --output-dir "Output/"
 
 # Check locks
