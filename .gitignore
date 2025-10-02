@@ -13,6 +13,7 @@ tests/
 tests/test_alt_normalization.py
 debug/
 Reviewed Reports/
+Complete/
 
 # C extensions
 *.so
