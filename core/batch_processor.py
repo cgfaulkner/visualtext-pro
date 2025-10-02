@@ -19,9 +19,11 @@ import sys
 import time
 import yaml
 import logging
+import shutil
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from rich.console import Console
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -58,6 +60,7 @@ class PPTXBatchProcessor:
         self.dry_run = dry_run
         self.max_workers = max_workers
         self.max_lock_wait = max_lock_wait
+        self.console = Console()  # Rich console for styled output
 
         # Locate processor
         if processor_path:
@@ -182,6 +185,9 @@ class PPTXBatchProcessor:
         Returns:
             Dict with batch results and statistics
         """
+        # Issue #1: Immediate startup feedback
+        self.console.print("[bold cyan]Starting batch processor...[/bold cyan]")
+
         # Determine input_root for preserving structure
         input_root = None
         if resume and batch_id:
@@ -190,6 +196,7 @@ class PPTXBatchProcessor:
             output_dir = manifest.output_dir
             input_root = manifest.input_root
             logger.info(f"Resuming batch {manifest.batch_id}")
+            self.console.print(f"[yellow]Resuming batch {manifest.batch_id}[/yellow]")
         else:
             # Determine input_root from input_files
             if input_files:
@@ -200,6 +207,12 @@ class PPTXBatchProcessor:
                     input_root = input_files[0].parent
             else:
                 raise ValueError("No input files provided")
+
+            # Issue #1: Show directory being scanned
+            self.console.print(f"Scanning directory: {input_root}")
+
+            # Issue #1: Show file count after scan
+            self.console.print(f"[green]Found {len(input_files)} PPTX file{'s' if len(input_files) != 1 else ''} to process[/green]\n")
 
             # Determine output directory
             if output_dir is None:
@@ -312,6 +325,10 @@ class PPTXBatchProcessor:
         item.mark_started()
         manifest.save()
 
+        # Issue #1: Show current file being processed
+        stats = manifest.queue.get_stats()
+        self.console.print(f"\n[yellow]Processing file {stats['finished'] + 1}/{stats['total']}: {file_path.name}[/yellow]")
+
         try:
             # Validate input path (allow absolute paths for batch processing)
             try:
@@ -332,20 +349,46 @@ class PPTXBatchProcessor:
             if self.dry_run:
                 result = self._dry_run_validate(validated_path)
             else:
-                result = self._process_file(validated_path, output_path.parent)
+                # Process file in-place first
+                result = self._process_file(validated_path, validated_path.parent)
+
+                # Issue #2: Copy processed file to Complete/ folder
+                if result.get('success'):
+                    try:
+                        # Ensure output directory exists
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Copy processed file to Complete/ folder
+                        shutil.copy2(validated_path, output_path)
+                        logger.info(f"Copied {file_path.name} to {output_path}")
+
+                        # Update result to include output location
+                        result['output_path'] = str(output_path)
+                    except Exception as copy_error:
+                        logger.error(f"Failed to copy {file_path.name} to Complete/: {copy_error}")
+                        result['success'] = False
+                        result['error'] = f"Processing succeeded but copy failed: {copy_error}"
 
             # Mark complete/failed
             if result.get('success'):
                 manifest.queue.mark_complete(item, result)
                 logger.info(f"✅ Completed: {file_path.name}")
+                # Issue #1: Show completion with image count if available
+                images_processed = result.get('images_processed', 0)
+                if images_processed:
+                    self.console.print(f"[green]✅ Completed: {file_path.name} ({images_processed} images processed)[/green]")
+                else:
+                    self.console.print(f"[green]✅ Completed: {file_path.name}[/green]")
             else:
                 error_msg = result.get('error', 'Unknown error')
                 manifest.queue.mark_failed(item, error_msg)
                 logger.error(f"❌ Failed: {file_path.name} - {error_msg}")
+                self.console.print(f"[red]❌ Failed: {file_path.name} - {error_msg}[/red]")
 
         except Exception as e:
             manifest.queue.mark_failed(item, str(e))
             logger.error(f"❌ Error processing {file_path.name}: {e}", exc_info=True)
+            self.console.print(f"[red]❌ Error: {file_path.name} - {e}[/red]")
 
     def _dry_run_validate(self, file_path: Path) -> Dict[str, Any]:
         """
