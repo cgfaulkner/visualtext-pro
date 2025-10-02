@@ -28,8 +28,9 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
-# Import path validation module (must come after sys.path setup)
+# Import path validation and file locking modules (must come after sys.path setup)
 from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError
+from shared.file_lock_manager import FileLock, LockError
 
 # Import system components
 from config_manager import ConfigManager
@@ -170,6 +171,24 @@ class PPTXAltProcessor:
             result_obj.mark_failure(error)
             return result_obj.to_dict()
 
+        # Get file locking configuration
+        lock_config = self.config_manager.config.get("file_locking", {})
+        locking_enabled = lock_config.get("enabled", True)
+        lock_timeout = lock_config.get("timeout_seconds", 30)
+
+        # Wrap processing with file locking to prevent concurrent access corruption
+        try:
+            if locking_enabled:
+                lock = FileLock(input_path, timeout=lock_timeout)
+                lock.acquire(blocking=True)
+            else:
+                lock = None
+        except LockError as e:
+            error_msg = f"File locked by another process (timeout after {lock_timeout}s)"
+            logger.warning(f"File locked, cannot process: {input_path.name}")
+            result_obj.mark_failure(error_msg)
+            return result_obj.to_dict()
+
         # Use enhanced resource context with smart recovery
         recovery_manager = SmartRecoveryManager()
 
@@ -255,6 +274,10 @@ class PPTXAltProcessor:
         except Exception as e:
             # Unexpected error that couldn't be converted
             result_obj.mark_failure(f"Unexpected error: {str(e)}")
+        finally:
+            # Always release the lock
+            if lock is not None:
+                lock.release()
 
         # Log final result
         StandardizedLogger.log_processing_complete(result_obj)

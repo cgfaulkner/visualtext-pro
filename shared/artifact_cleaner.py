@@ -177,6 +177,64 @@ def print_usage_report(base_dir: Path) -> None:
     print()
 
 
+def cleanup_stale_locks(base_dir: Path, max_age_hours: int = 1) -> Dict[str, Any]:
+    """
+    Clean up orphaned .lock files.
+
+    A lock is considered stale if:
+    1. It's older than max_age_hours, AND
+    2. The process that created it is no longer running
+
+    Args:
+        base_dir: Directory to search for lock files
+        max_age_hours: Age threshold in hours (default: 1)
+
+    Returns:
+        Dict with cleanup statistics: count, errors, stale_locks
+    """
+    import time
+    from lock_monitor import is_lock_stale, get_lock_holder_pid, get_lock_age
+
+    stats = {
+        'count': 0,
+        'stale_locks': [],
+        'errors': []
+    }
+
+    cutoff_time = time.time() - (max_age_hours * 3600)
+
+    try:
+        for lock_file in base_dir.rglob("*.lock"):
+            try:
+                # Check if lock is stale
+                if is_lock_stale(lock_file, max_age_hours):
+                    age_hours = get_lock_age(lock_file) / 3600
+                    pid = get_lock_holder_pid(lock_file.parent / lock_file.stem)
+
+                    stats['stale_locks'].append({
+                        'file': str(lock_file),
+                        'age_hours': round(age_hours, 2),
+                        'pid': pid
+                    })
+
+                    # Remove stale lock
+                    lock_file.unlink()
+                    stats['count'] += 1
+                    logger.info(f"Removed stale lock: {lock_file.name} (age: {age_hours:.1f}h, PID: {pid})")
+
+            except Exception as e:
+                error_msg = f"Error processing lock {lock_file}: {e}"
+                logger.warning(error_msg)
+                stats['errors'].append(error_msg)
+
+    except Exception as e:
+        error_msg = f"Failed to scan for stale locks: {e}"
+        logger.error(error_msg)
+        stats['errors'].append(error_msg)
+
+    return stats
+
+
 def check_artifact_disk_usage(base_dir: Path, warn_threshold_gb: float = 5.0) -> None:
     """
     Check artifact disk usage and warn if exceeding threshold.

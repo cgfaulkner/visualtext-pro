@@ -50,9 +50,10 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# Import path validation module
+# Import path validation and file locking modules
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.path_validator import sanitize_input_path, validate_output_path, SecurityError, is_safe_path
+from shared.file_lock_manager import FileLock, LockError
 
 # -----------------------------
 # Config loading (config_manager -> yaml fallback)
@@ -518,7 +519,7 @@ class BatchSummary:
     by_type: Dict[str, Dict[str, int]] = field(default_factory=lambda: {"pptx": {"total":0,"succeeded":0,"failed":0}, "docx":{"total":0,"succeeded":0,"failed":0}})
     duration_sec: float = 0.0
 
-def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dict[str, Any], skip_existing: bool, logger: logging.Logger) -> FileResult:
+def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dict[str, Any], skip_existing: bool, logger: logging.Logger, cfg: Dict[str, Any] = None) -> FileResult:
     file_type = infile.suffix.lower().lstrip(".")
 
     # Validate input file path (defense in depth)
@@ -567,8 +568,31 @@ def process_one(infile: Path, input_root: Path, output_root: Path, adapters: Dic
     # Ensure out directories exist
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    result = adapter.process(infile, out_path)
-    return result
+    # Get file locking configuration
+    lock_config = (cfg or {}).get("file_locking", {}) if cfg else {}
+    locking_enabled = lock_config.get("enabled", True)
+    lock_timeout = lock_config.get("timeout_seconds", 30)
+
+    # Process with file locking to prevent concurrent access corruption
+    if locking_enabled:
+        try:
+            with FileLock(infile, timeout=lock_timeout) as lock:
+                result = adapter.process(infile, out_path)
+                return result
+        except LockError as e:
+            logger.warning(f"File locked, skipping: {infile.name}")
+            return FileResult(
+                file=str(infile),
+                output_file=None,
+                file_type=file_type,
+                success=False,
+                error=f"File locked by another process (timeout after {lock_timeout}s)",
+                timing_sec=0.0
+            )
+    else:
+        # Locking disabled, process directly
+        result = adapter.process(infile, out_path)
+        return result
 
 def format_progress(done: int, total: int, start_ts: float) -> str:
     now = time.time()
@@ -670,7 +694,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Thread pool parallelism
     with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
         fut_to_path = {
-            ex.submit(process_one, f, input_root, output_root, adapters, args.skip_existing, logger): f
+            ex.submit(process_one, f, input_root, output_root, adapters, args.skip_existing, logger, cfg): f
             for f in files
         }
         for fut in cf.as_completed(fut_to_path):

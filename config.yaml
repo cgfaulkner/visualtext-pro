@@ -190,6 +190,15 @@ artifact_management:
   cleanup_on_failure: false       # Keep artifacts on failure for debugging
   warn_threshold_gb: 5.0          # Warn if total artifact disk usage exceeds this (GB)
 
+# File Locking Configuration
+file_locking:
+  enabled: true                   # Enable file locking to prevent concurrent access
+  timeout_seconds: 30             # Maximum time to wait for lock acquisition
+  retry_attempts: 3               # Number of retry attempts if lock acquisition fails
+  retry_delay_seconds: 2          # Delay between retry attempts
+  cleanup_stale_locks: true       # Automatically cleanup stale locks on startup
+  stale_threshold_hours: 1        # Age threshold for considering locks stale (hours)
+
 # --- Profiles ---
 profiles:
   scientific_strict:

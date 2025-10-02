@@ -280,6 +280,15 @@ def create_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument('--base-dir', default='.',
                                help='Base directory to scan (default: current directory)')
 
+    # locks
+    locks_parser = subparsers.add_parser('locks', help='Show file lock status')
+    locks_parser.add_argument('--directory', default='.',
+                             help='Directory to check for locks (default: current directory)')
+    locks_parser.add_argument('--clean-stale', action='store_true',
+                             help='Remove stale lock files')
+    locks_parser.add_argument('--max-age-hours', type=int, default=1,
+                             help='Age threshold for stale locks in hours (default: 1)')
+
     return parser
 
 
@@ -361,6 +370,38 @@ def main():
                 return 1
 
             return 0
+
+        elif args.command == 'locks':
+            # Import lock utilities
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
+            from lock_monitor import print_lock_status
+            from artifact_cleaner import cleanup_stale_locks
+            from pathlib import Path
+
+            directory = Path(args.directory).resolve()
+
+            if args.clean_stale:
+                print(f"Cleaning stale locks (older than {args.max_age_hours} hours) in {directory}...\n")
+                stats = cleanup_stale_locks(directory, args.max_age_hours)
+
+                if stats['count'] > 0:
+                    print(f"✅ Removed {stats['count']} stale lock(s)\n")
+                    if stats['stale_locks']:
+                        print("Removed locks:")
+                        for lock_info in stats['stale_locks']:
+                            print(f"  {Path(lock_info['file']).name} (age: {lock_info['age_hours']}h, PID: {lock_info['pid']})")
+                else:
+                    print("No stale locks found.\n")
+
+                if stats['errors']:
+                    print(f"\n⚠️  {len(stats['errors'])} errors encountered")
+                    return 1
+
+                return 0
+            else:
+                # Show lock status
+                print_lock_status(directory)
+                return 0
 
         else:
             print(f"Error: Unknown command '{args.command}'")
