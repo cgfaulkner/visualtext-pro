@@ -286,6 +286,21 @@ def create_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument('--base-dir', default='.',
                                help='Base directory to scan (default: current directory)')
 
+    # batch
+    batch_parser = subparsers.add_parser('batch', help='Batch process multiple presentations')
+    batch_parser.add_argument('--input-dir', help='Directory containing PPTX files')
+    batch_parser.add_argument('--input-files', nargs='+', help='Specific files to process')
+    batch_parser.add_argument('--output-dir', help='Output directory for processed files and manifest')
+    batch_parser.add_argument('--dry-run', action='store_true',
+                             help='Validate files without processing')
+    batch_parser.add_argument('--resume', action='store_true',
+                             help='Resume from previous batch manifest')
+    batch_parser.add_argument('--batch-id', help='Batch ID for resume (optional, uses most recent if not specified)')
+    batch_parser.add_argument('--max-workers', type=int, default=1,
+                             help='Max parallel workers (default: 1, sequential)')
+    batch_parser.add_argument('--max-lock-wait', type=float, default=30.0,
+                             help='Max seconds to wait for file locks (default: 30)')
+
     # locks
     locks_parser = subparsers.add_parser('locks', help='Show file lock status')
     locks_parser.add_argument('--directory', default='.',
@@ -376,6 +391,79 @@ def main():
                 return 1
 
             return 0
+
+        elif args.command == 'batch':
+            # Import batch processor
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+            from batch_processor import PPTXBatchProcessor
+            from pathlib import Path
+
+            # Validate inputs (skip if resuming)
+            input_files = []
+            if not args.resume:
+                if args.input_dir:
+                    input_dir = Path(args.input_dir)
+                    if not input_dir.exists():
+                        print(f"Error: Input directory not found: {input_dir}")
+                        return 1
+                    input_files = sorted(input_dir.glob("*.pptx"))
+                    # Filter out temporary files
+                    input_files = [f for f in input_files if not f.name.startswith('~$')]
+                elif args.input_files:
+                    input_files = [Path(f) for f in args.input_files]
+                else:
+                    print("Error: Specify --input-dir or --input-files")
+                    return 1
+
+                if not input_files:
+                    print("No PPTX files found")
+                    return 0
+
+                print(f"Found {len(input_files)} file(s) to process\n")
+
+            # Create batch processor
+            processor = PPTXBatchProcessor(
+                config_path=args.config,
+                dry_run=args.dry_run,
+                max_workers=args.max_workers,
+                max_lock_wait=args.max_lock_wait
+            )
+
+            # Process batch
+            result = processor.process_batch(
+                input_files=input_files,
+                output_dir=Path(args.output_dir) if args.output_dir else None,
+                resume=args.resume,
+                batch_id=args.batch_id
+            )
+
+            # Print summary
+            print("\n" + "=" * 60)
+            print("BATCH PROCESSING SUMMARY")
+            print("=" * 60)
+            print(f"Batch ID: {result.get('batch_id')}")
+
+            stats = result.get('statistics', {})
+            if stats:
+                print(f"\nResults:")
+                print(f"  Total:     {stats.get('total', 0)}")
+                print(f"  Completed: {stats.get('complete', 0)} ✅")
+                print(f"  Failed:    {stats.get('failed', 0)} ❌")
+                print(f"  Skipped:   {stats.get('skipped', 0)} ⏭️")
+                print(f"  Success:   {stats.get('success_rate', 0):.1f}%")
+
+            if result.get('duration_seconds'):
+                duration = result['duration_seconds']
+                print(f"\nDuration: {duration:.1f}s")
+
+            manifest_path = result.get('manifest_path')
+            if manifest_path:
+                print(f"\nManifest: {manifest_path}")
+                print(f"Resume command: python altgen.py batch --resume --batch-id {result.get('batch_id')}")
+
+            print("=" * 60)
+
+            return 0 if result.get('success') else 1
 
         elif args.command == 'locks':
             # Import lock utilities
