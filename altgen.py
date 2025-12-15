@@ -5,6 +5,7 @@ Unified CLI that dispatches to existing proven processors
 """
 
 import argparse
+import glob
 import sys
 import os
 import subprocess
@@ -314,17 +315,57 @@ def main():
         parser = create_parser()
         args = parser.parse_args()
 
+        def run_batch(target: str, dry_run: bool) -> int:
+            """Discover and optionally process PPTX files in batch."""
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+            from batch_processor import PPTXBatchProcessor
+            from shared.path_validator import SecurityError
+
+            processor = PPTXBatchProcessor(config_path=args.config)
+
+            try:
+                files = processor.discover_files(target)
+            except (SecurityError, FileNotFoundError, ValueError) as exc:
+                print(f"Error: {exc}")
+                return 1
+
+            if not files:
+                print("No PPTX files found.")
+                return 0
+
+            print(f"Discovered {len(files)} PPTX file(s).")
+            if dry_run:
+                for file_path in files:
+                    print(f"  {file_path}")
+                return 0
+
+            result = processor.process_batch(files)
+
+            print("\nBatch complete")
+            print(f"Total: {result['total']}")
+            print(f"Succeeded: {result['succeeded']}")
+            print(f"Failed: {result['failed']}")
+
+            if result['errors']:
+                print("\nErrors:")
+                for error in result['errors']:
+                    print(f"  {error['file']}: {error['error']}")
+
+            return 0 if result['failed'] == 0 else 1
+
         if not args.command:
             parser.print_help()
             return 1
 
         # Validate file/directory exists
         if args.command in ['process', 'analyze', 'inject', 'audit']:
-            if not os.path.exists(args.path):
+            has_glob = glob.has_magic(args.path) if args.command == 'process' else False
+            if not has_glob and not os.path.exists(args.path):
                 print(f"Error: File or directory not found: {args.path}")
                 return 1
 
-            if args.command in ['process', 'analyze', 'inject'] and os.path.isfile(args.path):
+            if (args.command in ['process', 'analyze', 'inject'] and
+                    not has_glob and os.path.isfile(args.path)):
                 if not args.path.lower().endswith(('.pptx', '.ppt')):
                     print(f"Error: File must be a PowerPoint presentation (.pptx or .ppt): {args.path}")
                     return 1
@@ -340,6 +381,10 @@ def main():
             return dispatcher.dispatch_analyze(args.path)
 
         elif args.command == 'process':
+            has_glob = glob.has_magic(args.path)
+            if has_glob or os.path.isdir(args.path):
+                return run_batch(args.path, args.dry_run)
+
             return dispatcher.dispatch_process(args.path)
 
         elif args.command == 'inject':
@@ -389,40 +434,7 @@ def main():
             return 0
 
         elif args.command == 'batch':
-            # Import batch processor
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
-            from batch_processor import PPTXBatchProcessor
-            from shared.path_validator import SecurityError
-
-            processor = PPTXBatchProcessor(config_path=args.config)
-
-            try:
-                files = processor.discover_files(args.target)
-            except (SecurityError, FileNotFoundError, ValueError) as exc:
-                print(f"Error: {exc}")
-                return 1
-
-            if not files:
-                print("No PPTX files found.")
-                return 0
-
-            if args.dry_run:
-                print(f"Discovered {len(files)} PPTX file(s). Dry run only.")
-                return 0
-
-            result = processor.process_batch(files)
-
-            print("\nBatch complete")
-            print(f"Total: {result['total']}")
-            print(f"Succeeded: {result['succeeded']}")
-            print(f"Failed: {result['failed']}")
-
-            if result['errors']:
-                print("\nErrors:")
-                for error in result['errors']:
-                    print(f"  {error['file']}: {error['error']}")
-
-            return 0 if result['failed'] == 0 else 1
+            return run_batch(args.target, args.dry_run)
 
         elif args.command == 'locks':
             # Import lock utilities
