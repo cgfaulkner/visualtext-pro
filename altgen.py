@@ -290,23 +290,12 @@ def create_parser() -> argparse.ArgumentParser:
     batch_parser = subparsers.add_parser(
         'batch',
         help='Batch process multiple presentations',
-        description=(
-            'Process multiple presentations. Output is automatically generated in '
-            'Complete/<foldername>_<timestamp>/ unless --output-dir is specified.'
-        )
+        description='Process PPTX files sequentially from a folder or glob pattern.'
     )
-    batch_parser.add_argument('--input-dir', help='Directory containing PPTX files')
-    batch_parser.add_argument('--input-files', nargs='+', help='Specific files to process')
-    batch_parser.add_argument('--output-dir', help='Output directory (default: auto-generated in Complete/)')
-    batch_parser.add_argument('--dry-run', action='store_true',
-                             help='Validate files without processing')
-    batch_parser.add_argument('--resume', action='store_true',
-                             help='Resume from previous batch manifest')
-    batch_parser.add_argument('--batch-id', help='Batch ID for resume (optional, uses most recent if not specified)')
-    batch_parser.add_argument('--max-workers', type=int, default=1,
-                             help='Max parallel workers (default: 1, sequential)')
-    batch_parser.add_argument('--max-lock-wait', type=float, default=30.0,
-                             help='Max seconds to wait for file locks (default: 30)')
+    batch_parser.add_argument(
+        'target',
+        help='Folder path or glob pattern identifying PPTX files'
+    )
 
     # locks
     locks_parser = subparsers.add_parser('locks', help='Show file lock status')
@@ -403,129 +392,37 @@ def main():
             # Import batch processor
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
             from batch_processor import PPTXBatchProcessor
-            from pathlib import Path
+            from shared.path_validator import SecurityError
 
-            # Validate inputs (skip if resuming)
-            input_files = []
-            if not args.resume:
-                if args.input_dir:
-                    input_dir = Path(args.input_dir)
-                    if not input_dir.exists():
-                        print(f"Error: Input directory not found: {input_dir}")
-                        return 1
-                    input_files = sorted(input_dir.glob("*.pptx"))
-                    # Filter out temporary files
-                    input_files = [f for f in input_files if not f.name.startswith('~$')]
-                elif args.input_files:
-                    input_files = [Path(f) for f in args.input_files]
-                else:
-                    print("Error: Specify --input-dir or --input-files")
-                    return 1
+            processor = PPTXBatchProcessor(config_path=args.config)
 
-                if not input_files:
-                    print("No PPTX files found")
-                    return 0
+            try:
+                files = processor.discover_files(args.target)
+            except (SecurityError, FileNotFoundError, ValueError) as exc:
+                print(f"Error: {exc}")
+                return 1
 
-            # Create batch processor
-            processor = PPTXBatchProcessor(
-                config_path=args.config,
-                dry_run=args.dry_run,
-                max_workers=args.max_workers,
-                max_lock_wait=args.max_lock_wait
-            )
-
-            # Determine output directory for preview
-            output_dir = None
-            if args.output_dir:
-                output_dir = Path(args.output_dir)
-            elif not args.resume:
-                # Show auto-generated path (only for non-resume)
-                if args.input_dir:
-                    input_reference = Path(args.input_dir)
-                elif input_files:
-                    # Find common parent
-                    if len(input_files) > 1:
-                        # os is already imported at module level
-                        input_reference = Path(os.path.commonpath([str(f.parent) for f in input_files]))
-                    else:
-                        input_reference = input_files[0].parent
-                else:
-                    input_reference = Path.cwd()
-
-                output_dir = processor._generate_output_path(input_reference)
-
-            # Enhanced dry-run preview
-            if args.dry_run and not args.resume:
-                print("\nBatch Preview (DRY RUN)")
-                print("─" * 60)
-                print(f"Input:  {args.input_dir or 'Multiple files'} ({len(input_files)} files)")
-                print(f"Output: {output_dir}")
-                print()
-
-                # Show folder structure preservation
-                if args.input_dir:
-                    input_root = Path(args.input_dir)
-                    print("Folder structure will be preserved:")
-                    print()
-
-                    # Show first few files with paths
-                    for i, f in enumerate(input_files[:5]):
-                        try:
-                            rel_path = f.relative_to(input_root)
-                        except ValueError:
-                            rel_path = f.name
-                        out_path = output_dir / rel_path
-                        print(f"  {rel_path} → {rel_path}")
-
-                    if len(input_files) > 5:
-                        print(f"  ... and {len(input_files) - 5} more files")
-                else:
-                    # File list mode
-                    print("Files to process:")
-                    for i, f in enumerate(input_files[:5]):
-                        print(f"  {f.name}")
-                    if len(input_files) > 5:
-                        print(f"  ... and {len(input_files) - 5} more files")
-
-                print()
-                print("Run without --dry-run to process files.")
+            if not files:
+                print("No PPTX files found.")
                 return 0
 
-            # Process batch
-            result = processor.process_batch(
-                input_files=input_files,
-                output_dir=output_dir,
-                resume=args.resume,
-                batch_id=args.batch_id
-            )
+            if args.dry_run:
+                print(f"Discovered {len(files)} PPTX file(s). Dry run only.")
+                return 0
 
-            # Print summary
-            print("\n" + "=" * 60)
-            print("BATCH PROCESSING SUMMARY")
-            print("=" * 60)
-            print(f"Batch ID: {result.get('batch_id')}")
+            result = processor.process_batch(files)
 
-            stats = result.get('statistics', {})
-            if stats:
-                print(f"\nResults:")
-                print(f"  Total:     {stats.get('total', 0)}")
-                print(f"  Completed: {stats.get('complete', 0)} ✅")
-                print(f"  Failed:    {stats.get('failed', 0)} ❌")
-                print(f"  Skipped:   {stats.get('skipped', 0)} ⏭️")
-                print(f"  Success:   {stats.get('success_rate', 0):.1f}%")
+            print("\nBatch complete")
+            print(f"Total: {result['total']}")
+            print(f"Succeeded: {result['succeeded']}")
+            print(f"Failed: {result['failed']}")
 
-            if result.get('duration_seconds'):
-                duration = result['duration_seconds']
-                print(f"\nDuration: {duration:.1f}s")
+            if result['errors']:
+                print("\nErrors:")
+                for error in result['errors']:
+                    print(f"  {error['file']}: {error['error']}")
 
-            manifest_path = result.get('manifest_path')
-            if manifest_path:
-                print(f"\nManifest: {manifest_path}")
-                print(f"Resume command: python altgen.py batch --resume --batch-id {result.get('batch_id')}")
-
-            print("=" * 60)
-
-            return 0 if result.get('success') else 1
+            return 0 if result['failed'] == 0 else 1
 
         elif args.command == 'locks':
             # Import lock utilities
