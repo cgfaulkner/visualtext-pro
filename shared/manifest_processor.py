@@ -912,8 +912,8 @@ class ManifestProcessor:
         
         return "\n".join(context_parts)
         
-    def extract_and_generate(self, pptx_path: Path, manifest_path: Path, 
-                            mode: str = "preserve", 
+    def extract_and_generate(self, pptx_path: Path, manifest_path: Path,
+                            mode: str = "preserve",
                             generate_thumbnails: bool = True) -> Dict[str, Any]:
         """
         Extract images from PPTX and generate/cache ALT text using manifest.
@@ -939,12 +939,15 @@ class ManifestProcessor:
         
         if not extraction_result['success']:
             return extraction_result
-        
+
         # Generate missing ALT text with caching
         generation_result = self._generate_missing_alt_text(
             manifest, mode
         )
-        
+
+        # Finalize decisions for review/injection without requiring PPTX injection
+        finalize_result = self._finalize_alt_decisions(manifest, mode)
+
         # Save manifest
         manifest.save()
 
@@ -961,6 +964,7 @@ class ManifestProcessor:
             'manifest_path': str(manifest_path),
             'extraction': extraction_result,
             'generation': generation_result,
+            'finalization': finalize_result,
             'statistics': stats,
             'total_entries': stats['total_entries'],
             'llava_calls_made': stats['llava_calls_made'],
@@ -972,6 +976,53 @@ class ManifestProcessor:
                    f"{stats['with_suggested_alt']} with suggested ALT")
         
         return result
+
+    def _finalize_alt_decisions(self, manifest: AltManifest, mode: str) -> Dict[str, Any]:
+        """Ensure manifest entries have finalized ALT decisions for review/doc builds."""
+
+        preserved_count = 0
+        generated_count = 0
+        cached_count = 0
+        missing_count = 0
+
+        for entry in manifest.get_all_entries():
+            current_alt = entry.existing_alt.strip()
+            suggested_alt = (entry.final_alt or entry.suggested_alt or "").strip()
+
+            if suggested_alt:
+                entry.final_alt = suggested_alt
+                entry.suggested_alt = suggested_alt
+
+                if entry.decision_reason in ["cached", "generated_new"]:
+                    pass
+                elif entry.llava_called:
+                    entry.decision_reason = "generated_new"
+                    generated_count += 1
+                elif entry.source == "cached":
+                    entry.decision_reason = "cached"
+                    cached_count += 1
+                else:
+                    entry.decision_reason = entry.decision_reason or "generated_new"
+                    generated_count += 1
+
+            elif current_alt:
+                entry.final_alt = current_alt
+                entry.decision_reason = entry.decision_reason or "preserve_existing"
+                preserved_count += 1
+            else:
+                entry.decision_reason = entry.decision_reason or "needs_generation"
+                missing_count += 1
+
+            manifest.add_entry(entry)
+
+        return {
+            'success': True,
+            'preserved_count': preserved_count,
+            'generated_count': generated_count,
+            'cached_count': cached_count,
+            'missing_count': missing_count,
+            'mode': mode
+        }
     
     def _extract_images_to_manifest(self, pptx_path: Path, manifest: AltManifest,
                                    generate_thumbnails: bool) -> Dict[str, Any]:
