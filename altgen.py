@@ -74,18 +74,14 @@ class ProcessorDispatcher:
 
     def dispatch_analyze(self, file_path: str) -> int:
         """Dispatch analyze command to appropriate processor"""
-        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         if processor == PROCESSOR_MAP["clean"]:
-            # Use clean processor's review-doc-only mode for analysis
             cmd = ["python", processor, "process", file_path, "--review-doc-only"]
         elif processor == PROCESSOR_MAP["manifest"]:
-            # Use manifest processor's review-only mode for analysis
             cmd = ["python", processor, "process", file_path, "--review-only"]
         else:
-            # For original processor, use extract command for analysis
-            cmd = ["python", processor, "extract", file_path]
+            cmd = ["python", processor, "process", file_path, "--approval-doc-only"]
 
         return self._run_processor(cmd)
 
@@ -173,7 +169,7 @@ class ProcessorDispatcher:
                     subcommand_idx = i
                     break
 
-            if subcommand_idx > 2:  # Found subcommand, insert global flags before it
+            if subcommand_idx >= 2:  # Found subcommand, insert global flags before it
                 before_subcommand = cmd[:subcommand_idx]
                 after_subcommand = cmd[subcommand_idx:]
 
@@ -378,6 +374,39 @@ def main():
             dispatcher.setup_logging()
 
         if args.command == 'analyze':
+            has_glob = glob.has_magic(args.path)
+            if has_glob or os.path.isdir(args.path):
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+                from batch_processor import PPTXBatchProcessor
+                from shared.path_validator import SecurityError
+
+                batch_processor = PPTXBatchProcessor(config_path=args.config)
+
+                try:
+                    files = batch_processor.discover_files(args.path)
+                except (SecurityError, FileNotFoundError, ValueError) as exc:
+                    print(f"Error: {exc}")
+                    return 1
+
+                if not files:
+                    print("No PPTX files found.")
+                    return 0
+
+                print(f"Discovered {len(files)} PPTX file(s).")
+
+                if args.dry_run:
+                    for file_path in files:
+                        print(f"  {file_path}")
+                    return 0
+
+                result_code = 0
+                for file_path in files:
+                    print(f"Analyzing: {file_path}")
+                    exit_code = dispatcher.dispatch_analyze(str(file_path))
+                    result_code = result_code or exit_code
+
+                return result_code
+
             return dispatcher.dispatch_analyze(args.path)
 
         elif args.command == 'process':
