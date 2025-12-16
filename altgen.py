@@ -9,6 +9,7 @@ import glob
 import sys
 import os
 import subprocess
+from pathlib import Path
 from typing import List, Optional
 
 
@@ -36,6 +37,37 @@ class ProcessorDispatcher:
         if message not in self.warnings_shown:
             print(f"Warning: {message}")
             self.warnings_shown.add(message)
+
+    def _make_relative_path(self, file_path: str) -> str:
+        """Convert absolute path to relative path (relative to project root).
+        
+        Args:
+            file_path: File path string (may be absolute or relative)
+            
+        Returns:
+            Relative path string if conversion is possible, otherwise original path
+        """
+        try:
+            path = Path(file_path)
+            
+            # If already relative, return unchanged
+            if not path.is_absolute():
+                return file_path
+            
+            # Resolve symlinks and get absolute path
+            resolved_path = path.resolve()
+            
+            # Attempt to compute relative path from project root
+            try:
+                relative_path = resolved_path.relative_to(Path(self.base_path).resolve())
+                return str(relative_path)
+            except ValueError:
+                # Path is outside project root, return original
+                return file_path
+                
+        except (OSError, ValueError):
+            # Handle errors gracefully (broken symlinks, invalid paths, etc.)
+            return file_path
 
     def setup_logging(self):
         """Setup JSONL logging if requested (altgen.py handles this)"""
@@ -402,12 +434,14 @@ def main():
                 result_code = 0
                 for file_path in files:
                     print(f"Analyzing: {file_path}")
-                    exit_code = dispatcher.dispatch_analyze(str(file_path))
+                    relative_path = dispatcher._make_relative_path(str(file_path))
+                    exit_code = dispatcher.dispatch_analyze(relative_path)
                     result_code = result_code or exit_code
 
                 return result_code
 
-            return dispatcher.dispatch_analyze(args.path)
+            relative_path = dispatcher._make_relative_path(args.path)
+            return dispatcher.dispatch_analyze(relative_path)
 
         elif args.command == 'process':
             has_glob = glob.has_magic(args.path)
