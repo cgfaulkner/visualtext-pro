@@ -350,7 +350,7 @@ def _create_review_table(
         "Existing ALT",
         "Generated ALT",
         "Decorative",
-        "Decision/Notes",
+        "Status",
     ]
 
     header_cells = table.rows[0].cells
@@ -402,13 +402,10 @@ def _create_review_table(
         final_existing_alt = (record.get('existing_alt') or '').strip()
         final_generated_alt = (record.get('generated_alt') or '').strip()
 
-        if current_alt:
-            display_suggested = current_alt
-        else:
-            display_suggested = suggested_alt if suggested_alt else "[Generate needed]"
-
+        # Suggested ALT Text column: show generated/proposed ALT only, never current_alt
+        display_suggested = suggested_alt if suggested_alt else "[Generate needed]"
         cells[3].text = display_suggested
-        _format_alt_text_cell(cells[3], bool(suggested_alt or current_alt))
+        _format_alt_text_cell(cells[3], bool(suggested_alt))
 
         existing_display = (
             final_existing_alt if final_existing_alt else "[No ALT text]"
@@ -416,6 +413,7 @@ def _create_review_table(
         cells[4].text = existing_display
         _format_alt_text_cell(cells[4], bool(final_existing_alt))
 
+        # Generated ALT column: show only final_generated_alt, never existing ALT
         generated_display = (
             final_generated_alt if final_generated_alt else "[Not generated]"
         )
@@ -427,13 +425,12 @@ def _create_review_table(
         cells[6].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
         cells[6].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        decision_para = cells[7].paragraphs[0]
-        if decision_para.runs:
-            decision_para.clear()
-        decision_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        decision_para.paragraph_format.space_after = Pt(6)
-        decision_para.paragraph_format.line_spacing = 1.0
-        cells[7].vertical_alignment = WD_ALIGN_VERTICAL.TOP
+        # Status column: use same logic as portrait table
+        generated_alt_for_status = _get_generated_alt_text(record, visual_info, current_alt)
+        status_text = _resolve_status_label(record, current_alt, generated_alt_for_status)
+        cells[7].text = status_text
+        cells[7].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[7].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         _set_row_no_break(row)
 
