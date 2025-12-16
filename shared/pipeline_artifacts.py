@@ -247,12 +247,13 @@ class RunArtifacts:
         """Get path to the single source of truth manifest file."""
         return self.manifest_path
     
-    def cleanup(self, keep_finals: bool = True) -> Dict[str, Any]:
+    def cleanup(self, keep_finals: bool = True, preserve_thumbnails: bool = False) -> Dict[str, Any]:
         """
         Clean up temporary artifacts.
 
         Args:
             keep_finals: If True, keep final_alt_map.json and visual_index.json for future use
+            preserve_thumbnails: If True, keep thumbs/ directory (needed for DOCX generation)
 
         Returns:
             Dict with cleanup statistics: files_removed, dirs_removed, bytes_freed, errors
@@ -288,9 +289,17 @@ class RunArtifacts:
                     self.visual_index_path  # Keep for DOCX generation
                 }
 
+                # If preserving thumbnails, add thumbs directory to keep list
+                dirs_to_keep = set()
+                if preserve_thumbnails:
+                    dirs_to_keep.add(self.thumbs_dir)
+
                 # Remove files
                 for path in list(self.run_dir.rglob("*")):
                     if path.is_file() and path not in finals_to_keep:
+                        # Skip files in directories we want to keep
+                        if preserve_thumbnails and self.thumbs_dir in path.parents:
+                            continue
                         try:
                             size = path.stat().st_size
                             path.unlink()
@@ -303,14 +312,26 @@ class RunArtifacts:
 
                 # Remove empty directories (bottom-up)
                 for path in sorted(self.run_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-                    if path.is_dir() and not any(path.iterdir()):
-                        try:
-                            path.rmdir()
-                            stats['dirs_removed'] += 1
-                        except Exception as e:
-                            error_msg = f"Failed to remove directory {path}: {e}"
-                            logger.debug(error_msg)
-                            stats['errors'].append(error_msg)
+                    if path.is_dir():
+                        # Skip directories we want to keep
+                        if path in dirs_to_keep:
+                            continue
+                        # Skip if this directory is an ancestor of a kept directory
+                        # (we need to keep parent directories that contain kept directories)
+                        if any(path in kept_dir.parents for kept_dir in dirs_to_keep):
+                            continue
+                        # Skip if this directory is a descendant of a kept directory
+                        # (we need to keep all contents of kept directories)
+                        if any(kept_dir in path.parents for kept_dir in dirs_to_keep):
+                            continue
+                        if not any(path.iterdir()):
+                            try:
+                                path.rmdir()
+                                stats['dirs_removed'] += 1
+                            except Exception as e:
+                                error_msg = f"Failed to remove directory {path}: {e}"
+                                logger.debug(error_msg)
+                                stats['errors'].append(error_msg)
 
                 logger.info(f"Cleaned up artifacts (kept finals): {stats['files_removed']} files, "
                           f"{stats['bytes_freed']} bytes freed")
