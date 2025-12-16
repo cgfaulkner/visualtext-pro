@@ -199,6 +199,21 @@ file_locking:
   cleanup_stale_locks: true       # Automatically cleanup stale locks on startup
   stale_threshold_hours: 1        # Age threshold for considering locks stale (hours)
 
+# Batch Processing Configuration
+batch_processing:
+  default_max_workers: 1          # Sequential processing by default (safe for Phase 2B.1)
+  max_lock_wait_seconds: 30       # Maximum time to wait for file locks during batch
+  manifest_retention_days: 30     # Keep batch manifests for resume capability (days)
+  progress_update_interval: 5     # Print progress update every N files
+  stop_on_error_threshold: 0.5    # Stop batch if failure rate exceeds this (0.0-1.0, 0.5 = 50%)
+  dry_run_validates_ollama: true  # Check LLaVA connectivity during dry-run
+  file_timeout_seconds: 300       # Timeout for individual file processing (seconds)
+
+  # Output configuration
+  complete_folder_name: "Complete"           # Folder name at project root
+  output_timestamp_format: "%Y%m%d_%H%M%S"  # Timestamp format for folders
+  preserve_folder_structure: true            # Keep nested folders in output
+
 # --- Profiles ---
 profiles:
   scientific_strict:

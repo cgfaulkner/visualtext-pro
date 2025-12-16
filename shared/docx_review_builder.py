@@ -59,7 +59,9 @@ def generate_alt_review_doc(
     
     Args:
         visual_index_path: Path to visual_index.json from Phase 1
-        current_alt_by_key_path: Path to current_alt_by_key.json from Phase 1
+        current_alt_by_key_path: Path to current_alt_by_key.json from Phase 1 (optional).
+            If not provided or file is missing, current ALT text will be derived from
+            visual_index entries (current_alt, existing_alt, or current_alt_text fields).
         final_alt_map_path: Path to final_alt_map.json from Phase 3
         out_docx: Output path for DOCX file
         portrait: If True, use portrait layout with fixed column widths
@@ -70,13 +72,10 @@ def generate_alt_review_doc(
     """
     logger.info(f"Building DOCX review document: {out_docx}")
     
-    # Load the three JSON artifacts
+    # Load required JSON artifacts
     try:
         with open(visual_index_path, 'r', encoding='utf-8') as f:
             visual_index = json.load(f)
-        
-        with open(current_alt_by_key_path, 'r', encoding='utf-8') as f:
-            current_alt_by_key = json.load(f)
             
         with open(final_alt_map_path, 'r', encoding='utf-8') as f:
             final_alt_map = json.load(f)
@@ -84,8 +83,31 @@ def generate_alt_review_doc(
         final_alt_map = normalize_final_alt_map(final_alt_map)
 
     except Exception as e:
-        logger.error(f"Failed to load pipeline artifacts: {e}")
+        logger.error(f"Failed to load required pipeline artifacts: {e}")
         raise RuntimeError(f"Could not load required JSON files: {e}")
+    
+    # Load optional current_alt_by_key.json (legacy file)
+    # If missing, will be derived from visual_index below
+    current_alt_by_key = {}
+    try:
+        with open(current_alt_by_key_path, 'r', encoding='utf-8') as f:
+            current_alt_by_key = json.load(f)
+        logger.debug(f"Loaded current_alt_by_key from {current_alt_by_key_path}")
+    except (FileNotFoundError, IOError, json.JSONDecodeError) as e:
+        logger.debug(f"current_alt_by_key.json not found or invalid: {e}. Will derive from visual_index.")
+    
+    # Derive current_alt_by_key from visual_index if file wasn't loaded
+    if not current_alt_by_key:
+        current_alt_by_key = {}
+        for instance_key, entry in visual_index.items():
+            current_alt = (
+                entry.get("current_alt")
+                or entry.get("existing_alt")
+                or entry.get("current_alt_text")
+                or ""
+            ).strip()
+            if current_alt:
+                current_alt_by_key[instance_key] = current_alt
     
     if not visual_index:
         logger.warning("No images found in visual_index")
@@ -350,7 +372,7 @@ def _create_review_table(
         "Existing ALT",
         "Generated ALT",
         "Decorative",
-        "Decision/Notes",
+        "Status",
     ]
 
     header_cells = table.rows[0].cells
@@ -402,13 +424,10 @@ def _create_review_table(
         final_existing_alt = (record.get('existing_alt') or '').strip()
         final_generated_alt = (record.get('generated_alt') or '').strip()
 
-        if current_alt:
-            display_suggested = current_alt
-        else:
-            display_suggested = suggested_alt if suggested_alt else "[Generate needed]"
-
+        # Suggested ALT Text column: show generated/proposed ALT only, never current_alt
+        display_suggested = suggested_alt if suggested_alt else "[Generate needed]"
         cells[3].text = display_suggested
-        _format_alt_text_cell(cells[3], bool(suggested_alt or current_alt))
+        _format_alt_text_cell(cells[3], bool(suggested_alt))
 
         existing_display = (
             final_existing_alt if final_existing_alt else "[No ALT text]"
@@ -416,6 +435,7 @@ def _create_review_table(
         cells[4].text = existing_display
         _format_alt_text_cell(cells[4], bool(final_existing_alt))
 
+        # Generated ALT column: show only final_generated_alt, never existing ALT
         generated_display = (
             final_generated_alt if final_generated_alt else "[Not generated]"
         )
@@ -427,13 +447,12 @@ def _create_review_table(
         cells[6].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
         cells[6].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        decision_para = cells[7].paragraphs[0]
-        if decision_para.runs:
-            decision_para.clear()
-        decision_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        decision_para.paragraph_format.space_after = Pt(6)
-        decision_para.paragraph_format.line_spacing = 1.0
-        cells[7].vertical_alignment = WD_ALIGN_VERTICAL.TOP
+        # Status column: use same logic as portrait table
+        generated_alt_for_status = _get_generated_alt_text(record, visual_info, current_alt)
+        status_text = _resolve_status_label(record, current_alt, generated_alt_for_status)
+        cells[7].text = status_text
+        cells[7].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        cells[7].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         _set_row_no_break(row)
 

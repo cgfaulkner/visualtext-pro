@@ -275,15 +275,17 @@ def cmd_process(args) -> int:
 
         # Get ALT text generator
         # Import here to avoid circular dependencies
-        from unified_alt_generator import UnifiedAltGenerator
-        alt_generator = UnifiedAltGenerator(config_manager)
+        from unified_alt_generator import FlexibleAltGenerator
+        alt_generator = FlexibleAltGenerator(config_manager)
         
         # Run three-phase pipeline
+        # Disable automatic cleanup - we'll handle it manually after DOCX generation
         artifacts = run_pipeline(
             input_path, 
             config_manager.config,
             alt_generator,
-            force_regenerate=args.force_regenerate
+            force_regenerate=args.force_regenerate,
+            cleanup_on_exit=False
         )
         
         pipeline_time = time.time() - start_time
@@ -308,7 +310,8 @@ def cmd_process(args) -> int:
                     return 1
         
         # DOCX review document (if requested)
-        if args.review_doc or args.review_doc_only:
+        review_doc_requested = args.review_doc or args.review_doc_only
+        if review_doc_requested:
             # Determine output path for review document
             if args.review_out:
                 review_output = args.review_out
@@ -318,7 +321,7 @@ def cmd_process(args) -> int:
                     review_output = str(input_path.with_suffix('.review.docx'))
             
             # Generate review document
-            title = args.title or input_path.stem
+            title = getattr(args, "title", None) or input_path.stem
             generate_alt_review_doc(
                 str(artifacts.visual_index_path),
                 str(artifacts.current_alt_by_key_path),
@@ -332,7 +335,8 @@ def cmd_process(args) -> int:
             print(f"📋 Review document generated: {review_output}")
         
         # Cleanup temporary artifacts (keep finals)
-        artifacts.cleanup(keep_finals=True)
+        # Preserve thumbnails if review doc was requested (they're needed for DOCX generation)
+        artifacts.cleanup(keep_finals=True, preserve_thumbnails=review_doc_requested)
         
         total_time = time.time() - start_time
         print(f"⏱️ Total processing time: {total_time:.2f}s")

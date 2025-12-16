@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from alt_manifest import (
     AltManifest, AltManifestEntry, compute_image_hash, create_stable_key,
@@ -19,6 +19,12 @@ from alt_manifest import (
 )
 from shape_utils import is_image_like, is_decorative_shape, is_empty_placeholder_textbox
 from alt_text_reader import read_existing_alt
+from shape_renderer import ShapeRenderer
+
+if TYPE_CHECKING:
+    import win32com.client  # type: ignore
+
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -268,11 +274,21 @@ class ManifestProcessor:
         """
         logger.info("Phase 2: Rendering slides and generating crops")
         
+        # Detect win32com availability (Windows only)
+        win32_available = False
+        try:
+            import win32com.client  # type: ignore
+            win32_available = True
+        except ImportError:
+            logger.debug(
+                "win32com not available — skipping PowerPoint slide rendering "
+                "(non-Windows environment)"
+            )
+        
         try:
             from pptx import Presentation
             from PIL import Image, ImageDraw
             import io
-            import win32com.client  # For Windows slide rendering
             import time
             import tempfile
             
@@ -286,13 +302,16 @@ class ManifestProcessor:
             
             # Try to use PowerPoint COM for high-quality rendering (Windows)
             slide_images = {}
-            try:
-                slide_images = self._render_slides_with_powerpoint(pptx_path, target_width=1920)
-                logger.info(f"Rendered {len(slide_images)} slides using PowerPoint COM")
-            except Exception as e:
-                logger.warning(f"PowerPoint COM rendering failed: {e}")
-                # Fallback to python-pptx basic rendering would go here
-                logger.info("Falling back to basic shape-by-shape processing")
+            if win32_available:
+                try:
+                    slide_images = self._render_slides_with_powerpoint(pptx_path, target_width=1920)
+                    logger.info(f"Rendered {len(slide_images)} slides using PowerPoint COM")
+                except Exception as e:
+                    logger.warning(f"PowerPoint COM rendering failed: {e}")
+                    slide_images = {}
+                    logger.info("Falling back to image-only thumbnail extraction")
+            else:
+                slide_images = {}
             
             # Process each manifest entry
             for entry in manifest.get_all_entries():
@@ -336,14 +355,109 @@ class ManifestProcessor:
                                 manifest.add_entry(entry)
                                 continue
                         
-                        # For non-pictures without slide rendering, skip
-                        logger.warning(f"Cannot process {entry.instance_key} without slide rendering")
-                        entry.rasterizer_info = {
-                            "engine": "none",
-                            "dpi": 0,
-                            "status": "no_slide_render"
-                        }
-                        rendering_errors.append(f"No slide rendering available for {entry.instance_key}")
+                        # For non-pictures, try to render using ShapeRenderer
+                        shape = self._find_shape_by_instance_key(prs, entry)
+                        if not shape:
+                            logger.warning(f"Could not find shape for {entry.instance_key}")
+                            entry.rasterizer_info = {
+                                "engine": "none",
+                                "dpi": 0,
+                                "status": "shape_not_found"
+                            }
+                            rendering_errors.append(f"Shape not found for {entry.instance_key}")
+                            manifest.add_entry(entry)
+                            continue
+                        
+                        # Check for embedded image in AUTO_SHAPE (some auto shapes have image fills)
+                        if entry.shape_type == "AUTO_SHAPE" and hasattr(shape, 'image') and shape.image:
+                            image_data = shape.image.blob
+                            
+                            # Create thumbnail
+                            thumbnail_path = artifacts.thumbs_dir / f"{entry.instance_key}.jpg"
+                            self._create_thumbnail_from_bytes(image_data, thumbnail_path)
+                            entry.thumb_path = str(thumbnail_path)
+                            thumbnails_created += 1
+                            
+                            # Use original image as crop
+                            crop_path = artifacts.crops_dir / f"{entry.instance_key}.png"
+                            with open(crop_path, 'wb') as f:
+                                f.write(image_data)
+                            entry.crop_path = str(crop_path)
+                            crops_created += 1
+                            
+                            # Update content_key with actual image data
+                            entry.content_key = create_content_key(image_data)
+                            entry.rasterizer_info = {
+                                "engine": "direct_extract",
+                                "dpi": 0,
+                                "status": "success"
+                            }
+                            
+                            manifest.add_entry(entry)
+                            continue
+                        
+                        # Render shape to image using ShapeRenderer
+                        renderer = ShapeRenderer()
+                        bbox = entry.bbox
+                        if not bbox or not all(bbox.get(k, 0) > 0 for k in ['width', 'height']):
+                            logger.warning(f"Invalid bbox for {entry.instance_key}: {bbox}")
+                            entry.rasterizer_info = {
+                                "engine": "shape_renderer",
+                                "dpi": 0,
+                                "status": "invalid_bbox"
+                            }
+                            rendering_errors.append(f"Invalid bbox for {entry.instance_key}")
+                            manifest.add_entry(entry)
+                            continue
+                        
+                        # Convert bbox from points to pixels (96 DPI)
+                        width_px = max(int(bbox.get('width', 0) * 96 / 72), 50)
+                        height_px = max(int(bbox.get('height', 0) * 96 / 72), 50)
+                        
+                        if entry.shape_type == "GROUP":
+                            rendered_img = renderer.render_group_shape(shape, bbox)
+                        else:
+                            rendered_img = renderer.render_shape_to_image(shape, width_px, height_px)
+                        
+                        if rendered_img:
+                            # Convert PIL Image to bytes
+                            import io
+                            img_bytes = io.BytesIO()
+                            rendered_img.save(img_bytes, format='PNG')
+                            image_data = img_bytes.getvalue()
+                            
+                            # Create thumbnail
+                            thumbnail_path = artifacts.thumbs_dir / f"{entry.instance_key}.jpg"
+                            self._create_thumbnail_from_bytes(image_data, thumbnail_path)
+                            entry.thumb_path = str(thumbnail_path)
+                            thumbnails_created += 1
+                            
+                            # Save crop
+                            crop_path = artifacts.crops_dir / f"{entry.instance_key}.png"
+                            with open(crop_path, 'wb') as f:
+                                f.write(image_data)
+                            entry.crop_path = str(crop_path)
+                            crops_created += 1
+                            
+                            # Update content_key with rendered image data
+                            entry.content_key = create_content_key(image_data)
+                            entry.rasterizer_info = {
+                                "engine": "shape_renderer",
+                                "dpi": 96,
+                                "status": "success"
+                            }
+                            
+                            manifest.add_entry(entry)
+                            logger.debug(f"Rendered {entry.shape_type} shape {entry.instance_key} to thumbnail")
+                        else:
+                            logger.warning(f"Failed to render {entry.instance_key}")
+                            entry.rasterizer_info = {
+                                "engine": "shape_renderer",
+                                "dpi": 0,
+                                "status": "render_failed"
+                            }
+                            rendering_errors.append(f"Shape rendering failed for {entry.instance_key}")
+                            manifest.add_entry(entry)
                         continue
                     
                     # Create crop from slide image using bbox
@@ -379,6 +493,14 @@ class ManifestProcessor:
                     thumbnail_path = artifacts.thumbs_dir / f"{entry.instance_key}.jpg" 
                     thumbnail_img = crop_img.copy()
                     thumbnail_img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                    # Convert RGBA/LA/P (with transparency) to RGB before saving as JPEG
+                    original_mode = thumbnail_img.mode
+                    if thumbnail_img.mode in ("RGBA", "LA"):
+                        thumbnail_img = thumbnail_img.convert("RGB")
+                        logger.debug(f"Converted {original_mode} to RGB for thumbnail: {thumbnail_path}")
+                    elif thumbnail_img.mode == "P" and "transparency" in thumbnail_img.info:
+                        thumbnail_img = thumbnail_img.convert("RGB")
+                        logger.debug(f"Converted P mode with transparency to RGB for thumbnail: {thumbnail_path}")
                     thumbnail_img.save(thumbnail_path, 'JPEG', quality=85)
                     entry.thumb_path = str(thumbnail_path)
                     thumbnails_created += 1
@@ -440,8 +562,6 @@ class ManifestProcessor:
             Dictionary mapping slide_idx -> PIL Image
         """
         import tempfile
-        import win32com.client
-        from PIL import Image
         
         slide_images = {}
         
@@ -449,6 +569,7 @@ class ManifestProcessor:
             temp_dir_path = Path(temp_dir)
             
             try:
+                import win32com.client  # type: ignore
                 # Initialize PowerPoint
                 ppt = win32com.client.Dispatch("PowerPoint.Application")
                 ppt.Visible = False
@@ -483,12 +604,17 @@ class ManifestProcessor:
         try:
             slide = prs.slides[entry.slide_idx]
             # Extract shape_id from instance_key
+            # Format: slide_X_shape_Y -> ["slide", "X", "shape", "Y"]
             parts = entry.instance_key.split('_')
-            if len(parts) >= 3:
-                shape_id = int(parts[2])  # slide_X_shape_Y -> Y
-                for shape in slide.shapes:
-                    if getattr(shape, 'shape_id', 0) == shape_id:
-                        return shape
+            if len(parts) >= 4:
+                try:
+                    shape_id = int(parts[3])  # slide_X_shape_Y -> Y (at index 3)
+                    for shape in slide.shapes:
+                        if getattr(shape, 'shape_id', 0) == shape_id:
+                            return shape
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Invalid instance_key format: {entry.instance_key} - {e}")
+                    return None
         except Exception as e:
             logger.debug(f"Could not find shape for {entry.instance_key}: {e}")
         return None
@@ -501,6 +627,14 @@ class ManifestProcessor:
             
             img = Image.open(io.BytesIO(image_data))
             img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            # Convert RGBA/LA/P (with transparency) to RGB before saving as JPEG
+            original_mode = img.mode
+            if img.mode in ("RGBA", "LA"):
+                img = img.convert("RGB")
+                logger.debug(f"Converted {original_mode} to RGB for thumbnail: {thumbnail_path}")
+            elif img.mode == "P" and "transparency" in img.info:
+                img = img.convert("RGB")
+                logger.debug(f"Converted P mode with transparency to RGB for thumbnail: {thumbnail_path}")
             img.save(thumbnail_path, 'JPEG', quality=85)
             
         except Exception as e:
@@ -912,8 +1046,8 @@ class ManifestProcessor:
         
         return "\n".join(context_parts)
         
-    def extract_and_generate(self, pptx_path: Path, manifest_path: Path, 
-                            mode: str = "preserve", 
+    def extract_and_generate(self, pptx_path: Path, manifest_path: Path,
+                            mode: str = "preserve",
                             generate_thumbnails: bool = True) -> Dict[str, Any]:
         """
         Extract images from PPTX and generate/cache ALT text using manifest.
@@ -939,12 +1073,15 @@ class ManifestProcessor:
         
         if not extraction_result['success']:
             return extraction_result
-        
+
         # Generate missing ALT text with caching
         generation_result = self._generate_missing_alt_text(
             manifest, mode
         )
-        
+
+        # Finalize decisions for review/injection without requiring PPTX injection
+        finalize_result = self._finalize_alt_decisions(manifest, mode)
+
         # Save manifest
         manifest.save()
 
@@ -961,6 +1098,7 @@ class ManifestProcessor:
             'manifest_path': str(manifest_path),
             'extraction': extraction_result,
             'generation': generation_result,
+            'finalization': finalize_result,
             'statistics': stats,
             'total_entries': stats['total_entries'],
             'llava_calls_made': stats['llava_calls_made'],
@@ -972,6 +1110,53 @@ class ManifestProcessor:
                    f"{stats['with_suggested_alt']} with suggested ALT")
         
         return result
+
+    def _finalize_alt_decisions(self, manifest: AltManifest, mode: str) -> Dict[str, Any]:
+        """Ensure manifest entries have finalized ALT decisions for review/doc builds."""
+
+        preserved_count = 0
+        generated_count = 0
+        cached_count = 0
+        missing_count = 0
+
+        for entry in manifest.get_all_entries():
+            current_alt = entry.existing_alt.strip()
+            suggested_alt = (entry.final_alt or entry.suggested_alt or "").strip()
+
+            if suggested_alt:
+                entry.final_alt = suggested_alt
+                entry.suggested_alt = suggested_alt
+
+                if entry.decision_reason in ["cached", "generated_new"]:
+                    pass
+                elif entry.llava_called:
+                    entry.decision_reason = "generated_new"
+                    generated_count += 1
+                elif entry.source == "cached":
+                    entry.decision_reason = "cached"
+                    cached_count += 1
+                else:
+                    entry.decision_reason = entry.decision_reason or "generated_new"
+                    generated_count += 1
+
+            elif current_alt:
+                entry.final_alt = current_alt
+                entry.decision_reason = entry.decision_reason or "preserve_existing"
+                preserved_count += 1
+            else:
+                entry.decision_reason = entry.decision_reason or "needs_generation"
+                missing_count += 1
+
+            manifest.add_entry(entry)
+
+        return {
+            'success': True,
+            'preserved_count': preserved_count,
+            'generated_count': generated_count,
+            'cached_count': cached_count,
+            'missing_count': missing_count,
+            'mode': mode
+        }
     
     def _extract_images_to_manifest(self, pptx_path: Path, manifest: AltManifest,
                                    generate_thumbnails: bool) -> Dict[str, Any]:
@@ -1152,6 +1337,14 @@ class ManifestProcessor:
             # Generate thumbnail
             img = Image.open(io.BytesIO(image_data))
             img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            # Convert RGBA/LA/P (with transparency) to RGB before saving as JPEG
+            original_mode = img.mode
+            if img.mode in ("RGBA", "LA"):
+                img = img.convert("RGB")
+                logger.debug(f"Converted {original_mode} to RGB for thumbnail: {thumbnail_path}")
+            elif img.mode == "P" and "transparency" in img.info:
+                img = img.convert("RGB")
+                logger.debug(f"Converted P mode with transparency to RGB for thumbnail: {thumbnail_path}")
             img.save(thumbnail_path, 'JPEG', quality=85)
             
             return thumbnail_path

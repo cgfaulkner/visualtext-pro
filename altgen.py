@@ -5,9 +5,11 @@ Unified CLI that dispatches to existing proven processors
 """
 
 import argparse
+import glob
 import sys
 import os
 import subprocess
+from pathlib import Path
 from typing import List, Optional
 
 
@@ -35,6 +37,37 @@ class ProcessorDispatcher:
         if message not in self.warnings_shown:
             print(f"Warning: {message}")
             self.warnings_shown.add(message)
+
+    def _make_relative_path(self, file_path: str) -> str:
+        """Convert absolute path to relative path (relative to project root).
+        
+        Args:
+            file_path: File path string (may be absolute or relative)
+            
+        Returns:
+            Relative path string if conversion is possible, otherwise original path
+        """
+        try:
+            path = Path(file_path)
+            
+            # If already relative, return unchanged
+            if not path.is_absolute():
+                return file_path
+            
+            # Resolve symlinks and get absolute path
+            resolved_path = path.resolve()
+            
+            # Attempt to compute relative path from project root
+            try:
+                relative_path = resolved_path.relative_to(Path(self.base_path).resolve())
+                return str(relative_path)
+            except ValueError:
+                # Path is outside project root, return original
+                return file_path
+                
+        except (OSError, ValueError):
+            # Handle errors gracefully (broken symlinks, invalid paths, etc.)
+            return file_path
 
     def setup_logging(self):
         """Setup JSONL logging if requested (altgen.py handles this)"""
@@ -73,18 +106,14 @@ class ProcessorDispatcher:
 
     def dispatch_analyze(self, file_path: str) -> int:
         """Dispatch analyze command to appropriate processor"""
-        # Pass path directly to processor - it will validate
         processor = self.select_processor()
 
         if processor == PROCESSOR_MAP["clean"]:
-            # Use clean processor's review-doc-only mode for analysis
             cmd = ["python", processor, "process", file_path, "--review-doc-only"]
         elif processor == PROCESSOR_MAP["manifest"]:
-            # Use manifest processor's review-only mode for analysis
             cmd = ["python", processor, "process", file_path, "--review-only"]
         else:
-            # For original processor, use extract command for analysis
-            cmd = ["python", processor, "extract", file_path]
+            cmd = ["python", processor, "process", file_path, "--approval-doc-only"]
 
         return self._run_processor(cmd)
 
@@ -172,7 +201,7 @@ class ProcessorDispatcher:
                     subcommand_idx = i
                     break
 
-            if subcommand_idx > 2:  # Found subcommand, insert global flags before it
+            if subcommand_idx >= 2:  # Found subcommand, insert global flags before it
                 before_subcommand = cmd[:subcommand_idx]
                 after_subcommand = cmd[subcommand_idx:]
 
@@ -286,6 +315,17 @@ def create_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument('--base-dir', default='.',
                                help='Base directory to scan (default: current directory)')
 
+    # batch
+    batch_parser = subparsers.add_parser(
+        'batch',
+        help='Batch process multiple presentations',
+        description='Process PPTX files sequentially from a folder or glob pattern.'
+    )
+    batch_parser.add_argument(
+        'target',
+        help='Folder path or glob pattern identifying PPTX files'
+    )
+
     # locks
     locks_parser = subparsers.add_parser('locks', help='Show file lock status')
     locks_parser.add_argument('--directory', default='.',
@@ -303,17 +343,57 @@ def main():
         parser = create_parser()
         args = parser.parse_args()
 
+        def run_batch(target: str, dry_run: bool) -> int:
+            """Discover and optionally process PPTX files in batch."""
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+            from batch_processor import PPTXBatchProcessor
+            from shared.path_validator import SecurityError
+
+            processor = PPTXBatchProcessor(config_path=args.config)
+
+            try:
+                files = processor.discover_files(target)
+            except (SecurityError, FileNotFoundError, ValueError) as exc:
+                print(f"Error: {exc}")
+                return 1
+
+            if not files:
+                print("No PPTX files found.")
+                return 0
+
+            print(f"Discovered {len(files)} PPTX file(s).")
+            if dry_run:
+                for file_path in files:
+                    print(f"  {file_path}")
+                return 0
+
+            result = processor.process_batch(files)
+
+            print("\nBatch complete")
+            print(f"Total: {result['total']}")
+            print(f"Succeeded: {result['succeeded']}")
+            print(f"Failed: {result['failed']}")
+
+            if result['errors']:
+                print("\nErrors:")
+                for error in result['errors']:
+                    print(f"  {error['file']}: {error['error']}")
+
+            return 0 if result['failed'] == 0 else 1
+
         if not args.command:
             parser.print_help()
             return 1
 
         # Validate file/directory exists
         if args.command in ['process', 'analyze', 'inject', 'audit']:
-            if not os.path.exists(args.path):
+            has_glob = glob.has_magic(args.path) if args.command == 'process' else False
+            if not has_glob and not os.path.exists(args.path):
                 print(f"Error: File or directory not found: {args.path}")
                 return 1
 
-            if args.command in ['process', 'analyze', 'inject'] and os.path.isfile(args.path):
+            if (args.command in ['process', 'analyze', 'inject'] and
+                    not has_glob and os.path.isfile(args.path)):
                 if not args.path.lower().endswith(('.pptx', '.ppt')):
                     print(f"Error: File must be a PowerPoint presentation (.pptx or .ppt): {args.path}")
                     return 1
@@ -326,9 +406,48 @@ def main():
             dispatcher.setup_logging()
 
         if args.command == 'analyze':
-            return dispatcher.dispatch_analyze(args.path)
+            has_glob = glob.has_magic(args.path)
+            if has_glob or os.path.isdir(args.path):
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+                from batch_processor import PPTXBatchProcessor
+                from shared.path_validator import SecurityError
+
+                batch_processor = PPTXBatchProcessor(config_path=args.config)
+
+                try:
+                    files = batch_processor.discover_files(args.path)
+                except (SecurityError, FileNotFoundError, ValueError) as exc:
+                    print(f"Error: {exc}")
+                    return 1
+
+                if not files:
+                    print("No PPTX files found.")
+                    return 0
+
+                print(f"Discovered {len(files)} PPTX file(s).")
+
+                if args.dry_run:
+                    for file_path in files:
+                        print(f"  {file_path}")
+                    return 0
+
+                result_code = 0
+                for file_path in files:
+                    print(f"Analyzing: {file_path}")
+                    relative_path = dispatcher._make_relative_path(str(file_path))
+                    exit_code = dispatcher.dispatch_analyze(relative_path)
+                    result_code = result_code or exit_code
+
+                return result_code
+
+            relative_path = dispatcher._make_relative_path(args.path)
+            return dispatcher.dispatch_analyze(relative_path)
 
         elif args.command == 'process':
+            has_glob = glob.has_magic(args.path)
+            if has_glob or os.path.isdir(args.path):
+                return run_batch(args.path, args.dry_run)
+
             return dispatcher.dispatch_process(args.path)
 
         elif args.command == 'inject':
@@ -376,6 +495,9 @@ def main():
                 return 1
 
             return 0
+
+        elif args.command == 'batch':
+            return run_batch(args.target, args.dry_run)
 
         elif args.command == 'locks':
             # Import lock utilities
