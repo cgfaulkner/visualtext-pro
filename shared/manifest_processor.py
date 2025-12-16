@@ -268,11 +268,21 @@ class ManifestProcessor:
         """
         logger.info("Phase 2: Rendering slides and generating crops")
         
+        # Detect win32com availability (Windows only)
+        win32_available = False
+        try:
+            import win32com.client
+            win32_available = True
+        except ImportError:
+            logger.debug(
+                "win32com not available — skipping PowerPoint slide rendering "
+                "(non-Windows environment)"
+            )
+        
         try:
             from pptx import Presentation
             from PIL import Image, ImageDraw
             import io
-            import win32com.client  # For Windows slide rendering
             import time
             import tempfile
             
@@ -286,13 +296,16 @@ class ManifestProcessor:
             
             # Try to use PowerPoint COM for high-quality rendering (Windows)
             slide_images = {}
-            try:
-                slide_images = self._render_slides_with_powerpoint(pptx_path, target_width=1920)
-                logger.info(f"Rendered {len(slide_images)} slides using PowerPoint COM")
-            except Exception as e:
-                logger.warning(f"PowerPoint COM rendering failed: {e}")
-                # Fallback to python-pptx basic rendering would go here
-                logger.info("Falling back to basic shape-by-shape processing")
+            if win32_available:
+                try:
+                    slide_images = self._render_slides_with_powerpoint(pptx_path, target_width=1920)
+                    logger.info(f"Rendered {len(slide_images)} slides using PowerPoint COM")
+                except Exception as e:
+                    logger.warning(f"PowerPoint COM rendering failed: {e}")
+                    slide_images = {}
+                    logger.info("Falling back to image-only thumbnail extraction")
+            else:
+                slide_images = {}
             
             # Process each manifest entry
             for entry in manifest.get_all_entries():
