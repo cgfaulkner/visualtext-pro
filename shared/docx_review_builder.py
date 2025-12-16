@@ -59,7 +59,9 @@ def generate_alt_review_doc(
     
     Args:
         visual_index_path: Path to visual_index.json from Phase 1
-        current_alt_by_key_path: Path to current_alt_by_key.json from Phase 1
+        current_alt_by_key_path: Path to current_alt_by_key.json from Phase 1 (optional).
+            If not provided or file is missing, current ALT text will be derived from
+            visual_index entries (current_alt, existing_alt, or current_alt_text fields).
         final_alt_map_path: Path to final_alt_map.json from Phase 3
         out_docx: Output path for DOCX file
         portrait: If True, use portrait layout with fixed column widths
@@ -70,13 +72,10 @@ def generate_alt_review_doc(
     """
     logger.info(f"Building DOCX review document: {out_docx}")
     
-    # Load the three JSON artifacts
+    # Load required JSON artifacts
     try:
         with open(visual_index_path, 'r', encoding='utf-8') as f:
             visual_index = json.load(f)
-        
-        with open(current_alt_by_key_path, 'r', encoding='utf-8') as f:
-            current_alt_by_key = json.load(f)
             
         with open(final_alt_map_path, 'r', encoding='utf-8') as f:
             final_alt_map = json.load(f)
@@ -84,8 +83,31 @@ def generate_alt_review_doc(
         final_alt_map = normalize_final_alt_map(final_alt_map)
 
     except Exception as e:
-        logger.error(f"Failed to load pipeline artifacts: {e}")
+        logger.error(f"Failed to load required pipeline artifacts: {e}")
         raise RuntimeError(f"Could not load required JSON files: {e}")
+    
+    # Load optional current_alt_by_key.json (legacy file)
+    # If missing, will be derived from visual_index below
+    current_alt_by_key = {}
+    try:
+        with open(current_alt_by_key_path, 'r', encoding='utf-8') as f:
+            current_alt_by_key = json.load(f)
+        logger.debug(f"Loaded current_alt_by_key from {current_alt_by_key_path}")
+    except (FileNotFoundError, IOError, json.JSONDecodeError) as e:
+        logger.debug(f"current_alt_by_key.json not found or invalid: {e}. Will derive from visual_index.")
+    
+    # Derive current_alt_by_key from visual_index if file wasn't loaded
+    if not current_alt_by_key:
+        current_alt_by_key = {}
+        for instance_key, entry in visual_index.items():
+            current_alt = (
+                entry.get("current_alt")
+                or entry.get("existing_alt")
+                or entry.get("current_alt_text")
+                or ""
+            ).strip()
+            if current_alt:
+                current_alt_by_key[instance_key] = current_alt
     
     if not visual_index:
         logger.warning("No images found in visual_index")
