@@ -207,6 +207,7 @@ batch_processing:
   progress_update_interval: 5     # Print progress update every N files
   stop_on_error_threshold: 0.5    # Stop batch if failure rate exceeds this (0.0-1.0, 0.5 = 50%)
   dry_run_validates_ollama: true  # Check LLaVA connectivity during dry-run
+  file_timeout_seconds: 300        # Timeout for individual file processing (seconds)
 
   # Output configuration
   complete_folder_name: "Complete"           # Folder name at project root

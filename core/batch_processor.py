@@ -14,6 +14,7 @@ import glob
 import logging
 import subprocess
 import sys
+import yaml
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -31,6 +32,7 @@ class PPTXBatchProcessor:
     def __init__(self, config_path: str | None = None, processor_path: Path | None = None):
         self.config_path = config_path
         self.processor_path = self._resolve_processor(processor_path)
+        self._timeout = self._load_timeout()
 
     def discover_files(self, target: str) -> List[Path]:
         """Discover PPTX files from a folder or glob pattern.
@@ -123,12 +125,68 @@ class PPTXBatchProcessor:
         if self.config_path and self.config_path != "config.yaml":
             cmd.extend(["--config", self.config_path])
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self._timeout
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Capture stdout/stderr from the TimeoutExpired exception if available
+            # Note: TimeoutExpired.stdout/stderr are bytes even when text=True
+            stdout = ""
+            stderr = ""
+            if exc.stdout:
+                stdout = exc.stdout.decode("utf-8") if isinstance(exc.stdout, bytes) else str(exc.stdout)
+            if exc.stderr:
+                stderr = exc.stderr.decode("utf-8") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+            
+            logger.error(
+                "Subprocess timeout for file: %s (timeout: %d seconds)",
+                file_path.name,
+                self._timeout,
+            )
+            logger.error("Command: %s", " ".join(cmd))
+            logger.error("stdout: %s", stdout if stdout else "(empty)")
+            logger.error("stderr: %s", stderr if stderr else "(empty)")
+            
+            return {
+                "success": False,
+                "error": f"Processing timed out after {self._timeout} seconds",
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        except Exception as exc:
+            logger.error(
+                "Subprocess exception for file: %s: %s", file_path.name, exc
+            )
+            logger.error("Command: %s", " ".join(cmd))
+            logger.error("Exception type: %s", type(exc).__name__)
+            
+            return {
+                "success": False,
+                "error": f"Subprocess exception: {str(exc)}",
+                "stdout": "",
+                "stderr": "",
+            }
 
         if result.returncode == 0:
             return {"success": True, "output": result.stdout}
 
-        return {"success": False, "error": result.stderr or "Processing failed"}
+        # Non-zero return code - log full output
+        logger.error(
+            "Subprocess failed for file: %s (returncode: %d)",
+            file_path.name,
+            result.returncode,
+        )
+        logger.error("Command: %s", " ".join(cmd))
+        logger.error("stdout: %s", result.stdout if result.stdout else "(empty)")
+        logger.error("stderr: %s", result.stderr if result.stderr else "(empty)")
+
+        return {
+            "success": False,
+            "error": result.stderr or result.stdout or "Processing failed",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
 
     @staticmethod
     def _split_glob(pattern: str) -> Tuple[Path, str]:
@@ -148,6 +206,56 @@ class PPTXBatchProcessor:
         base_dir = Path(*base_parts) if base_parts else Path(".")
         remaining_pattern = str(Path(*pattern_parts)) if pattern_parts else "*.pptx"
         return base_dir, remaining_pattern
+
+    def _load_timeout(self) -> int:
+        """Load timeout from config.yaml with fallback to default.
+
+        Returns:
+            Timeout in seconds (default: 300).
+        """
+        default_timeout = 300
+        config_file = None
+
+        # Determine config file path
+        if self.config_path:
+            config_file = Path(self.config_path)
+        else:
+            # Look for config.yaml in project root
+            project_root = Path(__file__).resolve().parents[1]
+            config_file = project_root / "config.yaml"
+
+        if not config_file or not config_file.exists():
+            logger.debug(
+                "Config file not found, using default timeout: %d seconds",
+                default_timeout,
+            )
+            return default_timeout
+
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            
+            timeout = (
+                config.get("batch_processing", {})
+                .get("file_timeout_seconds", default_timeout)
+            )
+            
+            if not isinstance(timeout, int) or timeout <= 0:
+                logger.warning(
+                    "Invalid timeout value in config, using default: %d seconds",
+                    default_timeout,
+                )
+                return default_timeout
+            
+            logger.debug("Loaded timeout from config: %d seconds", timeout)
+            return timeout
+        except Exception as exc:
+            logger.warning(
+                "Error loading timeout from config (%s), using default: %d seconds",
+                exc,
+                default_timeout,
+            )
+            return default_timeout
 
     @staticmethod
     def _resolve_processor(custom_path: Path | None) -> Path:
