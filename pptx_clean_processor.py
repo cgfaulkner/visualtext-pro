@@ -318,7 +318,7 @@ def cmd_process(args) -> int:
                     review_output = str(input_path.with_suffix('.review.docx'))
             
             # Generate review document
-            title = args.title or input_path.stem
+            title = getattr(args, "title", None) or input_path.stem
             generate_alt_review_doc(
                 str(artifacts.visual_index_path),
                 str(artifacts.current_alt_by_key_path),
