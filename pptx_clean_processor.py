@@ -275,8 +275,8 @@ def cmd_process(args) -> int:
 
         # Get ALT text generator
         # Import here to avoid circular dependencies
-        from unified_alt_generator import UnifiedAltGenerator
-        alt_generator = UnifiedAltGenerator(config_manager)
+        from unified_alt_generator import FlexibleAltGenerator
+        alt_generator = FlexibleAltGenerator(config_manager)
         
         # Run three-phase pipeline
         artifacts = run_pipeline(
