@@ -19,6 +19,7 @@ from alt_manifest import (
 )
 from shape_utils import is_image_like, is_decorative_shape, is_empty_placeholder_textbox
 from alt_text_reader import read_existing_alt
+from shape_renderer import ShapeRenderer
 
 if TYPE_CHECKING:
     import win32com.client  # type: ignore
@@ -354,14 +355,109 @@ class ManifestProcessor:
                                 manifest.add_entry(entry)
                                 continue
                         
-                        # For non-pictures without slide rendering, skip
-                        logger.warning(f"Cannot process {entry.instance_key} without slide rendering")
-                        entry.rasterizer_info = {
-                            "engine": "none",
-                            "dpi": 0,
-                            "status": "no_slide_render"
-                        }
-                        rendering_errors.append(f"No slide rendering available for {entry.instance_key}")
+                        # For non-pictures, try to render using ShapeRenderer
+                        shape = self._find_shape_by_instance_key(prs, entry)
+                        if not shape:
+                            logger.warning(f"Could not find shape for {entry.instance_key}")
+                            entry.rasterizer_info = {
+                                "engine": "none",
+                                "dpi": 0,
+                                "status": "shape_not_found"
+                            }
+                            rendering_errors.append(f"Shape not found for {entry.instance_key}")
+                            manifest.add_entry(entry)
+                            continue
+                        
+                        # Check for embedded image in AUTO_SHAPE (some auto shapes have image fills)
+                        if entry.shape_type == "AUTO_SHAPE" and hasattr(shape, 'image') and shape.image:
+                            image_data = shape.image.blob
+                            
+                            # Create thumbnail
+                            thumbnail_path = artifacts.thumbs_dir / f"{entry.instance_key}.jpg"
+                            self._create_thumbnail_from_bytes(image_data, thumbnail_path)
+                            entry.thumb_path = str(thumbnail_path)
+                            thumbnails_created += 1
+                            
+                            # Use original image as crop
+                            crop_path = artifacts.crops_dir / f"{entry.instance_key}.png"
+                            with open(crop_path, 'wb') as f:
+                                f.write(image_data)
+                            entry.crop_path = str(crop_path)
+                            crops_created += 1
+                            
+                            # Update content_key with actual image data
+                            entry.content_key = create_content_key(image_data)
+                            entry.rasterizer_info = {
+                                "engine": "direct_extract",
+                                "dpi": 0,
+                                "status": "success"
+                            }
+                            
+                            manifest.add_entry(entry)
+                            continue
+                        
+                        # Render shape to image using ShapeRenderer
+                        renderer = ShapeRenderer()
+                        bbox = entry.bbox
+                        if not bbox or not all(bbox.get(k, 0) > 0 for k in ['width', 'height']):
+                            logger.warning(f"Invalid bbox for {entry.instance_key}: {bbox}")
+                            entry.rasterizer_info = {
+                                "engine": "shape_renderer",
+                                "dpi": 0,
+                                "status": "invalid_bbox"
+                            }
+                            rendering_errors.append(f"Invalid bbox for {entry.instance_key}")
+                            manifest.add_entry(entry)
+                            continue
+                        
+                        # Convert bbox from points to pixels (96 DPI)
+                        width_px = max(int(bbox.get('width', 0) * 96 / 72), 50)
+                        height_px = max(int(bbox.get('height', 0) * 96 / 72), 50)
+                        
+                        if entry.shape_type == "GROUP":
+                            rendered_img = renderer.render_group_shape(shape, bbox)
+                        else:
+                            rendered_img = renderer.render_shape_to_image(shape, width_px, height_px)
+                        
+                        if rendered_img:
+                            # Convert PIL Image to bytes
+                            import io
+                            img_bytes = io.BytesIO()
+                            rendered_img.save(img_bytes, format='PNG')
+                            image_data = img_bytes.getvalue()
+                            
+                            # Create thumbnail
+                            thumbnail_path = artifacts.thumbs_dir / f"{entry.instance_key}.jpg"
+                            self._create_thumbnail_from_bytes(image_data, thumbnail_path)
+                            entry.thumb_path = str(thumbnail_path)
+                            thumbnails_created += 1
+                            
+                            # Save crop
+                            crop_path = artifacts.crops_dir / f"{entry.instance_key}.png"
+                            with open(crop_path, 'wb') as f:
+                                f.write(image_data)
+                            entry.crop_path = str(crop_path)
+                            crops_created += 1
+                            
+                            # Update content_key with rendered image data
+                            entry.content_key = create_content_key(image_data)
+                            entry.rasterizer_info = {
+                                "engine": "shape_renderer",
+                                "dpi": 96,
+                                "status": "success"
+                            }
+                            
+                            manifest.add_entry(entry)
+                            logger.debug(f"Rendered {entry.shape_type} shape {entry.instance_key} to thumbnail")
+                        else:
+                            logger.warning(f"Failed to render {entry.instance_key}")
+                            entry.rasterizer_info = {
+                                "engine": "shape_renderer",
+                                "dpi": 0,
+                                "status": "render_failed"
+                            }
+                            rendering_errors.append(f"Shape rendering failed for {entry.instance_key}")
+                            manifest.add_entry(entry)
                         continue
                     
                     # Create crop from slide image using bbox
