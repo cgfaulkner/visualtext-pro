@@ -122,7 +122,8 @@ def phase1_scan(pptx_path: Path, artifacts: RunArtifacts,
                 'bbox': entry.bbox,
                 'format': entry.format,
                 'width_px': entry.width_px,
-                'height_px': entry.height_px
+                'height_px': entry.height_px,
+                'thumbnail_path': entry.thumb_path or entry.thumbnail_path or ""
             }
             visual_index[entry.instance_key] = visual_entry
             
@@ -159,6 +160,93 @@ def phase1_scan(pptx_path: Path, artifacts: RunArtifacts,
             'success': False,
             'error': str(e),
             'total_images': 0
+        }
+
+
+def phase1_5_render_thumbnails(pptx_path: Path, artifacts: RunArtifacts,
+                                llava_include_shapes: str = "smart",
+                                max_shapes_per_slide: int = 5,
+                                min_shape_area: str = "1%") -> Dict[str, Any]:
+    """
+    Phase 1.5: Render thumbnails and crops for all visual elements.
+    
+    This phase generates thumbnails and crops needed for:
+    - ALT text generation (Phase 2)
+    - DOCX review document generation
+    
+    Always runs, even in review-doc-only mode, but does NOT modify PPTX files.
+    
+    Args:
+        pptx_path: Path to PPTX file
+        artifacts: RunArtifacts for managing file paths
+        llava_include_shapes: Shape inclusion strategy (off/smart/all)
+        max_shapes_per_slide: Maximum shapes per slide
+        min_shape_area: Minimum shape area threshold
+        
+    Returns:
+        Dictionary with rendering results
+    """
+    logger.info("Phase 1.5: Rendering thumbnails and crops")
+    
+    try:
+        # Load manifest (automatically loads existing entries in __init__)
+        manifest = AltManifest(artifacts.get_manifest_path())
+        
+        # Create processor with same configuration as Phase 1
+        from manifest_processor import ManifestProcessor
+        processor = ManifestProcessor(
+            config_manager=None,
+            alt_generator=None,
+            llava_include_shapes=llava_include_shapes,
+            max_shapes_per_slide=max_shapes_per_slide,
+            min_shape_area=min_shape_area
+        )
+        
+        # Render thumbnails and crops
+        render_result = processor.phase2_render_and_generate_crops(
+            pptx_path, manifest, artifacts
+        )
+        
+        if not render_result.get('success', False):
+            logger.warning(f"Thumbnail rendering failed: {render_result.get('error', 'Unknown error')}")
+            return render_result
+        
+        # Save manifest (entries now have thumb_path set)
+        manifest.save()
+        
+        # Update visual_index with thumbnail paths
+        visual_index = artifacts.load_visual_index()
+        thumbnails_updated = 0
+        
+        for entry in manifest.get_all_entries():
+            if entry.instance_key in visual_index:
+                # Prefer thumb_path (schema 2.0), fallback to thumbnail_path (legacy)
+                thumb_path = entry.thumb_path or entry.thumbnail_path or ""
+                if thumb_path:
+                    visual_index[entry.instance_key]['thumbnail_path'] = thumb_path
+                    thumbnails_updated += 1
+        
+        # Save updated visual_index
+        artifacts.save_visual_index(visual_index)
+        
+        result = {
+            'success': True,
+            'thumbnails_created': render_result.get('thumbnails_created', 0),
+            'crops_created': render_result.get('crops_created', 0),
+            'thumbnails_updated': thumbnails_updated,
+            'rendering_errors': render_result.get('rendering_errors', [])
+        }
+        
+        logger.info(f"Phase 1.5 complete: {result['thumbnails_created']} thumbnails created, "
+                   f"{thumbnails_updated} visual_index entries updated")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Phase 1.5 failed: {e}", exc_info=True)
+        return {
+            'success': False,
+            'error': str(e),
+            'thumbnails_created': 0
         }
 
 
@@ -404,6 +492,14 @@ def run_pipeline(pptx_path: Path, config, alt_generator,
                 scan_result = phase1_scan(pptx_path, artifacts)
                 if not scan_result['success']:
                     raise RuntimeError(f"Phase 1 failed: {scan_result.get('error', 'Unknown error')}")
+
+                # Phase 1.5: Render thumbnails (always runs, even in review-doc-only mode)
+                render_result = phase1_5_render_thumbnails(pptx_path, artifacts)
+                if not render_result.get('success', False):
+                    logger.warning(f"Thumbnail rendering had issues: {render_result.get('error', 'Unknown error')}")
+                    # Don't fail pipeline - thumbnails are helpful but not critical
+                else:
+                    logger.info(f"Thumbnails rendered: {render_result.get('thumbnails_created', 0)} created")
 
                 # Phase 2: Generate (only if images need ALT text)
                 if scan_result['total_images'] > scan_result['images_with_current_alt']:
