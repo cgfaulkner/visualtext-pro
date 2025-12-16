@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from alt_manifest import (
     AltManifest, AltManifestEntry, compute_image_hash, create_stable_key,
@@ -19,6 +19,11 @@ from alt_manifest import (
 )
 from shape_utils import is_image_like, is_decorative_shape, is_empty_placeholder_textbox
 from alt_text_reader import read_existing_alt
+
+if TYPE_CHECKING:
+    import win32com.client  # type: ignore
+
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +276,7 @@ class ManifestProcessor:
         # Detect win32com availability (Windows only)
         win32_available = False
         try:
-            import win32com.client
+            import win32com.client  # type: ignore
             win32_available = True
         except ImportError:
             logger.debug(
@@ -453,8 +458,6 @@ class ManifestProcessor:
             Dictionary mapping slide_idx -> PIL Image
         """
         import tempfile
-        import win32com.client
-        from PIL import Image
         
         slide_images = {}
         
@@ -462,6 +465,7 @@ class ManifestProcessor:
             temp_dir_path = Path(temp_dir)
             
             try:
+                import win32com.client  # type: ignore
                 # Initialize PowerPoint
                 ppt = win32com.client.Dispatch("PowerPoint.Application")
                 ppt.Visible = False
@@ -496,12 +500,17 @@ class ManifestProcessor:
         try:
             slide = prs.slides[entry.slide_idx]
             # Extract shape_id from instance_key
+            # Format: slide_X_shape_Y -> ["slide", "X", "shape", "Y"]
             parts = entry.instance_key.split('_')
-            if len(parts) >= 3:
-                shape_id = int(parts[2])  # slide_X_shape_Y -> Y
-                for shape in slide.shapes:
-                    if getattr(shape, 'shape_id', 0) == shape_id:
-                        return shape
+            if len(parts) >= 4:
+                try:
+                    shape_id = int(parts[3])  # slide_X_shape_Y -> Y (at index 3)
+                    for shape in slide.shapes:
+                        if getattr(shape, 'shape_id', 0) == shape_id:
+                            return shape
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Invalid instance_key format: {entry.instance_key} - {e}")
+                    return None
         except Exception as e:
             logger.debug(f"Could not find shape for {entry.instance_key}: {e}")
         return None
