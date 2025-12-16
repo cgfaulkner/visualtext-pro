@@ -397,6 +397,14 @@ class ManifestProcessor:
                     thumbnail_path = artifacts.thumbs_dir / f"{entry.instance_key}.jpg" 
                     thumbnail_img = crop_img.copy()
                     thumbnail_img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                    # Convert RGBA/LA/P (with transparency) to RGB before saving as JPEG
+                    original_mode = thumbnail_img.mode
+                    if thumbnail_img.mode in ("RGBA", "LA"):
+                        thumbnail_img = thumbnail_img.convert("RGB")
+                        logger.debug(f"Converted {original_mode} to RGB for thumbnail: {thumbnail_path}")
+                    elif thumbnail_img.mode == "P" and "transparency" in thumbnail_img.info:
+                        thumbnail_img = thumbnail_img.convert("RGB")
+                        logger.debug(f"Converted P mode with transparency to RGB for thumbnail: {thumbnail_path}")
                     thumbnail_img.save(thumbnail_path, 'JPEG', quality=85)
                     entry.thumb_path = str(thumbnail_path)
                     thumbnails_created += 1
@@ -523,6 +531,14 @@ class ManifestProcessor:
             
             img = Image.open(io.BytesIO(image_data))
             img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            # Convert RGBA/LA/P (with transparency) to RGB before saving as JPEG
+            original_mode = img.mode
+            if img.mode in ("RGBA", "LA"):
+                img = img.convert("RGB")
+                logger.debug(f"Converted {original_mode} to RGB for thumbnail: {thumbnail_path}")
+            elif img.mode == "P" and "transparency" in img.info:
+                img = img.convert("RGB")
+                logger.debug(f"Converted P mode with transparency to RGB for thumbnail: {thumbnail_path}")
             img.save(thumbnail_path, 'JPEG', quality=85)
             
         except Exception as e:
@@ -1225,6 +1241,14 @@ class ManifestProcessor:
             # Generate thumbnail
             img = Image.open(io.BytesIO(image_data))
             img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            # Convert RGBA/LA/P (with transparency) to RGB before saving as JPEG
+            original_mode = img.mode
+            if img.mode in ("RGBA", "LA"):
+                img = img.convert("RGB")
+                logger.debug(f"Converted {original_mode} to RGB for thumbnail: {thumbnail_path}")
+            elif img.mode == "P" and "transparency" in img.info:
+                img = img.convert("RGB")
+                logger.debug(f"Converted P mode with transparency to RGB for thumbnail: {thumbnail_path}")
             img.save(thumbnail_path, 'JPEG', quality=85)
             
             return thumbnail_path

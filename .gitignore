@@ -7,12 +7,14 @@ __pycache__/
 .DS_Store
 visualtext-pro/
 logs/
-Documents to Review/
-tests/
+Documents_to_Review/
+Backup/
 tests/
 tests/test_alt_normalization.py
 debug/
+Temp/
 Reviewed Reports/
+Slides to Review/
 Complete/
 
 # C extensions
@@ -217,3 +219,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.claude_docs/pdf-alt.code-workspace
