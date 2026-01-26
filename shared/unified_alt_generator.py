@@ -2,6 +2,8 @@
 Flexible ALT text generator using a local LLaVA model.
 """
 
+from __future__ import annotations
+
 # --- repo/package import bootstrap (top of shared/unified_alt_generator.py) ---
 from pathlib import Path as _P
 import sys as _sys
@@ -38,11 +40,17 @@ import base64
 import json
 import psutil
 import platform
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 from pathlib import Path
 from abc import ABC, abstractmethod
 import time
 from urllib.parse import urljoin
+
+if TYPE_CHECKING:
+    try:
+        from .alt_manifest import AltManifest
+    except ImportError:
+        from alt_manifest import AltManifest
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +628,7 @@ class FlexibleAltGenerator:
                          custom_prompt: Optional[str] = None,
                          force_provider: Optional[str] = None,
                          return_metadata: bool = False,
-                         manifest: Optional['AltManifest'] = None,
+                         manifest: Optional[AltManifest] = None,
                          entry_key: Optional[str] = None) -> Optional[str]:
         """
         Generate ALT text using the provider fallback chain with manifest integration.
@@ -1681,8 +1689,15 @@ def generate_alt_text_unified(image_path: str,
                              prompt: Optional[str] = None,
                              provider: Optional[str] = None,
                              config_manager: Optional[ConfigManager] = None,
-                             debug: bool = False) -> Optional[str]:
+                             debug: Optional[bool] = None) -> Optional[str]:
     """Unified ALT text generation function for backwards compatibility."""
+    # Determine debug value: use parameter if provided, otherwise check config, default to False
+    if debug is None:
+        if config_manager:
+            debug = config_manager.config.get('logging', {}).get('debug', False)
+        else:
+            debug = False
+    
     if debug:
         logger.setLevel(logging.DEBUG)
         
