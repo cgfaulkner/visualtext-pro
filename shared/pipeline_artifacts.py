@@ -116,6 +116,9 @@ class RunArtifacts:
     crops_dir: Path                     # crops/ (NEW: model input images)
     manifest_path: Path                 # manifest.json (NEW: single source of truth)
 
+    # Phase 1.9: Selector artifacts
+    selector_manifest_path: Path        # selector/selector_manifest.json
+
     # Phase 2: Generate artifacts
     generated_alt_by_key_path: Path     # generate/generated_alt_by_key.json
 
@@ -154,6 +157,7 @@ class RunArtifacts:
         (run_dir / "resolve").mkdir(exist_ok=True)
         (run_dir / "thumbs").mkdir(exist_ok=True)
         (run_dir / "crops").mkdir(exist_ok=True)
+        (run_dir / "selector").mkdir(exist_ok=True)
 
         return cls(
             run_dir=run_dir,
@@ -163,6 +167,7 @@ class RunArtifacts:
             thumbs_dir=run_dir / "thumbs",
             crops_dir=run_dir / "crops",
             manifest_path=run_dir / "manifest.json",
+            selector_manifest_path=run_dir / "selector" / "selector_manifest.json",
             generated_alt_by_key_path=run_dir / "generate" / "generated_alt_by_key.json",
             final_alt_map_path=run_dir / "resolve" / "final_alt_map.json",
             cleanup_on_exit=cleanup_on_exit
