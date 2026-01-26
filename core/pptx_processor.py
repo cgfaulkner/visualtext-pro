@@ -1401,6 +1401,11 @@ class PPTXAccessibilityProcessor:
             indent: Indentation string for nested shapes
             slide_idx: Current slide index for context
         """
+        # Define debug in narrowest scope: use instance variable or check config, default to False
+        debug = getattr(self, 'debug', False)
+        if not debug and self.config_manager:
+            debug = self.config_manager.config.get('logging', {}).get('debug', False)
+        
         total_shapes = len(shapes) if hasattr(shapes, '__len__') else 0
         if slide_idx is not None and not indent:
             logger.debug(f"🔍 Slide {slide_idx + 1}: Found {total_shapes} top-level shapes")
