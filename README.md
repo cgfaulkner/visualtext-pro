@@ -261,6 +261,10 @@ prompts:
 - **Corrupted Presentations**: Graceful failure with detailed error reporting
 - **Partial Processing**: Resume capability from manifest checkpoints
 
+### CI
+- CI is enabled (Python application)
+- Archival code under core/backup/ and old_project/ is excluded from linting.
+
 ## Troubleshooting
 
 ### Common Issues
