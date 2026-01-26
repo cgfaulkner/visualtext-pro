@@ -1,0 +1,36 @@
+name: Validate Selector Schema
+
+on:
+  push:
+    branches: [ main, develop, 'feat/**' ]
+    paths:
+      - 'schemas/selector_manifest.schema.json'
+      - 'tests/fixtures/selector/**/*.golden'
+      - '.github/workflows/validate-selector-schema.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'schemas/selector_manifest.schema.json'
+      - 'tests/fixtures/selector/**/*.golden'
+      - '.github/workflows/validate-selector-schema.yml'
+
+jobs:
+  validate-golden-jsons:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          pip install jsonschema
+      
+      - name: Validate golden JSONs against schema
+        run: |
+          python tools/validate_selector_manifest.py tests/fixtures/selector/group_basic/selector_manifest.json.golden
+          python tools/validate_selector_manifest.py tests/fixtures/selector/overlay_arrow_on_image/selector_manifest.json.golden
+          python tools/validate_selector_manifest.py tests/fixtures/selector/placeholder_alt_cases/selector_manifest.json.golden

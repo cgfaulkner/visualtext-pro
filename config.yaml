@@ -138,6 +138,37 @@ pre_flight:
   fail_fast_on_error: true
   performance_baseline_threshold: 10.0  # seconds
 
+# Smart Selector configuration (governs selection, escalation, and manifest validation)
+# ALT values matching these patterns or shorter than min_meaningful_alt_chars
+# are treated as non-meaningful placeholders
+
+selector:
+  enabled: true
+  selector_version: "v1.0-rc"          # default until a production release bumps this
+  schema_path: "schemas/selector_manifest.schema.json"
+  allow_legacy: false                  # block if schema / selector_version mismatch
+  placeholder_alt_patterns:
+    - "(?i)click to add"
+    - "(?i)image"
+    - "(?i)placeholder"
+    - "^figure\\s*\\d+"
+  min_meaningful_alt_chars: 15
+  enable_conversion_handlers: false
+  conversion_tools:
+    wmf_to_png: false
+    inkscape_cmd: "inkscape"
+  overlay_detection:
+    enabled: true
+    overlay_impact_threshold: 0.02     # fraction of target area (e.g., 2%)
+    overlay_smallness_penalty: 0.5     # tuning weight
+  escalation_default: "include_with_ambiguous_reason" # or "defer_to_manual_review"
+  render_and_assist_enabled: false
+  render_and_assist_max_per_batch: 2   # safety limit
+  auto_mode_heuristics:
+    prefer_scientific_if_contains: ["CHART","SMARTART"]
+    prefer_presentation_if_image_density_gt: 0.2  # fraction of slides with pictures
+    keyword_threshold_for_scientific: 3
+
 # PDF Processing Configuration
 pdf_processing:
   # Use ReportLab recreation workflow for better accessibility (recommended)

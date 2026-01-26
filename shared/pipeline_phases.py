@@ -14,6 +14,7 @@ This ensures single source of truth and eliminates double LLaVA calls.
 
 from __future__ import annotations
 import hashlib
+import json
 import logging
 import time
 from pathlib import Path
@@ -453,6 +454,90 @@ def phase3_resolve(artifacts: RunArtifacts) -> Dict[str, Any]:
         }
 
 
+def phase1_9_run_selector(pptx_path: Path, artifacts: RunArtifacts, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Phase 1.9: Run Smart Selector to determine which visual elements should receive ALT text.
+    
+    This phase runs before ALT generation (Phase 2) and:
+    1. Calls run_selector() to generate selector_manifest.json
+    2. Validates manifest against schema
+    3. Flags files for manual review if escalation_strategy == defer_to_manual_review
+    
+    Args:
+        pptx_path: Path to PPTX file
+        artifacts: RunArtifacts for managing file paths
+        config: Configuration dictionary
+        
+    Returns:
+        Dictionary with success, manifest_path, decisions_count, manual_review_flagged, manual_review_count
+    """
+    logger.info("Phase 1.9: Running Smart Selector")
+    
+    try:
+        # Import selector
+        from .selector import run_selector
+        import jsonschema
+        
+        # Run selector - writes to artifacts.selector_manifest_path
+        manifest_path = run_selector(pptx_path, config, output_path=artifacts.selector_manifest_path)
+        
+        # Load manifest for validation
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        
+        # Validate against schema
+        schema_path = Path(__file__).parent.parent / "schemas" / "selector_manifest.schema.json"
+        if not schema_path.exists():
+            raise RuntimeError(f"Schema file not found: {schema_path}")
+        
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            schema = json.load(f)
+        
+        try:
+            resolver = jsonschema.RefResolver(
+                base_uri=f"file://{schema_path.resolve()}",
+                referrer=schema
+            )
+            jsonschema.validate(instance=manifest, schema=schema, resolver=resolver)
+            logger.info("Selector manifest validated against schema")
+        except jsonschema.ValidationError as ve:
+            error_msg = f"Selector manifest failed schema validation: {ve.message}"
+            if ve.path:
+                error_msg += f" at path: {' -> '.join(str(p) for p in ve.path)}"
+            logger.error(error_msg)
+            raise RuntimeError(f"Schema validation failed (bug): {error_msg}")
+        
+        # Check for manual review flags
+        manual_review_count = 0
+        for record in manifest:
+            if record.get("escalation_strategy") == "defer_to_manual_review":
+                manual_review_count += 1
+        
+        if manual_review_count > 0:
+            logger.warning(f"Selector flagged {manual_review_count} element(s) for manual review")
+        
+        result = {
+            'success': True,
+            'manifest_path': manifest_path,
+            'decisions_count': len(manifest),
+            'manual_review_flagged': manual_review_count > 0,
+            'manual_review_count': manual_review_count,
+        }
+        
+        logger.info(f"Phase 1.9 complete: {len(manifest)} decisions, {manual_review_count} requiring manual review")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Phase 1.9 failed: {e}", exc_info=True)
+        return {
+            'success': False,
+            'error': str(e),
+            'decisions_count': 0,
+            'manual_review_flagged': False,
+            'manual_review_count': 0,
+        }
+
+
 def run_pipeline(pptx_path: Path, config, alt_generator,
                 force_regenerate: bool = False,
                 cleanup_on_exit: bool = True) -> RunArtifacts:
@@ -500,6 +585,13 @@ def run_pipeline(pptx_path: Path, config, alt_generator,
                     # Don't fail pipeline - thumbnails are helpful but not critical
                 else:
                     logger.info(f"Thumbnails rendered: {render_result.get('thumbnails_created', 0)} created")
+
+                # Phase 1.9: Run Smart Selector (before ALT generation)
+                selector_result = phase1_9_run_selector(pptx_path, artifacts, config)
+                if not selector_result['success']:
+                    raise RuntimeError(f"Phase 1.9 failed: {selector_result.get('error', 'Unknown error')}")
+                if selector_result.get('manual_review_flagged'):
+                    logger.warning(f"File flagged for manual review: {selector_result.get('manual_review_count', 0)} element(s) require review")
 
                 # Phase 2: Generate (only if images need ALT text)
                 if scan_result['total_images'] > scan_result['images_with_current_alt']:
