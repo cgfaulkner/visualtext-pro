@@ -25,17 +25,13 @@ path_validator was updated to include canonical folder names (documents_to_revie
 
 **path_validator refactor:** Prefer making shared/path_validator.py read allowed base directories from config.yaml rather than hardcoding. If that is out of scope, the current hardcoded canonical names are sufficient; a TODO is in path_validator and in import-fixes.txt.
 
-## Git tracking policy for input folder
+## Runtime folders and README stubs
 
-**documents_to_review/** must exist in git; its contents must be ignored.
+The four runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are **intentionally tracked** so they appear on GitHub for new users and other universities or first-time contributors. A **README stub** in each folder explains its purpose (input PPTX, output reports, thumbnails, temp files). **Contents are ignored** so that real data is not committed: PPTX inputs, processed outputs, thumbnails, and temporary artifacts stay local.
 
-- Implemented via **documents_to_review/.gitkeep** (tracked) and this block in **.gitignore**:
-  ```
-  # Canonical input folder: folder tracked, contents ignored
-  documents_to_review/*
-  !documents_to_review/.gitkeep
-  ```
-- Documented in this file and in README.
+## Git tracking policy for runtime folders
+
+**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, and **temp** must exist in git; their contents must be ignored. Implemented via a **README.md** in each folder (tracked) and a “Runtime folders” block in **.gitignore** that ignores each folder’s contents but allows that folder’s **README.md**. See `.gitignore` and README.
 
 ## One E2E non-dry run
 
