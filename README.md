@@ -19,7 +19,7 @@ VisualText Pro is a comprehensive accessibility toolkit for extracting visual el
 pdf-alt/
 ├── core/                    # Core processing pipelines and orchestration
 ├── shared/                  # Shared utilities, configuration, and manifest handling
-├── documents_to_review/     # Canonical input folder for presentations (tracked via .gitkeep; contents ignored)
+├── documents_to_review/     # Canonical input folder (README stub tracked; contents ignored)
 ├── reviewed_reports/        # Canonical output folder
 ├── archive/                 # Legacy code; not used for active development
 ├── config.yaml             # Main configuration file
@@ -32,7 +32,7 @@ pdf-alt/
 
 The **archive/** directory holds legacy code and is not used for active development.
 
-**Git tracking policy for input folder:** `documents_to_review/` exists in git (via `.gitkeep`); its contents are ignored. See `.gitignore` and docs/cleanup-summary.md.
+**Runtime folders:** Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; place input presentations in **documents_to_review/**. Contents of these folders are ignored by git. See `.gitignore` and docs/cleanup-summary.md.
 
 ## Installation
 
@@ -55,6 +55,8 @@ The **archive/** directory holds legacy code and is not used for active developm
    ```
 
 ## Quick Start
+
+Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; users should place input presentations in **documents_to_review/**.
 
 **Recommended approach using unified CLI (canonical folder: `documents_to_review`):**
 
