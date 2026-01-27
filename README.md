@@ -36,7 +36,55 @@ The **archive/** directory holds legacy code and is not used for active developm
 
 **Runtime folders:** Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; place input presentations in **documents_to_review/**. Contents of these folders are ignored by git. See `.gitignore` and docs/cleanup-summary.md.
 
-## Installation
+## Quick Start
+
+Get from clone to a working dry-run in under 10 minutes.
+
+### Prerequisites
+
+- **Python 3.12** (recommended). On macOS: `brew install python@3.12` or install from [python.org](https://www.python.org/downloads/).
+- **Ollama + LLaVA** are optional for dry-runs and for generating the approval document locally. They are required only when you run a full `process` (without `--dry-run`) that calls the AI model.
+
+### Setup
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### Most common commands (copy-paste)
+
+```bash
+# Help
+python altgen.py --help
+
+# Dry-run batch (preview without changing files; no LLaVA needed)
+python altgen.py --dry-run process "documents_to_review"
+
+# Real batch (requires LLaVA)
+python altgen.py process "documents_to_review"
+```
+
+### Approval document (Word review doc)
+
+To generate the Word approval/review document only (no ALT injection):
+
+```bash
+python altgen.py analyze "documents_to_review"
+# or for a single file:
+python altgen.py analyze "documents_to_review/your_deck.pptx"
+```
+
+The document is written next to the input with the `_ALT_Review` suffix (e.g. `your_deck_ALT_Review.docx`). No `--output` flag is used; output path is determined by the processor.
+
+### What is committed vs ignored
+
+Runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) exist in the tree with README stubs; **their contents are gitignored**. Put input presentations in **documents_to_review/**; outputs go to **reviewed_reports/** or beside the source file depending on the command. No real presentations, thumbnails, or logs are committed.
+
+---
+
+## Installation (detailed)
 
 1. **Python Environment**: Use Python 3.12 in a fresh virtual environment
    ```bash
@@ -49,30 +97,11 @@ The **archive/** directory holds legacy code and is not used for active developm
    pip install -r requirements.txt
    ```
 
-3. **LLaVA Setup**: Install and run Ollama with LLaVA model
+3. **LLaVA Setup** (required for full `process`, optional for dry-run and approval doc): Install and run Ollama with LLaVA model
    ```bash
    # Install Ollama (see https://ollama.ai)
    ollama pull llava
    ollama serve  # Runs on http://127.0.0.1:11434 by default
-   ```
-
-## Quick Start
-
-Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; users should place input presentations in **documents_to_review/**.
-
-**Recommended approach using unified CLI (canonical folder: `documents_to_review`):**
-
-1. **Place presentation in `documents_to_review/`** (or use full path).
-
-2. **Dry run to preview:**
-   ```bash
-   python altgen.py --dry-run process "documents_to_review"
-   ```
-
-3. **Process folder or file:**
-   ```bash
-   python altgen.py process "documents_to_review"
-   python altgen.py process "documents_to_review/your_deck.pptx"
    ```
 
 ## Command-Line Tools
@@ -158,8 +187,8 @@ python altgen.py --dry-run --verbose process "documents_to_review"
 
 | Command | Purpose | Key Options |
 |---------|---------|-------------|
-| `analyze <file>` | Analyze presentation and generate review document | `--output` |
-| `process <file>` | Full pipeline: analyze, generate, and inject ALT text | `--output` |
+| `analyze <path>` | Generate Word approval/review document only (output: `*_ALT_Review.docx`) | — |
+| `process <path>` | Full pipeline: analyze, generate, and inject ALT text | `--output` |
 | `inject <file>` | Inject ALT text from existing manifest/mapping | `--manifest` |
 | `review <manifest>` | Generate Word review document from manifest | `--output` |
 | `audit <file>` | Validate presentation accessibility and report issues | |
@@ -176,8 +205,8 @@ python altgen.py --mode scientific --dry-run process technical_diagram.pptx
 # Batch process with detailed logging
 python altgen.py --verbose --log-jsonl logs/batch.jsonl process "folder/*.pptx"
 
-# Generate review document only
-python altgen.py analyze presentation.pptx --output review.docx
+# Generate approval/review document only (output: presentation_ALT_Review.docx)
+python altgen.py analyze presentation.pptx
 ```
 
 ### Direct Processor Usage (Advanced)
@@ -236,6 +265,8 @@ python pptx_manifest_processor.py validate cache.jsonl
 ```
 
 ## Configuration
+
+You may want to customize decorative_rules in config.yaml to mark your institution's logos as decorative.
 
 ### config.yaml Structure
 
@@ -393,8 +424,8 @@ python pptx_alt_processor.py inject presentation.pptx --alt-text-file external_a
 
 **Review before deployment:**
 ```bash
-# Generate review document
-python altgen.py analyze presentation.pptx --output review.docx
+# Generate approval/review document (output: presentation_ALT_Review.docx)
+python altgen.py analyze presentation.pptx
 
 # Process after human review
 python altgen.py process presentation.pptx --alt-policy preserve
@@ -487,8 +518,8 @@ python altgen.py --mode scientific --dry-run process technical.pptx
 # Batch with smart ALT policy  
 python altgen.py --alt-policy smart process folder/
 
-# Generate review document
-python altgen.py analyze presentation.pptx --output review.docx
+# Generate approval/review document (output: presentation_ALT_Review.docx)
+python altgen.py analyze presentation.pptx
 ```
 
 ### Flag Priority (when multiple specified)

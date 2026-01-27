@@ -46,16 +46,12 @@ decorative_overrides:
     - bg
     - line
     - accent
+    # Example decorative image filenames.
+    # Replace these with your own institution or organization logo filenames
+    # to ensure logos are treated as decorative and not described.
     exact:
-    - utsw_logo.png
-    - utsw_logo.jpg
-    - UTSW logo.jpg
-    - UTSW logo.png
-    - utsw.jpg
-    - utsw.png
-    - logo_header.jpg
-    - logo_footer.jpg
-    - curve_line.svg
+    - your_org_logo.png
+    - organization_logo.jpg
   force_decorative:
   - logo
   - watermark
