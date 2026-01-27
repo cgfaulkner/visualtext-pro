@@ -16,17 +16,23 @@ VisualText Pro is a comprehensive accessibility toolkit for extracting visual el
 ## Repository Structure
 
 ```
-visualtext-pro/
+pdf-alt/
 ├── core/                    # Core processing pipelines and orchestration
-├── shared/                  # Shared utilities, configuration, and manifest handling  
-├── Documents to Review/     # Default input folder for presentations
+├── shared/                  # Shared utilities, configuration, and manifest handling
+├── documents_to_review/     # Canonical input folder for presentations (tracked via .gitkeep; contents ignored)
+├── reviewed_reports/        # Canonical output folder
+├── archive/                 # Legacy code; not used for active development
 ├── config.yaml             # Main configuration file
-├── altgen.py               # 🆕 Unified CLI dispatcher (recommended entry point)
+├── altgen.py               # Unified CLI dispatcher (recommended entry point)
 ├── pptx_alt_processor.py   # Original full-featured processor
-├── pptx_clean_processor.py # Three-phase pipeline with JSON artifacts  
+├── pptx_clean_processor.py # Three-phase pipeline with JSON artifacts
 ├── pptx_manifest_processor.py # Manifest-driven workflow with caching
 └── requirements.txt        # Python dependencies
 ```
+
+The **archive/** directory holds legacy code and is not used for active development.
+
+**Git tracking policy for input folder:** `documents_to_review/` exists in git (via `.gitkeep`); its contents are ignored. See `.gitignore` and docs/cleanup-summary.md.
 
 ## Installation
 
@@ -50,23 +56,19 @@ visualtext-pro/
 
 ## Quick Start
 
-**Recommended approach using unified CLI:**
+**Recommended approach using unified CLI (canonical folder: `documents_to_review`):**
 
-1. **Place presentation in Documents to Review/** (or use full path)
+1. **Place presentation in `documents_to_review/`** (or use full path).
 
-2. **Process single file:**
+2. **Dry run to preview:**
    ```bash
-   python altgen.py process "Documents to Review/your_deck.pptx"
+   python altgen.py --dry-run process "documents_to_review"
    ```
 
-3. **Dry run to preview changes:**
+3. **Process folder or file:**
    ```bash
-   python altgen.py --dry-run process "Documents to Review/your_deck.pptx"
-   ```
-
-4. **Batch process folder:**
-   ```bash
-   python altgen.py process "Documents to Review/"
+   python altgen.py process "documents_to_review"
+   python altgen.py process "documents_to_review/your_deck.pptx"
    ```
 
 ## Command-Line Tools
