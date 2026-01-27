@@ -15,8 +15,10 @@ VisualText Pro is a comprehensive accessibility toolkit for extracting visual el
 
 ## Repository Structure
 
+From the repository root:
+
 ```
-pdf-alt/
+./
 ├── core/                    # Core processing pipelines and orchestration
 ├── shared/                  # Shared utilities, configuration, and manifest handling
 ├── documents_to_review/     # Canonical input folder (README stub tracked; contents ignored)

@@ -3,14 +3,15 @@
 **Generated:** 2026-01-26  
 **Last Updated:** 2026-01-27 (cleanup: archive moves, canonical folders)  
 **Last verified:** 2026-01-27 — Branch: chrore/cleanup-structure-2026-01-27, Commit: b830ab9  
-**Repository Root:** `pdf-alt`
+**Repository Root:** repository root (folder name varies by checkout)
 
 **What changed (cleanup 2026-01-27):** core/backup → archive/core-backup; old_project → archive/old_project. Canonical runtime folders: documents_to_review, reviewed_reports, temp, archive.
 
 ## 1. Repository Overview
 
 ### Root Folder Name
-`pdf-alt`
+
+Repository root (use `./` or "from the repository root" in paths).
 
 ### Python Packages (folders containing `__init__.py`)
 
@@ -21,7 +22,7 @@
 ## 2. Discrepancies (inventory vs filesystem, as of 2026-01-27)
 
 - **docs/:** Inventory lists 2 files; actual has 5. Extra: batch-operational-resilience.md, batch-processing-audit.md, batch-processing-remediation-plan.md.
-- **.claude_docs/:** Inventory 4 vs actual 5. Extra: phase_2b1_enhancement_complete.md.
+- **Historical:** An internal documentation artifact folder (no longer in repo) was listed in inventory with 4 files; actual had 5.
 - **.github/workflows/:** Inventory 1 vs actual 2. Extra: python-app.yml.
 - **tests/:** Inventory describes tests/ and test_selector.py; **tests/ is absent** in the repo.
 - **Root:** BATCH_PROCESSING_REVIEW.md is in inventory but not on disk.
@@ -29,13 +30,10 @@
 
 ## 3. Directory Tree (Depth 4)
 
+From the repository root:
+
 ```
-pdf-alt/
-├── .claude_docs/
-│   ├── artifact_integration_verification.md
-│   ├── batch_processing_implementation.md
-│   ├── bugfix_absolute_path_validation.md
-│   └── file_locking_implementation.md
+./
 ├── .github/
 │   └── workflows/
 │       └── validate-selector-schema.yml

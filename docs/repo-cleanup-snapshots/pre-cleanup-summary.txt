@@ -6,8 +6,7 @@ INVENTORY VS FILESYSTEM MISMATCHES
 1. docs/: Inventory lists 2 files (repo-inventory.md, smart-selector-contract.md).
    Actual has 5 files. Extra: batch-operational-resilience.md, batch-processing-audit.md, batch-processing-remediation-plan.md.
 
-2. .claude_docs/: Inventory lists 4 files. Actual has 5 files.
-   Extra: phase_2b1_enhancement_complete.md.
+2. [Historical] An internal docs folder (since removed from repo) listed 4 files in inventory; actual had 5.
 
 3. .github/workflows/: Inventory lists 1 file (validate-selector-schema.yml).
    Actual has 2 files. Extra: python-app.yml.
