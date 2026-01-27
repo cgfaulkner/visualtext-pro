@@ -1,8 +1,11 @@
 # Repository Inventory
 
 **Generated:** 2026-01-26  
-**Last Updated:** 2026-01-26 (Selector migration completed)  
+**Last Updated:** 2026-01-27 (cleanup: archive moves, canonical folders)  
+**Last verified:** 2026-01-27 — Branch: chrore/cleanup-structure-2026-01-27, Commit: b830ab9  
 **Repository Root:** `pdf-alt`
+
+**What changed (cleanup 2026-01-27):** core/backup → archive/core-backup; old_project → archive/old_project. Canonical runtime folders: documents_to_review, reviewed_reports, temp, archive.
 
 ## 1. Repository Overview
 
@@ -15,7 +18,16 @@
 2. `core/` - Core processing modules (PPTX, DOCX, PDF processors)
 3. `shared/` - Shared utilities and pipeline infrastructure (includes `shared/selector/` for Smart Selector)
 
-## 2. Directory Tree (Depth 4)
+## 2. Discrepancies (inventory vs filesystem, as of 2026-01-27)
+
+- **docs/:** Inventory lists 2 files; actual has 5. Extra: batch-operational-resilience.md, batch-processing-audit.md, batch-processing-remediation-plan.md.
+- **.claude_docs/:** Inventory 4 vs actual 5. Extra: phase_2b1_enhancement_complete.md.
+- **.github/workflows/:** Inventory 1 vs actual 2. Extra: python-app.yml.
+- **tests/:** Inventory describes tests/ and test_selector.py; **tests/ is absent** in the repo.
+- **Root:** BATCH_PROCESSING_REVIEW.md is in inventory but not on disk.
+- **Section 4 "selector_manifest" table (~lines 210–213):** References `visualtext_pro/selector/selector.py` — stale; current implementation is `shared/selector/selector.py`.
+
+## 3. Directory Tree (Depth 4)
 
 ```
 pdf-alt/
@@ -32,15 +44,25 @@ pdf-alt/
 │   ├── approval_pipeline.py
 │   ├── docx_alt_review.py
 │   └── llava_adapter.py
-├── core/
-│   ├── __init__.py
-│   ├── backup/
+├── archive/
+│   ├── core-backup/          # former core/backup
 │   │   ├── pdf_accessibility_recreator.py
 │   │   ├── pdf_alt_injector.py
 │   │   ├── pdf_context_extractor.py
 │   │   ├── pdf_processor.py
 │   │   ├── pptx_alt_injector.py
 │   │   └── pptx_processor.py
+│   ├── old_project/          # former old_project
+│   │   ├── batch_pptx_processor_linked.py
+│   │   ├── concepts.py
+│   │   ├── config_manager.py
+│   │   ├── config.yaml
+│   │   ├── llava_alt_generator.py
+│   │   ├── pptx_alt.py
+│   │   └── unified_alt_generator.py
+│   └── README.md
+├── core/
+│   ├── __init__.py
 │   ├── batch_processor.py
 │   ├── docx_processor.py
 │   ├── pptx_alt_injector.py
@@ -49,14 +71,7 @@ pdf-alt/
 ├── docs/
 │   ├── repo-inventory.md (this file)
 │   └── smart-selector-contract.md
-├── old_project/
-│   ├── batch_pptx_processor_linked.py
-│   ├── concepts.py
-│   ├── config_manager.py
-│   ├── config.yaml
-│   ├── llava_alt_generator.py
-│   ├── pptx_alt.py
-│   └── unified_alt_generator.py
+├── documents_to_review/      # canonical input folder (.gitkeep tracked; contents ignored)
 ├── schemas/
 │   └── selector_manifest.schema.json
 ├── shared/
@@ -116,7 +131,7 @@ pdf-alt/
 └── requirements.txt
 ```
 
-## 3. CLI Entry Points
+## 4. CLI Entry Points
 
 Files that define `main()` or use `argparse`/`typer`/`click`:
 
@@ -166,7 +181,7 @@ Files that define `main()` or use `argparse`/`typer`/`click`:
    - Uses `argparse` (line 395)
    - Batch processing utility
 
-## 4. String Reference Inventory
+## 5. String Reference Inventory
 
 ### `visualtext_pro`
 
@@ -207,10 +222,10 @@ Files that define `main()` or use `argparse`/`typer`/`click`:
 | `shared/pipeline_phases.py` | 489 | Path construction: `"schemas" / "selector_manifest.schema.json"` |
 | `shared/pipeline_artifacts.py` | 120 | Field comment: `# selector/selector_manifest.json` |
 | `shared/pipeline_artifacts.py` | 170 | Path construction: `run_dir / "selector" / "selector_manifest.json"` |
-| `visualtext_pro/selector/selector.py` | 102 | Docstring: "output_path: Optional path to write selector_manifest.json" |
-| `visualtext_pro/selector/selector.py` | 105 | Docstring: "Path to written selector_manifest.json file" |
-| `visualtext_pro/selector/selector.py` | 161 | Path construction: `output_path = Path(output_dir) / "selector_manifest.json"` |
-| `visualtext_pro/selector/selector.py` | 164 | Path construction: `output_path = pptx_path.parent / "selector_manifest.json"` |
+| `shared/selector/selector.py` | 102 | Docstring: "output_path: Optional path to write selector_manifest.json" |
+| `shared/selector/selector.py` | 105 | Docstring: "Path to written selector_manifest.json file" |
+| `shared/selector/selector.py` | 161 | Path construction: `output_path = Path(output_dir) / "selector_manifest.json"` |
+| `shared/selector/selector.py` | 164 | Path construction: `output_path = pptx_path.parent / "selector_manifest.json"` |
 | `tools/validate_selector_manifest.py` | 15 | Default schema path: `Path("schemas/selector_manifest.schema.json")` |
 | `config.yaml` | 148 | Config entry: `schema_path: "schemas/selector_manifest.schema.json"` |
 
@@ -237,7 +252,7 @@ Files that define `main()` or use `argparse`/`typer`/`click`:
 
 **Total:** 3 references (all in CI workflow)
 
-## 5. Selector-Related Files
+## 6. Selector-Related Files
 
 ### Implementation Files
 
@@ -294,7 +309,7 @@ Files that define `main()` or use `argparse`/`typer`/`click`:
     - CI workflow for schema validation
     - Location: `.github/workflows/validate-selector-schema.yml`
 
-## 6. Canonical Location Analysis
+## 7. Canonical Location Analysis
 
 ### Existing Architecture Patterns
 
@@ -351,7 +366,7 @@ The Smart Selector is:
 | Validation tool | `tools/validate_selector_manifest.py` | ✅ Correct |
 | Tests | `tests/test_selector.py` | ✅ Correct |
 
-## 7. Fix Plan
+## 8. Fix Plan
 
 ### Status: ✅ COMPLETED
 

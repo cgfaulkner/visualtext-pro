@@ -9,10 +9,10 @@ alt_text_handling:
   concept_injection_style: prompt_block
   vague_output_warning: true
 paths:
-  input_folder: Slides to Review
-  output_folder: Reviewed Reports
-  thumbnail_folder: Slide Thumbnails
-  temp_folder: Temp
+  input_folder: documents_to_review
+  output_folder: reviewed_reports
+  thumbnail_folder: slide_thumbnails
+  temp_folder: temp
   alt_cache: alt_cache.json
 conversion:
   wmf_to_png: true

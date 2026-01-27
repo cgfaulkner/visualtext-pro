@@ -6,7 +6,7 @@ alternative text for accessibility.
 ## Project Layout
 - `core/`: modules orchestrating PDF and PPTX processing.
 - `shared/`: utilities for configuration management and alt-text generation.
-- `Slides to Review/`: sample presentations used in tests and examples.
+- `documents_to_review/`: canonical input folder for presentations (sample/tests).
 - `config.yaml`: default configuration settings.
 - Command-line utilities: `pptx_alt_processor.py`, `pptx_clean_processor.py`,
   `pptx_manifest_processor.py`.
@@ -22,6 +22,6 @@ alternative text for accessibility.
 
 ## Testing
 - Run `pytest` from the repository root to execute the available tests.
-- Ensure the sample presentation in `Slides to Review/test1_llava_latest_backup test names.pptx`
+- Ensure the sample presentation in `documents_to_review/test1_llava_latest_backup test names.pptx`
   remains available for tests.
 

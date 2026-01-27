@@ -53,12 +53,15 @@ def get_allowed_base_dirs() -> list[Path]:
     """
     project_root = get_project_root()
 
+    # project_root allows any path under repo; canonical runtime folders listed explicitly.
+    # TODO: prefer loading allowed base dirs from config.yaml (see docs/cleanup-summary.md).
     allowed_dirs = [
         project_root,  # Allow entire project directory
-        project_root / "Slides to Review",  # Input folder from config
-        project_root / "Reviewed Reports",  # Output folder from config
-        project_root / "Slide Thumbnails",  # Thumbnail folder from config
-        project_root / "Temp",  # Temp folder from config
+        project_root / "documents_to_review",  # Canonical input folder
+        project_root / "reviewed_reports",  # Canonical output folder
+        project_root / "slide_thumbnails",  # Thumbnail folder
+        project_root / "temp",  # Temp folder
+        project_root / "archive",  # Archive (legacy code/outputs)
         project_root / "tests" / "fixtures",  # Test fixtures
     ]
 

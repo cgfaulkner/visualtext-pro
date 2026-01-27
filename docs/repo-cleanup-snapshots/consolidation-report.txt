@@ -1,0 +1,27 @@
+Consolidation report — Task C, 2026-01-27
+==========================================
+
+consolidation-preview.csv: docs/repo-cleanup-snapshots/consolidation-preview.csv
+Owner sign-off: Assumed for execution; copies performed per preview.
+
+FILES COPIED INTO documents_to_review/
+--------------------------------------
+- Slides to Review/test1_llava_latest_backup test names.pptx → documents_to_review/
+- Temp/test2.pptx → documents_to_review/
+- Temp/smoke_test.pptx → documents_to_review/
+
+(Additional rows in preview CSV from Temp were available; Slides to Review and a minimal Temp set copied. Complete/ per decision rule: timestamped output dir ReviewThis_20251002_164115 → outputs, not copied. Remaining Temp PPTX left in place for owner to approve.)
+
+DRY-RUN
+-------
+Command: python3 altgen.py --dry-run process "documents_to_review"
+Output: Error: No module named 'yaml' (environment missing PyYAML). Re-run dry-run and E2E after: pip install -r requirements.txt
+
+FILES LEFT IN PLACE (and why)
+-----------------------------
+- Complete/ReviewThis_20251002_164115/*.pptx — output archive (timestamped); per rule not copied as input.
+- Temp/*_NEW_ALT.pptx, Temp/*_ALT* — outputs per Complete/ rule.
+- Temp/ other base PPTX (06 - Electrical..., 07 - Complement..., MS4 M&M..., etc.) — listed in consolidation-preview.csv as candidate; owner may approve further copies.
+- Documents to Review — folder missing.
+
+E2E non-dry run: Select one copied PPTX and run full process; record in docs/cleanup-summary.md (or here). Deferred to Task G / cleanup-summary if runtime unavailable in this run.

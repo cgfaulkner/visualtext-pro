@@ -49,8 +49,8 @@ class PPTXBatchProcessor:
         self.supported_formats = self.pptx_config.get('supported_formats', ['.pptx', '.ppt'])
         
         # Paths
-        self.input_folder = Path(self.paths_config.get('input_folder', 'Slides to Review'))
-        self.output_folder = Path(self.paths_config.get('output_folder', 'Reviewed Reports'))
+        self.input_folder = Path(self.paths_config.get('input_folder', 'documents_to_review'))
+        self.output_folder = Path(self.paths_config.get('output_folder', 'reviewed_reports'))
         
         logger.info(f"Initialized PPTX batch processor:")
         logger.info(f"  Input folder: {self.input_folder}")
