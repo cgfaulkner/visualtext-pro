@@ -85,15 +85,61 @@ Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide
 
 #### Global Options (Apply to All Commands)
 
-| Flag | Values | Default | Description |
-|------|--------|---------|-------------|
-| `--config` | path | `config.yaml` | Path to configuration file |
-| `--mode` | presentation, scientific, context, auto | auto | Processing approach for content analysis |
-| `--alt-policy` | preserve, smart, overwrite_all | smart | How to handle existing ALT text |
-| `--dry-run` | flag | false | Preview changes without modifying files |
-| `--verbose` | flag | false | Enable detailed logging output |
-| `--log-jsonl` | path | none | Log processing decisions to JSONL file |
-| `--profile` | name | none | Load preset configuration profile |
+These flags apply to **any** `altgen.py` command and go before the command name
+(e.g. `python altgen.py [flags] process "documents_to_review"`). They let you
+preview runs, control logging, choose how existing ALT text is handled, and
+point to a different config or profile—without changing code.
+
+##### Common patterns
+
+- **Preview:** Use `--dry-run` to see what would run without changing files.
+- **Verbose:** Use `--verbose` for detailed logging when debugging or auditing.
+- **Policy control:** Use `--alt-policy` to choose preserve / smart / overwrite_all.
+- **Profiles:** Use `--profile` to load a preset configuration (e.g. different
+  defaults per team or project).
+
+| Flag | Values | Default | Description | When you would use this |
+|------|--------|---------|-------------|-------------------------|
+| `--config` | path | `config.yaml` | Path to configuration file | Custom config path, CI, or side-by-side configs |
+| `--mode` | presentation, scientific, context, auto | auto | Processing approach for content analysis | Switch content style (presentation vs scientific vs context vs auto) |
+| `--alt-policy` | preserve, smart, overwrite_all | smart | How to handle existing ALT text | Preserve existing ALT, replace only weak text, or replace everything |
+| `--dry-run` | flag | false | Preview changes without modifying files | Preview or validate before writing |
+| `--verbose` | flag | false | Enable detailed logging output | Debugging, audits, or understanding decisions |
+| `--log-jsonl` | path | none | Log processing decisions to JSONL file | Traceability, debugging, or downstream tooling |
+| `--profile` | name | none | Load preset configuration profile | Team/preset configs without editing `config.yaml` |
+
+##### Examples
+
+```bash
+# Dry-run batch: preview what would run
+python altgen.py --dry-run process "documents_to_review"
+```
+
+```bash
+# Verbose batch: detailed logging
+python altgen.py --verbose process "documents_to_review"
+```
+
+```bash
+# Preserve existing ALT text
+python altgen.py --alt-policy preserve process "documents_to_review"
+```
+
+```bash
+# Scientific mode for diagrams/charts
+python altgen.py --mode scientific process "documents_to_review/your_deck.pptx"
+```
+
+```bash
+# Profile-based run
+python altgen.py --profile myprofile process "documents_to_review"
+```
+
+**Tip: You can combine options.** For example, to preview with detailed output:
+
+```bash
+python altgen.py --dry-run --verbose process "documents_to_review"
+```
 
 #### ALT Text Policies Explained
 
