@@ -24,8 +24,41 @@ ENV/
 .python-version
 
 # -----------------------------
+<<<<<<< Updated upstream
 # Python: packaging / build
 # -----------------------------
+=======
+# Private / local-only notes
+# -----------------------------
+private/
+private_docs/
+notes/
+
+# Runtime folders: tracked for structure, contents ignored
+documents_to_review/*
+!documents_to_review/README.md
+
+reviewed_reports/*
+!reviewed_reports/README.md
+
+slide_thumbnails/*
+!slide_thumbnails/README.md
+
+temp/*
+!temp/README.md
+tests/test_alt_normalization.py
+debug/
+Temp/
+Reviewed Reports/
+Slides to Review/
+Complete/
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+>>>>>>> Stashed changes
 build/
 dist/
 *.egg-info/
@@ -68,6 +101,7 @@ coverage.xml
 Thumbs.db
 Desktop.ini
 
+<<<<<<< Updated upstream
 .vscode/
 .idea/
 *.swp
@@ -120,3 +154,16 @@ review_docs/
 # local/private working notes
 private/
 documents_to_review/
+=======
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+.claude_docs/
+.claudedocs/
+
+# Sample fixtures here, put them under:
+# tests/fixtures/ and add negations like:
+tests/fixtures/**/*.pptx
+tests/fixtures/**/*.png
+>>>>>>> Stashed changes
