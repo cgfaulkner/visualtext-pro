@@ -247,7 +247,7 @@ if __name__ == "__main__":
         "decorative_overrides": {
             "decorative_rules": {
                 "contains": ["logo", "watermark", "border"],
-                "exact": ["utsw_logo.png", "footer.jpg"]
+                "exact": ["your_org_logo.png", "footer.jpg"]
             },
             "force_decorative": ["divider", "separator"],
             "never_decorative": ["anatomy", "xray", "mri"]
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     
     # Test filename checks
     test_files = [
-        "utsw_logo.png",       # Should be decorative (exact match)
+        "your_org_logo.png",   # Should be decorative (exact match)
         "header_logo.jpg",     # Should be decorative (contains "logo")
         "anatomy_chart.png",   # Should NOT be decorative (never list)
         "xray_chest.jpg",      # Should NOT be decorative (never list)

@@ -10,6 +10,19 @@ logs/
 Documents_to_Review/
 Backup/
 tests/
+
+# Runtime folders: tracked for structure, contents ignored
+documents_to_review/*
+!documents_to_review/README.md
+
+reviewed_reports/*
+!reviewed_reports/README.md
+
+slide_thumbnails/*
+!slide_thumbnails/README.md
+
+temp/*
+!temp/README.md
 tests/test_alt_normalization.py
 debug/
 Temp/
@@ -219,4 +232,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-.claude_docs/pdf-alt.code-workspace
+.claude_docs/
+.claudedocs/

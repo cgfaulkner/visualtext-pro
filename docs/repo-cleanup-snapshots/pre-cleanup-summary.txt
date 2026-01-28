@@ -1,0 +1,41 @@
+Pre-cleanup summary — 2026-01-27
+================================
+
+INVENTORY VS FILESYSTEM MISMATCHES
+----------------------------------
+1. docs/: Inventory lists 2 files (repo-inventory.md, smart-selector-contract.md).
+   Actual has 5 files. Extra: batch-operational-resilience.md, batch-processing-audit.md, batch-processing-remediation-plan.md.
+
+2. [Historical] An internal docs folder (since removed from repo) listed 4 files in inventory; actual had 5.
+
+3. .github/workflows/: Inventory lists 1 file (validate-selector-schema.yml).
+   Actual has 2 files. Extra: python-app.yml.
+
+4. tests/: Inventory describes tests/ tree with test_selector.py and fixtures.
+   tests/ is ABSENT in the repo (no tests/ directory or test_*.py files found).
+
+5. Root: Inventory lists BATCH_PROCESSING_REVIEW.md at repo root.
+   BATCH_PROCESSING_REVIEW.md is not present at repo root.
+
+6. Section 4 "selector_manifest" table (repo-inventory.md ~lines 210–213):
+   References visualtext_pro/selector/selector.py — STALE. Implementation lives in shared/selector/selector.py.
+
+
+NOTABLE SURPRISES
+-----------------
+- tests/ directory is missing; CI (.github/workflows/validate-selector-schema.yml) references tests/fixtures/selector/... — those paths do not exist, so the workflow would fail if run.
+- BATCH_PROCESSING_REVIEW.md is in inventory but not on disk.
+- Documents to Review, Slides to Review, Complete/, Temp/ are in .gitignore and may exist only as local directories; they are not visible in the tracked repo.
+
+
+SCREENSHOTS TO CAPTURE
+-----------------------
+Capture via Finder or VS Code and save in this folder (docs/repo-cleanup-snapshots/):
+- Repo root
+- core/
+- shared/
+- Documents to Review (if it exists)
+- Documents_to_Review (if it exists)
+- Slides to Review (if it exists)
+- Complete/ (if it exists)
+- Temp/ (if it exists)

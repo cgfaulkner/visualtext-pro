@@ -5,14 +5,17 @@ on:
     branches: [ main, develop, 'feat/**' ]
     paths:
       - 'schemas/selector_manifest.schema.json'
-      - 'tests/fixtures/selector/**/*.golden'
+      - 'fixtures/selector/**/*.golden'
       - '.github/workflows/validate-selector-schema.yml'
   pull_request:
     branches: [ main, develop ]
     paths:
       - 'schemas/selector_manifest.schema.json'
-      - 'tests/fixtures/selector/**/*.golden'
+      - 'fixtures/selector/**/*.golden'
       - '.github/workflows/validate-selector-schema.yml'
+
+permissions:
+  contents: read
 
 jobs:
   validate-golden-jsons:
@@ -31,6 +34,6 @@ jobs:
       
       - name: Validate golden JSONs against schema
         run: |
-          python tools/validate_selector_manifest.py tests/fixtures/selector/group_basic/selector_manifest.json.golden
-          python tools/validate_selector_manifest.py tests/fixtures/selector/overlay_arrow_on_image/selector_manifest.json.golden
-          python tools/validate_selector_manifest.py tests/fixtures/selector/placeholder_alt_cases/selector_manifest.json.golden
+          python tools/validate_selector_manifest.py fixtures/selector/group_basic/selector_manifest.json.golden
+          python tools/validate_selector_manifest.py fixtures/selector/overlay_arrow_on_image/selector_manifest.json.golden
+          python tools/validate_selector_manifest.py fixtures/selector/placeholder_alt_cases/selector_manifest.json.golden

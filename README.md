@@ -15,20 +15,76 @@ VisualText Pro is a comprehensive accessibility toolkit for extracting visual el
 
 ## Repository Structure
 
+From the repository root:
+
 ```
-visualtext-pro/
+./
 ├── core/                    # Core processing pipelines and orchestration
-├── shared/                  # Shared utilities, configuration, and manifest handling  
-├── Documents to Review/     # Default input folder for presentations
+├── shared/                  # Shared utilities, configuration, and manifest handling
+├── documents_to_review/     # Canonical input folder (README stub tracked; contents ignored)
+├── reviewed_reports/        # Canonical output folder
+├── archive/                 # Legacy code; not used for active development
 ├── config.yaml             # Main configuration file
-├── altgen.py               # 🆕 Unified CLI dispatcher (recommended entry point)
+├── altgen.py               # Unified CLI dispatcher (recommended entry point)
 ├── pptx_alt_processor.py   # Original full-featured processor
-├── pptx_clean_processor.py # Three-phase pipeline with JSON artifacts  
+├── pptx_clean_processor.py # Three-phase pipeline with JSON artifacts
 ├── pptx_manifest_processor.py # Manifest-driven workflow with caching
 └── requirements.txt        # Python dependencies
 ```
 
-## Installation
+The **archive/** directory holds legacy code and is not used for active development.
+
+**Runtime folders:** Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; place input presentations in **documents_to_review/**. Contents of these folders are ignored by git. See `.gitignore` and docs/cleanup-summary.md.
+
+## Quick Start
+
+Get from clone to a working dry-run in under 10 minutes.
+
+### Prerequisites
+
+- **Python 3.12** (recommended). On macOS: `brew install python@3.12` or install from [python.org](https://www.python.org/downloads/).
+- **Ollama + LLaVA** are optional for dry-runs and for generating the approval document locally. They are required only when you run a full `process` (without `--dry-run`) that calls the AI model.
+
+### Setup
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### Most common commands (copy-paste)
+
+```bash
+# Help
+python altgen.py --help
+
+# Dry-run batch (preview without changing files; no LLaVA needed)
+python altgen.py --dry-run process "documents_to_review"
+
+# Real batch (requires LLaVA)
+python altgen.py process "documents_to_review"
+```
+
+### Approval document (Word review doc)
+
+To generate the Word approval/review document only (no ALT injection):
+
+```bash
+python altgen.py analyze "documents_to_review"
+# or for a single file:
+python altgen.py analyze "documents_to_review/your_deck.pptx"
+```
+
+The document is written next to the input with the `_ALT_Review` suffix (e.g. `your_deck_ALT_Review.docx`). No `--output` flag is used; output path is determined by the processor.
+
+### What is committed vs ignored
+
+Runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) exist in the tree with README stubs; **their contents are gitignored**. Put input presentations in **documents_to_review/**; outputs go to **reviewed_reports/** or beside the source file depending on the command. No real presentations, thumbnails, or logs are committed.
+
+---
+
+## Installation (detailed)
 
 1. **Python Environment**: Use Python 3.12 in a fresh virtual environment
    ```bash
@@ -41,32 +97,11 @@ visualtext-pro/
    pip install -r requirements.txt
    ```
 
-3. **LLaVA Setup**: Install and run Ollama with LLaVA model
+3. **LLaVA Setup** (required for full `process`, optional for dry-run and approval doc): Install and run Ollama with LLaVA model
    ```bash
    # Install Ollama (see https://ollama.ai)
    ollama pull llava
    ollama serve  # Runs on http://127.0.0.1:11434 by default
-   ```
-
-## Quick Start
-
-**Recommended approach using unified CLI:**
-
-1. **Place presentation in Documents to Review/** (or use full path)
-
-2. **Process single file:**
-   ```bash
-   python altgen.py process "Documents to Review/your_deck.pptx"
-   ```
-
-3. **Dry run to preview changes:**
-   ```bash
-   python altgen.py --dry-run process "Documents to Review/your_deck.pptx"
-   ```
-
-4. **Batch process folder:**
-   ```bash
-   python altgen.py process "Documents to Review/"
    ```
 
 ## Command-Line Tools
@@ -79,15 +114,61 @@ visualtext-pro/
 
 #### Global Options (Apply to All Commands)
 
-| Flag | Values | Default | Description |
-|------|--------|---------|-------------|
-| `--config` | path | `config.yaml` | Path to configuration file |
-| `--mode` | presentation, scientific, context, auto | auto | Processing approach for content analysis |
-| `--alt-policy` | preserve, smart, overwrite_all | smart | How to handle existing ALT text |
-| `--dry-run` | flag | false | Preview changes without modifying files |
-| `--verbose` | flag | false | Enable detailed logging output |
-| `--log-jsonl` | path | none | Log processing decisions to JSONL file |
-| `--profile` | name | none | Load preset configuration profile |
+These flags apply to **any** `altgen.py` command and go before the command name
+(e.g. `python altgen.py [flags] process "documents_to_review"`). They let you
+preview runs, control logging, choose how existing ALT text is handled, and
+point to a different config or profile—without changing code.
+
+##### Common patterns
+
+- **Preview:** Use `--dry-run` to see what would run without changing files.
+- **Verbose:** Use `--verbose` for detailed logging when debugging or auditing.
+- **Policy control:** Use `--alt-policy` to choose preserve / smart / overwrite_all.
+- **Profiles:** Use `--profile` to load a preset configuration (e.g. different
+  defaults per team or project).
+
+| Flag | Values | Default | Description | When you would use this |
+|------|--------|---------|-------------|-------------------------|
+| `--config` | path | `config.yaml` | Path to configuration file | Custom config path, CI, or side-by-side configs |
+| `--mode` | presentation, scientific, context, auto | auto | Processing approach for content analysis | Switch content style (presentation vs scientific vs context vs auto) |
+| `--alt-policy` | preserve, smart, overwrite_all | smart | How to handle existing ALT text | Preserve existing ALT, replace only weak text, or replace everything |
+| `--dry-run` | flag | false | Preview changes without modifying files | Preview or validate before writing |
+| `--verbose` | flag | false | Enable detailed logging output | Debugging, audits, or understanding decisions |
+| `--log-jsonl` | path | none | Log processing decisions to JSONL file | Traceability, debugging, or downstream tooling |
+| `--profile` | name | none | Load preset configuration profile | Team/preset configs without editing `config.yaml` |
+
+##### Examples
+
+```bash
+# Dry-run batch: preview what would run
+python altgen.py --dry-run process "documents_to_review"
+```
+
+```bash
+# Verbose batch: detailed logging
+python altgen.py --verbose process "documents_to_review"
+```
+
+```bash
+# Preserve existing ALT text
+python altgen.py --alt-policy preserve process "documents_to_review"
+```
+
+```bash
+# Scientific mode for diagrams/charts
+python altgen.py --mode scientific process "documents_to_review/your_deck.pptx"
+```
+
+```bash
+# Profile-based run
+python altgen.py --profile myprofile process "documents_to_review"
+```
+
+**Tip: You can combine options.** For example, to preview with detailed output:
+
+```bash
+python altgen.py --dry-run --verbose process "documents_to_review"
+```
 
 #### ALT Text Policies Explained
 
@@ -106,8 +187,8 @@ visualtext-pro/
 
 | Command | Purpose | Key Options |
 |---------|---------|-------------|
-| `analyze <file>` | Analyze presentation and generate review document | `--output` |
-| `process <file>` | Full pipeline: analyze, generate, and inject ALT text | `--output` |
+| `analyze <path>` | Generate Word approval/review document only (output: `*_ALT_Review.docx`) | — |
+| `process <path>` | Full pipeline: analyze, generate, and inject ALT text | `--output` |
 | `inject <file>` | Inject ALT text from existing manifest/mapping | `--manifest` |
 | `review <manifest>` | Generate Word review document from manifest | `--output` |
 | `audit <file>` | Validate presentation accessibility and report issues | |
@@ -124,8 +205,8 @@ python altgen.py --mode scientific --dry-run process technical_diagram.pptx
 # Batch process with detailed logging
 python altgen.py --verbose --log-jsonl logs/batch.jsonl process "folder/*.pptx"
 
-# Generate review document only
-python altgen.py analyze presentation.pptx --output review.docx
+# Generate approval/review document only (output: presentation_ALT_Review.docx)
+python altgen.py analyze presentation.pptx
 ```
 
 ### Direct Processor Usage (Advanced)
@@ -184,6 +265,8 @@ python pptx_manifest_processor.py validate cache.jsonl
 ```
 
 ## Configuration
+
+You may want to customize decorative_rules in config.yaml to mark your institution's logos as decorative.
 
 ### config.yaml Structure
 
@@ -341,8 +424,8 @@ python pptx_alt_processor.py inject presentation.pptx --alt-text-file external_a
 
 **Review before deployment:**
 ```bash
-# Generate review document
-python altgen.py analyze presentation.pptx --output review.docx
+# Generate approval/review document (output: presentation_ALT_Review.docx)
+python altgen.py analyze presentation.pptx
 
 # Process after human review
 python altgen.py process presentation.pptx --alt-policy preserve
@@ -435,8 +518,8 @@ python altgen.py --mode scientific --dry-run process technical.pptx
 # Batch with smart ALT policy  
 python altgen.py --alt-policy smart process folder/
 
-# Generate review document
-python altgen.py analyze presentation.pptx --output review.docx
+# Generate approval/review document (output: presentation_ALT_Review.docx)
+python altgen.py analyze presentation.pptx
 ```
 
 ### Flag Priority (when multiple specified)

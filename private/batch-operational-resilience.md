@@ -475,7 +475,7 @@ This checklist can be converted into implementation tickets for Phase 3C.
 
 - **Batch Processing Audit**: `docs/batch-processing-audit.md`
 - **Batch Processing Remediation Plan**: `docs/batch-processing-remediation-plan.md`
-- **Batch Processing Implementation**: `.claude_docs/batch_processing_implementation.md`
+- **Batch Processing Implementation**: See `core/batch_processor.py` and `shared/batch_queue.py` for implementation details.
 - **Batch Queue Implementation**: `shared/batch_queue.py`
 - **Batch Manifest Implementation**: `shared/batch_manifest.py`
 - **Batch Processor**: `core/batch_processor.py`
