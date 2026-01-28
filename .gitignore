@@ -34,6 +34,13 @@ private/
 private_docs/
 notes/
 
+# -----------------------------
+# Private / local-only notes
+# -----------------------------
+private/
+private_docs/
+notes/
+
 # Runtime folders: tracked for structure, contents ignored
 documents_to_review/*
 !documents_to_review/README.md
@@ -165,5 +172,9 @@ __marimo__/
 # Sample fixtures here, put them under:
 # tests/fixtures/ and add negations like:
 tests/fixtures/**/*.pptx
+<<<<<<< Updated upstream
+tests/fixtures/**/*.png
+>>>>>>> Stashed changes
+=======
 tests/fixtures/**/*.png
 >>>>>>> Stashed changes
