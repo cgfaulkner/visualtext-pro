@@ -14,32 +14,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# -----------------------------
-# Python: virtual environments
-# -----------------------------
+# Local
+.DS_Store
+visualtext-pro/
+logs/
+Documents_to_Review/
+Backup/
+tests/
 .venv/
-venv/
-env/
-ENV/
-.python-version
-
-# -----------------------------
-<<<<<<< Updated upstream
-# Python: packaging / build
-# -----------------------------
-=======
-# Private / local-only notes
-# -----------------------------
-private/
-private_docs/
-notes/
-
-# -----------------------------
-# Private / local-only notes
-# -----------------------------
-private/
-private_docs/
-notes/
 
 # Runtime folders: tracked for structure, contents ignored
 documents_to_review/*
@@ -178,3 +160,8 @@ tests/fixtures/**/*.png
 =======
 tests/fixtures/**/*.png
 >>>>>>> Stashed changes
+
+# Sample fixtures here, put them under:
+# tests/fixtures/ and add negations like:
+tests/fixtures/**/*.pptx
+tests/fixtures/**/*.png
