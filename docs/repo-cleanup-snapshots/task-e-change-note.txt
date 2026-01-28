@@ -1,4 +1,0 @@
-Task E changes (2026-01-27)
----------------------------
-- README.md: Quick Start rewritten to use canonical folders (documents_to_review, reviewed_reports, archive); exact commands added; Repository Structure updated; Git tracking policy and archive note added.
-- docs/repo-inventory.md: Directory tree updated (core/backup → archive/core-backup, old_project → archive/old_project; documents_to_review added); Last verified + branch/commit added; "What changed (cleanup)" note added; selector_manifest table rows 219–222 updated from visualtext_pro/selector/selector.py to shared/selector/selector.py.

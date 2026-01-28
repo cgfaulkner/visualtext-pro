@@ -117,3 +117,6 @@ review_docs/
 # tests/fixtures/ and add negations like:
 !tests/fixtures/**/*.pptx
 !tests/fixtures/**/*.png
+# local/private working notes
+private/
+documents_to_review/
