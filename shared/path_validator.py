@@ -142,6 +142,11 @@ def sanitize_input_path(user_path: str, allow_absolute: bool = False, base_dir: 
     Raises:
         SecurityError: If path validation fails
         ValueError: If path is empty or invalid
+
+    Note:
+        Relative paths are resolved against project root (or base_dir). For CLI
+        options that must be CWD-relative (e.g. --config, --log-jsonl), callers
+        should pre-resolve with (Path.cwd() / path).resolve() and pass the result.
     """
     if not user_path or not user_path.strip():
         raise ValueError("Path cannot be empty")

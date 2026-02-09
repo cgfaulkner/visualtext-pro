@@ -77,14 +77,22 @@ class ProcessorDispatcher:
     def setup_logging(self):
         """Setup JSONL logging if requested (altgen.py handles this).
 
-        Path is validated to prevent path traversal (e.g. ../../../etc/cron.d/x).
+        Relative --log-jsonl paths resolve against CWD; path is then validated.
         """
         if hasattr(self.args, 'log_jsonl') and self.args.log_jsonl:
             try:
                 from shared.path_validator import validate_output_path, SecurityError
 
+                raw = self.args.log_jsonl.strip()
+                if Path(raw).is_absolute():
+                    path_to_validate = raw
+                else:
+                    path_to_validate = str((Path.cwd() / raw).resolve())
                 validated_path = validate_output_path(
-                    self.args.log_jsonl, create_parents=True, allow_absolute=True
+                    path_to_validate,
+                    create_parents=True,
+                    allow_absolute=True,
+                    base_dir=Path.cwd(),
                 )
             except (SecurityError, ValueError) as e:
                 print(f"Security Error (--log-jsonl): {e}")
