@@ -194,7 +194,8 @@ def sanitize_input_path(user_path: str, allow_absolute: bool = False, base_dir: 
     return path
 
 
-def validate_output_path(user_path: str, create_parents: bool = True, base_dir: Optional[Path] = None) -> Path:
+def validate_output_path(user_path: str, create_parents: bool = True, base_dir: Optional[Path] = None,
+                         allow_absolute: bool = False) -> Path:
     """
     Validate an output file path and optionally create parent directories.
 
@@ -207,6 +208,7 @@ def validate_output_path(user_path: str, create_parents: bool = True, base_dir: 
         user_path: User-provided output path string
         create_parents: If True, creates parent directories if they don't exist
         base_dir: Optional specific base directory to validate against
+        allow_absolute: If True, allow absolute paths (e.g. for --log-jsonl).
 
     Returns:
         Path: Validated Path object (absolute, resolved)
@@ -216,7 +218,7 @@ def validate_output_path(user_path: str, create_parents: bool = True, base_dir: 
         OSError: If parent directory creation fails
     """
     # Use same validation as input paths
-    validated_path = sanitize_input_path(user_path, allow_absolute=False, base_dir=base_dir)
+    validated_path = sanitize_input_path(user_path, allow_absolute=allow_absolute, base_dir=base_dir)
 
     # Ensure parent directory exists
     parent_dir = validated_path.parent

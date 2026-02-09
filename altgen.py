@@ -12,11 +12,10 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional
 
-# Ensure shared modules are importable for path validation
+# Ensure shared modules are importable for path validation (project root for shared.*)
 _project_root = Path(__file__).resolve().parent
-_shared_path = str(_project_root / "shared")
-if _shared_path not in sys.path:
-    sys.path.insert(0, _shared_path)
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 
 MODES = ["presentation", "scientific", "context", "auto"]
@@ -85,7 +84,7 @@ class ProcessorDispatcher:
                 from shared.path_validator import validate_output_path, SecurityError
 
                 validated_path = validate_output_path(
-                    self.args.log_jsonl, create_parents=True
+                    self.args.log_jsonl, create_parents=True, allow_absolute=True
                 )
             except (SecurityError, ValueError) as e:
                 print(f"Security Error (--log-jsonl): {e}")

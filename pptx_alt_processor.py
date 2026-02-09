@@ -25,6 +25,7 @@ import json
 
 # Setup paths
 project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 

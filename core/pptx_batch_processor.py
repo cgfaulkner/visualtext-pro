@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-# Setup paths for shared modules
+# Setup paths for shared.* and core modules
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "shared"))
+sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "core"))
 
 # Import modules
