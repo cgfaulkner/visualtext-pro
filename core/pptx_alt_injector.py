@@ -43,7 +43,7 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
-from hashlib import md5
+from hashlib import sha256
 import tempfile
 from collections import Counter
 
@@ -161,7 +161,7 @@ class PPTXImageIdentifier:
         try:
             if hasattr(shape, 'image') and shape.image:
                 image_data = shape.image.blob
-                image_hash = md5(image_data).hexdigest()
+                image_hash = sha256(image_data).hexdigest()
         except Exception:
             pass
         
@@ -1925,8 +1925,8 @@ class PPTXAltTextInjector:
                 from decorative_filter import get_image_hash
                 image_hash = get_image_hash(image_data)
             except Exception:
-                # Fallback to direct md5 if get_image_hash fails
-                image_hash = md5(shape.image.blob).hexdigest()
+                # Fallback to direct sha256 if get_image_hash fails
+                image_hash = sha256(shape.image.blob).hexdigest()
             
             # Truncate to 8 chars to match processor expectations
             image_hash = image_hash[:8] if len(image_hash) > 8 else image_hash
@@ -1969,16 +1969,14 @@ class PPTXAltTextInjector:
             
             # Create hash content using same format as processor PPTXVisualElement
             hash_content = f"{shape_type}_{width_px}_{height_px}_{text_content}"
-            import hashlib
-            full_hash = hashlib.md5(hash_content.encode()).hexdigest()
+            full_hash = sha256(hash_content.encode()).hexdigest()
             # Truncate to 8 chars like processor does
             image_hash = full_hash[:8]
             
         except Exception:
             # Fallback hash - use simple approach
-            import hashlib
             hash_content = f"{slide_idx}_{shape_identifier}_{shape_name}"
-            full_hash = hashlib.md5(hash_content.encode()).hexdigest()
+            full_hash = sha256(hash_content.encode()).hexdigest()
             image_hash = full_hash[:8]
         
         return PPTXImageIdentifier(slide_idx, shape_identifier, shape_name, image_hash, embed_id)

@@ -12,6 +12,12 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional
 
+# Ensure shared modules are importable for path validation
+_project_root = Path(__file__).resolve().parent
+_shared_path = str(_project_root / "shared")
+if _shared_path not in sys.path:
+    sys.path.insert(0, _shared_path)
+
 
 MODES = ["presentation", "scientific", "context", "auto"]
 POLICIES = ["preserve", "overwrite_all", "smart"]
@@ -70,15 +76,23 @@ class ProcessorDispatcher:
             return file_path
 
     def setup_logging(self):
-        """Setup JSONL logging if requested (altgen.py handles this)"""
+        """Setup JSONL logging if requested (altgen.py handles this).
+
+        Path is validated to prevent path traversal (e.g. ../../../etc/cron.d/x).
+        """
         if hasattr(self.args, 'log_jsonl') and self.args.log_jsonl:
-            # Create the directory and file
-            log_dir = os.path.dirname(self.args.log_jsonl)
-            if log_dir:
-                os.makedirs(log_dir, exist_ok=True)
+            try:
+                from shared.path_validator import validate_output_path, SecurityError
+
+                validated_path = validate_output_path(
+                    self.args.log_jsonl, create_parents=True
+                )
+            except (SecurityError, ValueError) as e:
+                print(f"Security Error (--log-jsonl): {e}")
+                raise SystemExit(1)
 
             # Create empty file with header
-            with open(self.args.log_jsonl, 'w') as f:
+            with open(validated_path, 'w', encoding='utf-8') as f:
                 import json
                 from datetime import datetime
                 header = {
@@ -89,7 +103,7 @@ class ProcessorDispatcher:
                 }
                 f.write(json.dumps(header) + '\n')
 
-            print(f"Logging to: {os.path.abspath(self.args.log_jsonl)}")
+            print(f"Logging to: {validated_path}")
 
     def select_processor(self) -> str:
         """Select which processor to use based on flags and command"""

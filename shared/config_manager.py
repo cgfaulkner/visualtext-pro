@@ -12,6 +12,8 @@ from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
+from .path_validator import sanitize_input_path, SecurityError
+
 # Validator constants
 _VALID_ALT_MODES = {"preserve", "replace"}
 
@@ -139,9 +141,16 @@ class ConfigManager:
         self._validate_config()
         
     def _find_config_file(self, config_path: Optional[str]) -> Optional[Path]:
-        """Find configuration file if not explicitly provided."""
+        """Find configuration file if not explicitly provided.
+
+        When config_path is user-supplied (e.g. via --config), it is validated
+        to prevent path traversal and constrain loading to allowed directories.
+        """
         if config_path:
-            return Path(config_path)
+            validated = sanitize_input_path(
+                config_path.strip(), allow_absolute=True
+            )
+            return validated
         
         # Look for config files in order of preference
         search_paths = [
