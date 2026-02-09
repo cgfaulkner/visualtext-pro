@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
-from shared.path_validator import sanitize_input_path, SecurityError
+from shared.path_validator import sanitize_input_path, SecurityError, get_project_root
 
 # Validator constants
 _VALID_ALT_MODES = {"preserve", "replace"}
@@ -143,29 +143,37 @@ class ConfigManager:
     def _find_config_file(self, config_path: Optional[str]) -> Optional[Path]:
         """Find configuration file if not explicitly provided.
 
-        When config_path is user-supplied (e.g. via --config), it is validated
-        to prevent path traversal and constrain loading to allowed directories.
+        When config_path is user-supplied (e.g. via --config): relative paths
+        are resolved against CWD, then the resolved path is validated.
+        Auto-discovery checks CWD first, then project root.
         """
         if config_path:
-            validated = sanitize_input_path(
-                config_path.strip(), allow_absolute=True
-            )
+            raw = config_path.strip()
+            p = Path(raw)
+            if p.is_absolute():
+                validated = sanitize_input_path(raw, allow_absolute=True)
+                return validated
+            # Relative: resolve against CWD, then validate the resolved path
+            resolved = (Path.cwd() / raw).resolve()
+            validated = sanitize_input_path(str(resolved), allow_absolute=True)
             return validated
-        
-        # Look for config files in order of preference
-        search_paths = [
-            Path("config.yaml"),
-            Path("config.yml"),
-            Path("config.json"),
-            Path("settings.yaml"),
-            Path("settings.json")
-        ]
-        
-        for path in search_paths:
-            if path.exists():
-                logger.info(f"Found configuration file: {path}")
-                return path
-        
+
+        # Auto-discovery: check CWD first, then project root
+        filenames = ["config.yaml", "config.yml", "config.json",
+                     "settings.yaml", "settings.json"]
+        cwd = Path.cwd()
+        project_root = get_project_root()
+        for name in filenames:
+            cwd_candidate = cwd / name
+            if cwd_candidate.exists():
+                logger.info(f"Found configuration file: {cwd_candidate}")
+                return cwd_candidate
+        for name in filenames:
+            root_candidate = project_root / name
+            if root_candidate.exists():
+                logger.info(f"Found configuration file: {root_candidate}")
+                return root_candidate
+
         logger.info("No configuration file found, using defaults")
         return None
     
