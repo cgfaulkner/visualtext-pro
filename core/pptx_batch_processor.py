@@ -18,7 +18,7 @@ sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
 # Import modules
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
 
 logger = logging.getLogger(__name__)

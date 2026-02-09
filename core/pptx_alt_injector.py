@@ -64,7 +64,7 @@ sys.path.insert(0, str(project_root / "shared"))
 sys.path.insert(0, str(project_root / "core"))
 
 # Import shared modules
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 from decorative_filter import is_force_decorative_by_filename
 from alt_text_reader import read_existing_alt
 from fallback_policies import apply_fallback_policy, apply_for_ppt_injection

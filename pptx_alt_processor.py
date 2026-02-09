@@ -34,7 +34,7 @@ from shared.file_lock_manager import FileLock, LockError
 from shared.pipeline_artifacts import RunArtifacts
 
 # Import system components
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
 from pptx_alt_injector import PPTXAltTextInjector
 from resource_manager import ResourceContext, validate_system_resources

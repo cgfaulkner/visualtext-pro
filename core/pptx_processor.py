@@ -63,7 +63,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "shared"))
 
 # Import shared modules
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 from unified_alt_generator import FlexibleAltGenerator
 from decorative_filter import (
     is_force_decorative_by_filename,

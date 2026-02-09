@@ -33,7 +33,7 @@ from shared.path_validator import sanitize_input_path, validate_output_path, Sec
 from pipeline_artifacts import RunArtifacts, normalize_final_alt_map
 from pipeline_phases import run_pipeline
 from docx_review_builder import generate_alt_review_doc
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 

@@ -21,18 +21,13 @@ try:
 except Exception:
     from perceptual_hash import build_cache_keys, load_pil_image_safely
 
-# Prefer package-relative imports; fall back to bare for legacy callers
+# Absolute imports for pytest-safe collection
+from shared.config_manager import ConfigManager
 try:
-    from .config_manager import ConfigManager
-    from .llava_connectivity import LLaVAConnectivityManager, ServiceState
-except Exception:
-    from config_manager import ConfigManager  # fallback
-    try:
-        from llava_connectivity import LLaVAConnectivityManager, ServiceState
-    except ImportError:
-        # Fallback if connectivity module not available
-        LLaVAConnectivityManager = None
-        ServiceState = None
+    from shared.llava_connectivity import LLaVAConnectivityManager, ServiceState
+except ImportError:
+    LLaVAConnectivityManager = None
+    ServiceState = None
 
 import logging
 import re

@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
-from .path_validator import sanitize_input_path, SecurityError
+from shared.path_validator import sanitize_input_path, SecurityError
 
 # Validator constants
 _VALID_ALT_MODES = {"preserve", "replace"}

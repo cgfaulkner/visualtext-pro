@@ -34,7 +34,7 @@ from manifest_processor import ManifestProcessor
 from manifest_injector import inject_from_manifest, validate_manifest_for_injection
 from manifest_docx_builder import generate_review_from_manifest
 from alt_manifest import AltManifest
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
