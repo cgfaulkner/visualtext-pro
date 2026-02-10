@@ -80,9 +80,9 @@ class ProcessorDispatcher:
         Relative --log-jsonl paths resolve against CWD; path is then validated.
         """
         if hasattr(self.args, 'log_jsonl') and self.args.log_jsonl:
-            try:
-                from shared.path_validator import validate_output_path, SecurityError
+            from shared.path_validator import validate_output_path, SecurityError
 
+            try:
                 raw = self.args.log_jsonl.strip()
                 if Path(raw).is_absolute():
                     path_to_validate = raw
