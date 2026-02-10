@@ -142,6 +142,11 @@ def sanitize_input_path(user_path: str, allow_absolute: bool = False, base_dir: 
     Raises:
         SecurityError: If path validation fails
         ValueError: If path is empty or invalid
+
+    Note:
+        Relative paths are resolved against project root (or base_dir). For CLI
+        options that must be CWD-relative (e.g. --config, --log-jsonl), callers
+        should pre-resolve with (Path.cwd() / path).resolve() and pass the result.
     """
     if not user_path or not user_path.strip():
         raise ValueError("Path cannot be empty")
@@ -194,7 +199,8 @@ def sanitize_input_path(user_path: str, allow_absolute: bool = False, base_dir: 
     return path
 
 
-def validate_output_path(user_path: str, create_parents: bool = True, base_dir: Optional[Path] = None) -> Path:
+def validate_output_path(user_path: str, create_parents: bool = True, base_dir: Optional[Path] = None,
+                         allow_absolute: bool = False) -> Path:
     """
     Validate an output file path and optionally create parent directories.
 
@@ -207,6 +213,7 @@ def validate_output_path(user_path: str, create_parents: bool = True, base_dir: 
         user_path: User-provided output path string
         create_parents: If True, creates parent directories if they don't exist
         base_dir: Optional specific base directory to validate against
+        allow_absolute: If True, allow absolute paths (e.g. for --log-jsonl).
 
     Returns:
         Path: Validated Path object (absolute, resolved)
@@ -216,7 +223,7 @@ def validate_output_path(user_path: str, create_parents: bool = True, base_dir: 
         OSError: If parent directory creation fails
     """
     # Use same validation as input paths
-    validated_path = sanitize_input_path(user_path, allow_absolute=False, base_dir=base_dir)
+    validated_path = sanitize_input_path(user_path, allow_absolute=allow_absolute, base_dir=base_dir)
 
     # Ensure parent directory exists
     parent_dir = validated_path.parent

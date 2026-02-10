@@ -12,6 +12,11 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional
 
+# Ensure shared modules are importable for path validation (project root for shared.*)
+_project_root = Path(__file__).resolve().parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 
 MODES = ["presentation", "scientific", "context", "auto"]
 POLICIES = ["preserve", "overwrite_all", "smart"]
@@ -70,15 +75,31 @@ class ProcessorDispatcher:
             return file_path
 
     def setup_logging(self):
-        """Setup JSONL logging if requested (altgen.py handles this)"""
+        """Setup JSONL logging if requested (altgen.py handles this).
+
+        Relative --log-jsonl paths resolve against CWD; path is then validated.
+        """
         if hasattr(self.args, 'log_jsonl') and self.args.log_jsonl:
-            # Create the directory and file
-            log_dir = os.path.dirname(self.args.log_jsonl)
-            if log_dir:
-                os.makedirs(log_dir, exist_ok=True)
+            from shared.path_validator import validate_output_path, SecurityError
+
+            try:
+                raw = self.args.log_jsonl.strip()
+                if Path(raw).is_absolute():
+                    path_to_validate = raw
+                else:
+                    path_to_validate = str((Path.cwd() / raw).resolve())
+                validated_path = validate_output_path(
+                    path_to_validate,
+                    create_parents=True,
+                    allow_absolute=True,
+                    base_dir=Path.cwd(),
+                )
+            except (SecurityError, ValueError) as e:
+                print(f"Security Error (--log-jsonl): {e}")
+                raise SystemExit(1)
 
             # Create empty file with header
-            with open(self.args.log_jsonl, 'w') as f:
+            with open(validated_path, 'w', encoding='utf-8') as f:
                 import json
                 from datetime import datetime
                 header = {
@@ -89,7 +110,7 @@ class ProcessorDispatcher:
                 }
                 f.write(json.dumps(header) + '\n')
 
-            print(f"Logging to: {os.path.abspath(self.args.log_jsonl)}")
+            print(f"Logging to: {validated_path}")
 
     def select_processor(self) -> str:
         """Select which processor to use based on flags and command"""

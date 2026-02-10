@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-# Setup paths for shared modules
+# Setup paths for shared.* and core modules
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "shared"))
+sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "core"))
 
 # Import modules
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 from pptx_processor import PPTXAccessibilityProcessor
 
 logger = logging.getLogger(__name__)

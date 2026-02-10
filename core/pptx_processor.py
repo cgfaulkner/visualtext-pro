@@ -40,7 +40,7 @@ import io
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from collections import defaultdict
-from hashlib import md5
+from hashlib import sha256
 
 # Third-party imports for PPTX processing
 try:
@@ -60,10 +60,11 @@ except ImportError as e:
 
 # Setup paths for shared modules
 project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "shared"))
 
 # Import shared modules
-from config_manager import ConfigManager
+from shared.config_manager import ConfigManager
 from unified_alt_generator import FlexibleAltGenerator
 from decorative_filter import (
     is_force_decorative_by_filename,
@@ -235,8 +236,9 @@ class PPTXVisualElement:
             # For non-images, create hash based on properties
             try:
                 hash_content = f"{self.shape_type}_{self.width_px}_{self.height_px}_{self.text_content}"
-                import hashlib
-                self.element_hash = hashlib.md5(hash_content.encode()).hexdigest()[:8]  # 8 chars to match injector
+                self.element_hash = sha256(
+                    hash_content.encode()
+                ).hexdigest()[:8]  # 8 chars to match injector
             except:
                 # Fallback to simple string-based hash
                 self.element_hash = f"{slide_idx}{shape_idx}{element_type}"[:8]  # Keep under 8 chars
@@ -4772,15 +4774,26 @@ class PPTXAccessibilityProcessor:
             input_file.write(image_data)
 
         output_path = temp_manager.create_temp_file(suffix='.png')
+
+        # Get Inkscape command from config (tools.inkscape or selector.conversion_tools.inkscape_cmd)
+        config = getattr(self, 'config_manager', None)
+        config_dict = config.config if config else {}
+        inkscape_cmd = (
+            config_dict.get('tools', {}).get('inkscape')
+            or config_dict.get('selector', {}).get('conversion_tools', {}).get(
+                'inkscape_cmd'
+            )
+            or 'inkscape'
+        )
         
         try:
             # Strategy 1: Inkscape (best quality for vector formats)
-            if shutil.which('inkscape'):
+            if shutil.which(inkscape_cmd):
                 try:
                     logger.info(f"Trying Inkscape conversion for {filename}")
                     
                     cmd = [
-                        'inkscape',
+                        inkscape_cmd,
                         '--export-type=png',
                         '--export-dpi=300',
                         '--export-background=white',
@@ -4820,7 +4833,7 @@ class PPTXAccessibilityProcessor:
                 except Exception as e:
                     logger.warning(f"Inkscape conversion error: {e}")
             else:
-                logger.info("Inkscape not available")
+                logger.info(f"Inkscape ({inkscape_cmd}) not available")
             
             # Strategy 2: ImageMagick/GraphicsMagick
             magick_commands = ['magick', 'convert']  # Try both names

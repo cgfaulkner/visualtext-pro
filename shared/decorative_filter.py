@@ -1,7 +1,7 @@
 import re
 import logging
 from collections import defaultdict
-from hashlib import md5
+from hashlib import sha256
 from typing import Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -14,8 +14,8 @@ ENABLE_CORNER_CHECK = False
 ENABLE_DUPLICATE_CHECK = False
 
 def get_image_hash(image_bytes: bytes) -> str:
-    """Generate MD5 hash of image bytes."""
-    return md5(image_bytes).hexdigest()
+    """Generate SHA-256 hash of image bytes for deduplication and cache keys."""
+    return sha256(image_bytes).hexdigest()
 
 def is_force_decorative_by_filename(filename: str, config: Dict[str, Any]) -> bool:
     """

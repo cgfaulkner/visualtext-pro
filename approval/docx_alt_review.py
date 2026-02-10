@@ -58,8 +58,8 @@ def collect_original_alts(pptx_path) -> dict:
                     image_hash = ""
                     try:
                         if hasattr(shape, 'image') and hasattr(shape.image, 'blob'):
-                            from hashlib import md5
-                            image_hash = md5(shape.image.blob).hexdigest()[:8]
+                            from hashlib import sha256
+                            image_hash = sha256(shape.image.blob).hexdigest()[:8]
                     except:
                         pass
                     
