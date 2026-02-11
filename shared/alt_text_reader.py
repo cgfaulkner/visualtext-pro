@@ -146,7 +146,9 @@ def get_alt_text_source(shape) -> str:
     'descr', 'title', 'group_child', or 'none'
     """
     try:
-        element = getattr(shape, "_element", None) or getattr(shape, "element", None)
+        element = getattr(shape, "_element", None)
+        if element is None:
+            element = getattr(shape, "element", None)
         if element is None:
             return "none"
 

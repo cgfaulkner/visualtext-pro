@@ -889,7 +889,9 @@ class ManifestProcessor:
                     entries_needing_generation.append(entry)
             
             logger.info(f"Found {len(entries_needing_generation)} entries needing LLaVA generation")
-            
+
+            job_id = f"manifest_{int(time.time() * 1000)}"
+
             for entry in entries_needing_generation:
                 try:
                     # Verify crop_path exists
@@ -933,7 +935,8 @@ class ManifestProcessor:
                         prompt_type="default",
                         return_metadata=True,
                         manifest=manifest,
-                        entry_key=entry.instance_key
+                        entry_key=entry.instance_key,
+                        job_id=job_id,
                     )
                     
                     if isinstance(result, tuple):
@@ -1393,11 +1396,12 @@ class ManifestProcessor:
         # Generate ALT text for entries that need it
         generation_errors = []
         generated_count = 0
-        
+        job_id = f"manifest_legacy_{int(time.time() * 1000)}"
+
         for entry in entries_needing_generation:
             try:
                 start_time = time.time()
-                
+
                 # Check if this shape type should have ALT text generated via LLaVA
                 if manifest.should_generate_for_shape_type(entry.shape_type):
                     # Generate ALT text using LLaVA with thumbnail
@@ -1405,7 +1409,8 @@ class ManifestProcessor:
                         alt_text = self.alt_generator.generate_alt_text(
                             entry.thumbnail_path,
                             manifest=manifest,
-                            entry_key=entry.key
+                            entry_key=entry.key,
+                            job_id=job_id,
                         )
                         
                         if alt_text and alt_text.strip():

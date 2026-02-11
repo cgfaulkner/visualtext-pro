@@ -173,21 +173,57 @@ class ServiceError(ProcessingError):
 class LLaVAConnectionError(ServiceError):
     """LLaVA service connection or availability errors."""
 
-    def __init__(self, endpoint: str, status_code: Optional[int] = None, **kwargs):
-        message = f"LLaVA service unavailable at {endpoint}"
-        if status_code:
-            message += f" (status: {status_code})"
+    def __init__(self, endpoint: str, status_code: Optional[int] = None,
+                 message: Optional[str] = None,
+                 next_steps: Optional[List[str]] = None,
+                 **kwargs):
+        msg = message or f"LLaVA service unavailable at {endpoint}"
+        if status_code and not message:
+            msg += f" (status: {status_code})"
 
-        recovery_hint = "Check LLaVA service status and network connectivity"
-        if status_code == 503:
-            recovery_hint = "LLaVA service is temporarily overloaded. Try again in a few minutes."
-        elif status_code == 404:
-            recovery_hint = "LLaVA endpoint not found. Check configuration."
+        recovery_hint = kwargs.pop('recovery_hint', None)
+        if recovery_hint is None:
+            recovery_hint = "Check LLaVA service status and network connectivity"
+            if status_code == 503:
+                recovery_hint = "LLaVA service is temporarily overloaded. Try again in a few minutes."
+            elif status_code == 404:
+                recovery_hint = "LLaVA endpoint not found. Check configuration."
+        if next_steps:
+            recovery_hint = " ".join(next_steps) if isinstance(next_steps, list) else str(next_steps)
+
+        details = kwargs.pop('details', None) or {'endpoint': endpoint, 'status_code': status_code}
+        if next_steps:
+            details = {**details, 'next_steps': next_steps}
 
         super().__init__(
-            message=message,
+            message=msg,
             error_code='LLAVA_CONNECTION_ERROR',
-            details={'endpoint': endpoint, 'status_code': status_code},
+            details=details,
+            recoverable=True,
+            recovery_hint=recovery_hint,
+            **kwargs
+        )
+
+
+class LLaVAUnavailableError(ServiceError):
+    """Ollama/LLaVA unavailable (preflight or circuit breaker). Use for fail_fast."""
+
+    def __init__(self, message: str, base_url: str, endpoint: str,
+                 next_steps: Optional[List[str]] = None,
+                 classification: Optional[str] = None,
+                 **kwargs):
+        details = kwargs.pop('details', None) or {}
+        details['base_url'] = base_url
+        details['endpoint'] = endpoint
+        if classification:
+            details['classification'] = classification
+        if next_steps:
+            details['next_steps'] = next_steps
+        recovery_hint = " ".join(next_steps) if next_steps else "Start Ollama; verify config."
+        super().__init__(
+            message=message,
+            error_code='LLAVA_UNAVAILABLE',
+            details=details,
             recoverable=True,
             recovery_hint=recovery_hint,
             **kwargs

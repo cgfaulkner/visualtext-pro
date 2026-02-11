@@ -21,6 +21,10 @@ import json
 from typing import Dict, Any, Optional, List, Tuple, Callable
 from dataclasses import dataclass, field
 from enum import Enum
+
+# Job-scoped resilience: classification for preflight failures
+CLASSIFICATION_MODEL_MISSING = "MODEL_MISSING"
+CLASSIFICATION_UNREACHABLE = "UNREACHABLE"
 from pathlib import Path
 from urllib.parse import urljoin
 import requests
@@ -57,6 +61,18 @@ class HealthCheckResult:
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class HealthResult:
+    """Job-scoped preflight result with classification for resilience."""
+    checked_at: float
+    is_healthy: bool
+    details: Dict[str, Any]
+    next_retry_at: Optional[float] = None  # When circuit breaker is open
+    classification: Optional[str] = None   # MODEL_MISSING | UNREACHABLE | None
+    reason: Optional[str] = None
+    next_steps: Optional[List[str]] = None
 
 
 @dataclass
@@ -126,11 +142,15 @@ class ConnectionPool:
 
 
 class CircuitBreaker:
-    """Circuit breaker implementation for service protection."""
+    """Circuit breaker implementation for service protection.
+    Uses injectable time_fn so tests can advance time without sleep.
+    """
 
-    def __init__(self, name: str, config: CircuitBreakerConfig):
+    def __init__(self, name: str, config: CircuitBreakerConfig,
+                 time_fn: Optional[Callable[[], float]] = None):
         self.name = name
         self.config = config
+        self._time = time_fn if time_fn is not None else time.time
         self.state = CircuitBreakerState.CLOSED
         self.failure_count = 0
         self.success_count = 0
@@ -146,7 +166,7 @@ class CircuitBreaker:
 
             if self.state == CircuitBreakerState.OPEN:
                 # Check if we should transition to half-open
-                if time.time() - self.last_failure_time >= self.config.recovery_timeout:
+                if self._time() - self.last_failure_time >= self.config.recovery_timeout:
                     self.state = CircuitBreakerState.HALF_OPEN
                     self.half_open_calls = 0
                     self.success_count = 0
@@ -175,7 +195,7 @@ class CircuitBreaker:
         """Record a failed operation."""
         with self.lock:
             self.failure_count += 1
-            self.last_failure_time = time.time()
+            self.last_failure_time = self._time()
 
             if self.state == CircuitBreakerState.CLOSED:
                 if self.failure_count >= self.config.failure_threshold:
@@ -497,16 +517,39 @@ class SmartRetryHandler:
         raise last_exception
 
 
+def _composite_key(job_id: Optional[str], provider_config: Dict[str, Any],
+                   include_provider: bool = True) -> Tuple:
+    """Build composite key (job_id, base_url, model[, provider]) for cache/breaker."""
+    jid = job_id if job_id is not None else "global"
+    base_url = provider_config.get("base_url", "http://127.0.0.1:11434")
+    model = provider_config.get("model", "llava")
+    if include_provider:
+        provider = provider_config.get("name", "llava")
+        return (jid, base_url, model, provider)
+    return (jid, base_url, model)
+
+
 class LLaVAConnectivityManager:
     """Main class for managing LLaVA connectivity with hardening features."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any],
+                 time_fn: Optional[Callable[[], float]] = None):
         self.config = config
+        self._time_fn = time_fn or time.time
         self.connection_pool = ConnectionPool()
         self.health_checker = HealthChecker(self.connection_pool)
 
-        # Initialize circuit breakers for each provider
+        # Initialize circuit breakers for each provider (legacy)
         self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+
+        # Job-scoped health cache: key = (job_id, base_url, model[, provider])
+        self._job_health_cache: Dict[Tuple, HealthResult] = {}
+        self._job_health_cache_ttl = 3600.0  # 1 hour TTL; eviction by size if needed
+        self._job_health_cache_max_size = 500
+
+        # Job-scoped circuit breakers: key = (job_id, base_url, model, provider)
+        self._job_breakers: Dict[Tuple, CircuitBreaker] = {}
+        self._job_breakers_lock = threading.RLock()
 
         # Initialize retry handlers
         self.retry_handler = SmartRetryHandler(RetryConfig(
@@ -515,7 +558,7 @@ class LLaVAConnectivityManager:
             max_delay=config.get('retry_max_delay', 60.0)
         ))
 
-        # Health check cache
+        # Health check cache (legacy)
         self.health_cache: Dict[str, HealthCheckResult] = {}
         self.health_cache_ttl = config.get('health_cache_ttl', 30.0)  # 30 seconds
 
@@ -529,7 +572,7 @@ class LLaVAConnectivityManager:
             self.start_background_monitoring()
 
     def get_circuit_breaker(self, provider_name: str) -> CircuitBreaker:
-        """Get or create circuit breaker for provider."""
+        """Get or create circuit breaker for provider (legacy)."""
         if provider_name not in self.circuit_breakers:
             cb_config = CircuitBreakerConfig(
                 failure_threshold=self.config.get('circuit_breaker_failure_threshold', 5),
@@ -537,9 +580,135 @@ class LLaVAConnectivityManager:
                 success_threshold=self.config.get('circuit_breaker_success_threshold', 2),
                 timeout=self.config.get('circuit_breaker_timeout', 30.0)
             )
-            self.circuit_breakers[provider_name] = CircuitBreaker(provider_name, cb_config)
-
+            self.circuit_breakers[provider_name] = CircuitBreaker(
+                provider_name, cb_config, time_fn=self._time_fn
+            )
         return self.circuit_breakers[provider_name]
+
+    def _get_job_breaker(self, composite_key: Tuple,
+                         resilience_config: Optional[Dict[str, Any]] = None
+                         ) -> CircuitBreaker:
+        """Get or create job-scoped circuit breaker. Key is (job_id, base_url, model, provider)."""
+        with self._job_breakers_lock:
+            if composite_key not in self._job_breakers:
+                cb_cfg = (resilience_config or {}).get("circuit_breaker") or {}
+                cb_config = CircuitBreakerConfig(
+                    failure_threshold=cb_cfg.get("failure_threshold", 3),
+                    recovery_timeout=float(cb_cfg.get("open_seconds", 60)),
+                    success_threshold=1,
+                    half_open_max_calls=1,
+                    timeout=30.0
+                )
+                name = f"job_{composite_key[0]}_{composite_key[1]}_{composite_key[2]}"
+                self._job_breakers[composite_key] = CircuitBreaker(
+                    name, cb_config, time_fn=self._time_fn
+                )
+            return self._job_breakers[composite_key]
+
+    def validate_connectivity_for_job(self, job_id: Optional[str],
+                                     provider_config: Dict[str, Any],
+                                     resilience_config: Dict[str, Any]) -> HealthResult:
+        """
+        Run preflight once per job (cached). Uses preflight_timeout_seconds.
+        Returns HealthResult with is_healthy, classification (MODEL_MISSING/UNREACHABLE), next_steps.
+        """
+        key = _composite_key(job_id, provider_config, include_provider=True)
+        if key in self._job_health_cache:
+            return self._job_health_cache[key]
+        timeout = float(resilience_config.get("preflight_timeout_seconds", 3))
+        base_url = provider_config.get("base_url", "http://127.0.0.1:11434")
+        model = provider_config.get("model", "llava")
+        now = self._time_fn()
+        # Run preflight: /api/tags then model check (caller checks breaker first)
+        health_result = self.health_checker.check_ollama_health(base_url, timeout=timeout)
+        if not health_result.success:
+            result = HealthResult(
+                checked_at=now,
+                is_healthy=False,
+                details={"endpoint": base_url, "error": health_result.error},
+                classification=CLASSIFICATION_UNREACHABLE,
+                reason=health_result.error or "Ollama unreachable",
+                next_steps=[
+                    "Start Ollama: ollama serve (or start Ollama)",
+                    "Verify base_url and port in config",
+                    "Retry health check"
+                ]
+            )
+            self._job_health_cache[key] = result
+            self._evict_job_health_cache_if_needed()
+            return result
+        model_result = self.health_checker.check_model_availability(
+            base_url, model, timeout=timeout
+        )
+        if not model_result.success:
+            result = HealthResult(
+                checked_at=now,
+                is_healthy=False,
+                details={"model": model, "available": model_result.metadata.get("available_models", [])},
+                classification=CLASSIFICATION_MODEL_MISSING,
+                reason=model_result.error or f"Model '{model}' not found",
+                next_steps=[
+                    "ollama pull <model>",
+                    "ollama list",
+                    "Verify model name in config"
+                ]
+            )
+            self._job_health_cache[key] = result
+            self._evict_job_health_cache_if_needed()
+            return result
+        result = HealthResult(
+            checked_at=now,
+            is_healthy=True,
+            details={"base_url": base_url, "model": model},
+            classification=None,
+            reason=None,
+            next_steps=None
+        )
+        self._job_health_cache[key] = result
+        self._evict_job_health_cache_if_needed()
+        return result
+
+    def _evict_job_health_cache_if_needed(self) -> None:
+        """Evict oldest entries if over max size."""
+        if len(self._job_health_cache) <= self._job_health_cache_max_size:
+            return
+        by_time = sorted(
+            self._job_health_cache.items(),
+            key=lambda x: x[1].checked_at
+        )
+        to_remove = len(by_time) - self._job_health_cache_max_size
+        for i in range(to_remove):
+            del self._job_health_cache[by_time[i][0]]
+
+    def should_allow_request(self, job_id: Optional[str],
+                            provider_config: Dict[str, Any],
+                            resilience_config: Optional[Dict[str, Any]] = None
+                            ) -> Tuple[bool, str]:
+        """
+        If circuit breaker is open for this job/config, return (False, reason).
+        Otherwise return (True, '').
+        """
+        key = _composite_key(job_id, provider_config, include_provider=True)
+        breaker = self._get_job_breaker(key, resilience_config)
+        if breaker.can_execute():
+            return (True, "")
+        next_retry = breaker.last_failure_time + breaker.config.recovery_timeout
+        return (False, f"Circuit breaker open; next retry at {next_retry}")
+
+    def record_success(self, job_id: Optional[str], provider_config: Dict[str, Any],
+                       resilience_config: Optional[Dict[str, Any]] = None) -> None:
+        """Record successful request for job-scoped circuit breaker."""
+        key = _composite_key(job_id, provider_config, include_provider=True)
+        breaker = self._get_job_breaker(key, resilience_config)
+        breaker.record_success()
+
+    def record_failure(self, job_id: Optional[str], err: Exception,
+                       provider_config: Dict[str, Any],
+                       resilience_config: Optional[Dict[str, Any]] = None) -> None:
+        """Record failed request for job-scoped circuit breaker."""
+        key = _composite_key(job_id, provider_config, include_provider=True)
+        breaker = self._get_job_breaker(key, resilience_config)
+        breaker.record_failure()
 
     def validate_connectivity(self, provider_config: Dict[str, Any]) -> Dict[str, Any]:
         """
