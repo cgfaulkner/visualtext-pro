@@ -4,6 +4,5 @@ Temp/
 output/
 Reviewed Reports/
 docs/generated/
-*.json
 *.log
 *.lock
