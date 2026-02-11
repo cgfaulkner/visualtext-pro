@@ -1,0 +1,9 @@
+.alt_pipeline_*/
+logs/
+Temp/
+output/
+Reviewed Reports/
+docs/generated/
+*.json
+*.log
+*.lock
