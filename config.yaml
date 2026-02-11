@@ -115,6 +115,18 @@ ai_providers:
       retry_attempts: 5
       include_slide_notes: true
       include_slide_text: true
+      resilience:
+        unavailable_mode: fail_fast   # fail_fast | skip_generation | defer_generation
+        preflight_per_job: true
+        preflight_timeout_seconds: 3
+        circuit_breaker:
+          enabled: true
+          failure_threshold: 3
+          open_seconds: 60
+        defer:
+          tag: "LLAVA_DEFERRED"
+          reason_field: "defer_reason"
+        write_status_artifact: false   # if true, always write alt_status_by_key.json
 cost_tracking:
   enabled: true
   log_token_usage: true

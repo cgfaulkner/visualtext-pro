@@ -24,10 +24,19 @@ except Exception:
 # Absolute imports for pytest-safe collection
 from shared.config_manager import ConfigManager
 try:
-    from shared.llava_connectivity import LLaVAConnectivityManager, ServiceState
+    from shared.llava_connectivity import (
+        LLaVAConnectivityManager,
+        ServiceState,
+        HealthResult,
+        CLASSIFICATION_MODEL_MISSING,
+        CLASSIFICATION_UNREACHABLE,
+    )
 except ImportError:
     LLaVAConnectivityManager = None
     ServiceState = None
+    HealthResult = None
+    CLASSIFICATION_MODEL_MISSING = "MODEL_MISSING"
+    CLASSIFICATION_UNREACHABLE = "UNREACHABLE"
 
 import logging
 import re
@@ -35,9 +44,10 @@ import base64
 import json
 import psutil
 import platform
-from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
+from typing import Optional, Dict, Any, Tuple, List, TYPE_CHECKING
 from pathlib import Path
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import time
 from urllib.parse import urljoin
 
@@ -48,6 +58,18 @@ if TYPE_CHECKING:
         from alt_manifest import AltManifest
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AltGenerationOutcome:
+    """Canonical outcome for ALT generation (Option A: used by generate_alt_outcome)."""
+    status: str  # "ok" | "skipped" | "deferred" | "error"
+    text: Optional[str] = None
+    reason: Optional[str] = None
+    next_steps: Optional[List[str]] = None
+    provider: str = ""
+    breaker_state: Optional[str] = None
+
 
 # Helper functions for Ollama request handling
 import requests
@@ -134,24 +156,32 @@ def generate_alt_text(image_bytes_or_path: Any, cfg: dict, context: str = "") ->
 
 class BaseAltProvider(ABC):
     """Abstract base class for ALT text providers."""
-    
+
     def __init__(self, provider_name: str, config: Dict[str, Any], config_manager: ConfigManager):
         self.provider_name = provider_name
         self.config = config
         self.config_manager = config_manager
         self.active_prompt_type = 'default'
-        
+
     @abstractmethod
     def generate_alt_text(self, image_path: str, prompt: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
         Generate ALT text for an image.
-        
+
         Returns:
             Tuple of (generation_result, metadata) where:
             - generation_result: {"status": "ok", "text": "..."} or {"status": "fail", "reason": "..."}
             - metadata includes token usage, cost, etc.
         """
         pass
+
+    def generate_alt_outcome(self, image_path: str, prompt: str,
+                             job_id: Optional[str] = None) -> Optional[AltGenerationOutcome]:
+        """
+        Generate ALT and return structured outcome. Default: not implemented (returns None).
+        LLaVAProvider overrides and returns AltGenerationOutcome.
+        """
+        return None
     
     def set_prompt_type(self, prompt_type: str):
         """Set the active prompt type."""
@@ -247,56 +277,171 @@ class LLaVAProvider(BaseAltProvider):
             self.pre_flight_validated = False
             return False
 
+    def _provider_config(self) -> Dict[str, Any]:
+        """Build provider_config for connectivity APIs."""
+        return {
+            "name": self.provider_name,
+            "base_url": self.config.get("base_url", "http://127.0.0.1:11434"),
+            "model": self.config.get("model", "llava"),
+        }
+
+    def _apply_unavailable_mode(self, mode: str, health: Optional[HealthResult],
+                                reason: str) -> AltGenerationOutcome:
+        """Return skipped/deferred outcome or raise for fail_fast."""
+        try:
+            from shared.processing_exceptions import LLaVAUnavailableError
+        except ImportError:
+            from processing_exceptions import LLaVAUnavailableError
+        base_url = self.config.get("base_url", "http://127.0.0.1:11434")
+        endpoint = self.config.get("endpoint", "/api/generate")
+        next_steps = (health.next_steps if health else None) or [
+            "Run: ollama serve (or start Ollama); ollama pull llava; ollama list; verify config base_url"
+        ]
+        if mode == "fail_fast":
+            raise LLaVAUnavailableError(
+                message=reason or "Ollama/LLaVA unavailable",
+                base_url=base_url,
+                endpoint=endpoint,
+                next_steps=next_steps,
+                classification=health.classification if health else None,
+            )
+        if mode == "skip_generation":
+            return AltGenerationOutcome(
+                status="skipped",
+                text=None,
+                reason=reason,
+                next_steps=next_steps,
+                provider=self.provider_name,
+                breaker_state=None,
+            )
+        # defer_generation
+        return AltGenerationOutcome(
+            status="deferred",
+            text=None,
+            reason=reason,
+            next_steps=next_steps,
+            provider=self.provider_name,
+            breaker_state=None,
+        )
+
+    def generate_alt_outcome(self, image_path: str, custom_prompt: str,
+                             job_id: Optional[str] = None) -> AltGenerationOutcome:
+        """
+        Core logic with job-scoped preflight, circuit breaker, and unavailable modes.
+        Returns AltGenerationOutcome. Caller writes artifacts from outcome.
+        """
+        resilience = self.config.get("resilience") or {}
+        unavailable_mode = resilience.get("unavailable_mode", "fail_fast")
+        preflight_per_job = resilience.get("preflight_per_job", True)
+        provider_config = self._provider_config()
+
+        # (1) Breaker before preflight: if OPEN, skip preflight and apply unavailable_mode
+        if self.connectivity_manager and resilience:
+            allowed, reason = self.connectivity_manager.should_allow_request(
+                job_id, provider_config, resilience
+            )
+            if not allowed:
+                return self._apply_unavailable_mode(
+                    unavailable_mode, None, reason or "Circuit breaker open"
+                )
+
+        # (2) Preflight once per job (cached)
+        if self.connectivity_manager and preflight_per_job and resilience:
+            health = self.connectivity_manager.validate_connectivity_for_job(
+                job_id, provider_config, resilience
+            )
+            if not health.is_healthy:
+                return self._apply_unavailable_mode(
+                    unavailable_mode, health,
+                    health.reason or "Preflight failed"
+                )
+
+        # (3) Execute generation; record_success / record_failure (job_id=None uses global fallback)
+        try:
+            gen_result, meta = self._execute_generation_request(custom_prompt, image_path)
+            if self.connectivity_manager and resilience:
+                self.connectivity_manager.record_success(
+                    job_id, provider_config, resilience
+                )
+            text = (gen_result or {}).get("text", "").strip() if gen_result else ""
+            return AltGenerationOutcome(
+                status="ok",
+                text=text or None,
+                reason=None,
+                next_steps=None,
+                provider=self.provider_name,
+                breaker_state=None,
+            )
+        except Exception as e:
+            if self.connectivity_manager and resilience:
+                self.connectivity_manager.record_failure(
+                    job_id, e, provider_config, resilience
+                )
+            if unavailable_mode == "fail_fast":
+                try:
+                    from shared.processing_exceptions import LLaVAUnavailableError
+                except ImportError:
+                    from processing_exceptions import LLaVAUnavailableError
+                base_url = self.config.get("base_url", "http://127.0.0.1:11434")
+                raise LLaVAUnavailableError(
+                    message=f"Ollama/LLaVA request failed: {e}",
+                    base_url=base_url,
+                    endpoint=self.config.get("endpoint", "/api/generate"),
+                    next_steps=[
+                        "Run: ollama serve; ollama pull llava; ollama list; verify config"
+                    ],
+                ) from e
+            return AltGenerationOutcome(
+                status="error",
+                text=None,
+                reason=str(e),
+                next_steps=["Check Ollama and config; retry."],
+                provider=self.provider_name,
+                breaker_state=None,
+            )
+
     def generate_alt_text(self, image_path: str, custom_prompt: str) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
-        Returns (generation_result, metadata). Must NOT send chat objects to /api/generate.
-        Enhanced with connectivity hardening and pre-flight validation.
+        Returns (generation_result, metadata). Legacy API; delegates to generate_alt_outcome
+        and converts for backward compatibility.
         """
-        # Run pre-flight validation
-        if not self._run_pre_flight_validation():
-            # Create graceful degradation response
-            degraded_text = self._create_degradation_response(custom_prompt, image_path)
+        outcome = self.generate_alt_outcome(image_path, custom_prompt, job_id=None)
+        if outcome.status == "ok":
             return (
-                {"status": "degraded", "text": degraded_text},
+                {"status": "ok", "text": outcome.text or ""},
                 {
-                    "success": True,  # Mark as success since we provided fallback
+                    "success": True,
+                    "provider": self.provider_name,
+                    "generation_time": 0.0,
+                    "tokens_used": 0,
+                    "cost_estimate": 0.0,
+                },
+            )
+        if outcome.status in ("skipped", "deferred"):
+            return (
+                {"status": "degraded", "text": self._create_degradation_response(custom_prompt, image_path)},
+                {
+                    "success": True,
                     "provider": self.provider_name,
                     "degraded": True,
-                    "reason": "Pre-flight validation failed",
-                    "generation_time": 0.1,
+                    "reason": outcome.reason or outcome.status,
+                    "generation_time": 0.0,
                     "tokens_used": 0,
-                    "cost_estimate": 0.0
-                }
+                    "cost_estimate": 0.0,
+                },
             )
-        # Use hardened execution if connectivity manager is available
-        if self.connectivity_manager:
-            try:
-                result = self.connectivity_manager.execute_with_hardening(
-                    self._execute_generation_request,
-                    self.provider_name,
-                    custom_prompt,
-                    image_path
-                )
-                return result
-            except Exception as e:
-                # If hardened execution fails, create degradation response
-                logger.warning(f"Hardened execution failed for {self.provider_name}: {e}")
-                degraded_text = self._create_degradation_response(custom_prompt, image_path)
-                return (
-                    {"status": "degraded", "text": degraded_text},
-                    {
-                        "success": True,
-                        "provider": self.provider_name,
-                        "degraded": True,
-                        "reason": f"Hardened execution failed: {str(e)}",
-                        "generation_time": 0.1,
-                        "tokens_used": 0,
-                        "cost_estimate": 0.0
-                    }
-                )
-        else:
-            # Fallback to original execution without hardening
-            return self._execute_generation_request(custom_prompt, image_path)
+        # error
+        return (
+            {"status": "fail", "reason": outcome.reason or "error"},
+            {
+                "success": False,
+                "provider": self.provider_name,
+                "error": outcome.reason,
+                "generation_time": 0.0,
+                "tokens_used": 0,
+                "cost_estimate": 0.0,
+            },
+        )
 
     def _execute_generation_request(self, custom_prompt: str, image_path: str) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
@@ -617,46 +762,26 @@ class FlexibleAltGenerator:
         for provider in self.providers.values():
             provider.set_prompt_type(prompt_type)
 
-    def generate_alt_text(self, image_path: str,
-                         prompt_type: Optional[str] = None,
-                         context: Optional[str] = None,
-                         custom_prompt: Optional[str] = None,
-                         force_provider: Optional[str] = None,
-                         return_metadata: bool = False,
-                         manifest: Optional[AltManifest] = None,
-                         entry_key: Optional[str] = None) -> Optional[str]:
+    def generate_alt_outcome(self, image_path: str,
+                             prompt_type: Optional[str] = None,
+                             context: Optional[str] = None,
+                             custom_prompt: Optional[str] = None,
+                             force_provider: Optional[str] = None,
+                             job_id: Optional[str] = None) -> AltGenerationOutcome:
         """
-        Generate ALT text using the provider fallback chain with manifest integration.
-        
-        Args:
-            image_path: Path to image file
-            prompt_type: Type of prompt to use
-            context: Additional context
-            custom_prompt: Custom prompt override
-            force_provider: Force use of specific provider
-            return_metadata: If True, return (alt_text, metadata) tuple
-            manifest: Optional ALT manifest for normalization and caching
-            entry_key: Optional manifest entry key for recording results
-            
-        Returns:
-            Generated ALT text or None if all providers fail
-            If return_metadata=True, returns (alt_text, metadata) tuple
+        Generate ALT and return structured outcome. Use this for artifact-writing paths.
         """
-        self.usage_stats['total_requests'] += 1
-        self.usage_stats['daily_requests'] += 1
-        
-        # Build prompt
         if custom_prompt:
             prompt = custom_prompt
         else:
             use_prompt_type = prompt_type or 'default'
-            prompt = self.config_manager.get_prompt(use_prompt_type, context)
-        
-        # Determine which providers to try with smart retry logic
+            prompt = self.config_manager.get_prompt(use_prompt_type, context or "")
         if force_provider:
             if force_provider not in self.providers:
-                logger.error(f"Forced provider {force_provider} not available")
-                from processing_exceptions import ProcessingError
+                try:
+                    from shared.processing_exceptions import ProcessingError
+                except ImportError:
+                    from processing_exceptions import ProcessingError
                 raise ProcessingError(
                     f"ALT text generation failed: forced provider '{force_provider}' not available",
                     error_code="PROVIDER_NOT_AVAILABLE",
@@ -665,154 +790,111 @@ class FlexibleAltGenerator:
             providers_to_try = [force_provider]
         else:
             providers_to_try = [p for p in self.fallback_chain if p in self.providers]
-        
-        # Try providers in order
-        max_attempts = self.config_manager.config.get('provider_settings', {}).get('max_fallback_attempts', 3)
-        attempts = 0
-        final_metadata = {"attempts": [], "successful_provider": None}
-        
         for provider_name in providers_to_try:
-            if attempts >= max_attempts:
-                break
-
-            # Check if provider should be retried based on smart recovery logic
-            if not self._should_retry_provider(provider_name):
-                failure_info = self.provider_failures.get(provider_name, {})
-                next_retry = failure_info.get('next_retry_time', 0)
-                wait_time = max(0, int(next_retry - time.time()))
-                logger.info(
-                    f"Provider {provider_name} in backoff period. "
-                    f"Next retry in {wait_time}s. Skipping for now."
-                )
-                continue
-
-            attempts += 1
             provider = self.providers[provider_name]
-
-            logger.info(f"Attempting ALT text generation with {provider_name} (attempt {attempts})")
-
+            if hasattr(provider, 'generate_alt_outcome') and provider.generate_alt_outcome is not BaseAltProvider.generate_alt_outcome:
+                outcome = provider.generate_alt_outcome(image_path, prompt, job_id=job_id)
+                if outcome is not None:
+                    return outcome
+            # Fallback: call generate_alt_text and build outcome
             try:
-                generation_result, metadata = provider.generate_alt_text(image_path, prompt)
-
-                # Add attempt info to final metadata
-                final_metadata["attempts"].append({
-                    "provider": provider_name,
-                    "model": metadata.get("model", "unknown"),
-                    "success": metadata.get("success", False),
-                    "error": metadata.get("error"),
-                    "generation_time": metadata.get("generation_time", 0),
-                    "cost_estimate": metadata.get("cost_estimate", 0),
-                    "tokens_used": metadata.get("tokens_used", 0)
-                })
-
-                # Update usage statistics
-                self._update_usage_stats(provider_name, metadata)
-
-                if generation_result and generation_result.get("status") == "ok":
-                    self.usage_stats['successful_requests'] += 1
-                    final_metadata["successful_provider"] = provider_name
-                    final_metadata["successful_model"] = metadata.get("model", "unknown")
-
-                    logger.info(f"✅ Successfully generated ALT text with {provider_name} ({metadata.get('model', 'unknown')})")
-
-                    # Record success to reset failure state
-                    self._record_success(provider_name)
-
-                    # Apply single-pass normalization with manifest integration
-                    raw_result = generation_result.get("text", "")
-                    if manifest and entry_key:
-                        # Use manifest for sentence-safe normalization
-                        normalized_result, was_truncated = manifest.normalize_alt_text(raw_result)
-                        
-                        # Update manifest entry with generation details
-                        entry = manifest.get_entry(entry_key)
-                        if entry:
-                            entry.llm_raw = raw_result
-                            entry.final_alt = normalized_result
-                            entry.truncated_flag = was_truncated
-                            entry.llava_called = True
-                            entry.decision_reason = "generated"
-                            entry.duration_ms = metadata.get("generation_time", 0) * 1000
-                            entry.provider = provider_name
-                            entry.prompt_type = prompt_type or "default"
-                            manifest.add_entry(entry)
-                        
-                        result = normalized_result
-                    else:
-                        # Apply legacy post-processing if no manifest
-                        self._last_provider = provider
-                        self._last_image_path = image_path
-                        result = self._post_process_alt_text(raw_result)
-
-                    if return_metadata:
-                        return result, final_metadata
-                    else:
-                        return result
-                else:
-                    # Handle failure cases
-                    if generation_result and generation_result.get("status") == "fail":
-                        error_message = generation_result.get("reason", "Unknown failure")
-                    elif generation_result and generation_result.get("status") == "degraded":
-                        # Degraded responses are still successes
-                        self.usage_stats['successful_requests'] += 1
-                        final_metadata["successful_provider"] = provider_name
-                        final_metadata["successful_model"] = metadata.get("model", "degraded")
-
-                        logger.warning(f"⚠️ Degraded response from {provider_name}: {generation_result.get('text', '')[:50]}...")
-
-                        # Record success to reset failure state
-                        self._record_success(provider_name)
-
-                        result = generation_result.get("text", "")
-                        if return_metadata:
-                            return result, final_metadata
-                        else:
-                            return result
-                    else:
-                        error_message = metadata.get("error", "No result returned")
-
-                    status_code = metadata.get("status_code")
-                    # Create a mock exception for failure recording
-                    mock_error = Exception(error_message)
-                    self._record_failure(provider_name, mock_error, status_code)
-                    logger.warning(
-                        f"Provider {provider_name} failed: {error_message}"
+                gen_result, metadata = provider.generate_alt_text(image_path, prompt)
+                if gen_result and gen_result.get("status") == "ok":
+                    return AltGenerationOutcome(
+                        status="ok",
+                        text=(gen_result.get("text") or "").strip() or None,
+                        reason=None,
+                        next_steps=None,
+                        provider=provider_name,
+                        breaker_state=None,
                     )
-
+                if gen_result and gen_result.get("status") == "degraded":
+                    return AltGenerationOutcome(
+                        status="skipped",
+                        text=None,
+                        reason=metadata.get("reason", "degraded"),
+                        next_steps=None,
+                        provider=provider_name,
+                        breaker_state=None,
+                    )
             except Exception as e:
-                err_meta = {"error": str(e)}
-                status_code = None
-                if hasattr(e, "response") and getattr(e.response, "status_code", None):
-                    status_code = e.response.status_code
-                    err_meta["status_code"] = status_code
-                
-                # Record failure with smart recovery logic
-                self._record_failure(provider_name, e, status_code)
-                
-                logger.error(f"Provider {provider_name} failed: {str(e)}")
-                final_metadata["attempts"].append({
-                    "provider": provider_name,
-                    "model": "unknown",
-                    "success": False,
-                    "error": str(e),
-                    "generation_time": 0,
-                    "cost_estimate": 0,
-                    "tokens_used": 0
-                })
-                continue
-        
-        logger.error(f"❌ All providers failed for image: {image_path}")
-        final_metadata["successful_provider"] = None
-
-        from processing_exceptions import ProcessingError
-        raise ProcessingError(
-            f"ALT text generation failed: all providers failed for image {image_path}",
-            error_code="ALL_PROVIDERS_FAILED",
-            category="service",
-            details=final_metadata,
-            recoverable=True,
-            recovery_hint="Check provider connectivity and try again"
+                return AltGenerationOutcome(
+                    status="error",
+                    text=None,
+                    reason=str(e),
+                    next_steps=["Check provider and retry."],
+                    provider=provider_name,
+                    breaker_state=None,
+                )
+        return AltGenerationOutcome(
+            status="error",
+            text=None,
+            reason="No provider available",
+            next_steps=[],
+            provider="",
+            breaker_state=None,
         )
+
+    def generate_alt_text(self, image_path: str,
+                         prompt_type: Optional[str] = None,
+                         context: Optional[str] = None,
+                         custom_prompt: Optional[str] = None,
+                         force_provider: Optional[str] = None,
+                         return_metadata: bool = False,
+                         manifest: Optional[AltManifest] = None,
+                         entry_key: Optional[str] = None,
+                         job_id: Optional[str] = None) -> Optional[str]:
+        """
+        Generate ALT text (returns str). Thin wrapper around generate_alt_outcome:
+        ok -> return outcome.text; skipped/deferred/error -> return "".
+        Supports return_metadata and manifest/entry_key for legacy callers.
+        """
+        self.usage_stats['total_requests'] += 1
+        self.usage_stats['daily_requests'] += 1
+        outcome = self.generate_alt_outcome(
+            image_path,
+            prompt_type=prompt_type,
+            context=context,
+            custom_prompt=custom_prompt,
+            force_provider=force_provider,
+            job_id=job_id,
+        )
+        final_metadata = {
+            "attempts": [],
+            "successful_provider": outcome.provider,
+            "status": outcome.status,
+            "reason": outcome.reason,
+        }
+        if outcome.status == "ok":
+            self.usage_stats['successful_requests'] += 1
+            raw = outcome.text or ""
+            if manifest and entry_key:
+                normalized_result, was_truncated = manifest.normalize_alt_text(raw)
+                entry = manifest.get_entry(entry_key)
+                if entry:
+                    entry.llm_raw = raw
+                    entry.final_alt = normalized_result
+                    entry.truncated_flag = was_truncated
+                    entry.llava_called = True
+                    entry.decision_reason = "generated"
+                    entry.provider = outcome.provider
+                    entry.prompt_type = prompt_type or "default"
+                    manifest.add_entry(entry)
+                result = normalized_result
+            else:
+                self._last_provider = self.providers.get(outcome.provider)
+                self._last_image_path = image_path
+                result = self._post_process_alt_text(raw)
+            if return_metadata:
+                return result, final_metadata
+            return result
+        if outcome.status in ("skipped", "deferred", "error"):
+            if return_metadata:
+                return "", final_metadata
+            return ""
+        if return_metadata:
+            return "", final_metadata
+        return ""
 
     def _classify_failure(self, error: Exception, status_code: Optional[int] = None) -> str:
         """

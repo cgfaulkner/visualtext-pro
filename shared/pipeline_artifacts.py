@@ -121,6 +121,7 @@ class RunArtifacts:
 
     # Phase 2: Generate artifacts
     generated_alt_by_key_path: Path     # generate/generated_alt_by_key.json
+    alt_status_by_key_path: Path        # generate/alt_status_by_key.json (conditional)
 
     # Phase 3: Resolve artifacts
     final_alt_map_path: Path            # resolve/final_alt_map.json
@@ -169,6 +170,7 @@ class RunArtifacts:
             manifest_path=run_dir / "manifest.json",
             selector_manifest_path=run_dir / "selector" / "selector_manifest.json",
             generated_alt_by_key_path=run_dir / "generate" / "generated_alt_by_key.json",
+            alt_status_by_key_path=run_dir / "generate" / "alt_status_by_key.json",
             final_alt_map_path=run_dir / "resolve" / "final_alt_map.json",
             cleanup_on_exit=cleanup_on_exit
         )
@@ -222,13 +224,40 @@ class RunArtifacts:
         """Load generated ALT text mappings from Phase 2."""
         if not self.generated_alt_by_key_path.exists():
             return {}
-        
+
         with open(self.generated_alt_by_key_path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    
+
+    @staticmethod
+    def validate_generated_alt_by_key(data: Dict[str, Any]) -> None:
+        """
+        Raise if any value is not a string. Only validate values for keys that exist.
+        Message: "generated_alt_by_key must be Dict[str,str]. Found non-str for key=<...>: type=<...>. ..."
+        """
+        for key, value in data.items():
+            if not isinstance(value, str):
+                raise ValueError(
+                    "generated_alt_by_key must be Dict[str,str]. Found non-str for key=%s: type=%s. "
+                    "Status/metadata must go in alt_status_by_key.json; generated_alt_by_key stores "
+                    "only ALT text strings." % (repr(key), type(value).__name__)
+                )
+
     def save_generated_alt_by_key(self, data: Dict[str, str]) -> None:
-        """Save generated ALT text mappings from Phase 2."""
+        """Save generated ALT text mappings from Phase 2. Validates all values are str before write."""
+        RunArtifacts.validate_generated_alt_by_key(data)
         with open(self.generated_alt_by_key_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def load_alt_status_by_key(self) -> Dict[str, Any]:
+        """Load alt status artifact (status, provider, reason, etc. per key)."""
+        if not self.alt_status_by_key_path.exists():
+            return {}
+        with open(self.alt_status_by_key_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def save_alt_status_by_key(self, data: Dict[str, Any]) -> None:
+        """Write alt_status_by_key.json. Call only when non-ok entries or write_status_artifact."""
+        with open(self.alt_status_by_key_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
     def load_final_alt_map(self) -> Dict[str, FinalAltRecord]:

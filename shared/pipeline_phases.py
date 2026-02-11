@@ -304,38 +304,58 @@ def phase2_generate(artifacts: RunArtifacts, alt_generator,
                 'skipped_count': len(current_alt_by_key)
             }
         
-        # Generate ALT text for needed keys
+        # Outcome-based path: use generate_alt_outcome for artifact writing
+        job_id = artifacts.session_id
+        alt_status_by_key: Dict[str, Any] = {}
+        resilience = {}
+        write_status_artifact = False
+        if hasattr(alt_generator, 'config_manager') and alt_generator.config_manager:
+            llava_cfg = (alt_generator.config_manager.config.get("ai_providers") or {}).get("providers") or {}
+            resilience = (llava_cfg.get("llava") or {}).get("resilience") or {}
+            write_status_artifact = resilience.get("write_status_artifact", False)
+
         generation_errors = []
         newly_generated = 0
-        
+
         for key in keys_needing_generation:
+            visual_info = visual_index[key]
+            thumbnail_path = visual_info.get('thumbnail_path')
+            if not thumbnail_path or not Path(thumbnail_path).exists():
+                logger.warning(f"No thumbnail available for {key}, skipping generation")
+                continue
             try:
-                visual_info = visual_index[key]
-                
-                # Check if we have a thumbnail to use
-                thumbnail_path = visual_info.get('thumbnail_path')
-                if thumbnail_path and Path(thumbnail_path).exists():
-                    # Generate using thumbnail
-                    alt_text = alt_generator.generate_alt_text(thumbnail_path)
-                else:
-                    # Would need original image data - this is a fallback
-                    logger.warning(f"No thumbnail available for {key}, skipping generation")
-                    continue
-                
-                if alt_text and alt_text.strip():
-                    generated_alt_by_key[key] = alt_text.strip()
+                outcome = alt_generator.generate_alt_outcome(
+                    thumbnail_path, job_id=job_id
+                )
+                if outcome.status == "ok" and outcome.text:
+                    generated_alt_by_key[key] = outcome.text.strip()
                     newly_generated += 1
-                    logger.debug(f"Generated ALT for {key}: {alt_text[:50]}...")
-                else:
-                    generation_errors.append(f"Empty result for {key}")
-                    
+                    logger.debug(f"Generated ALT for {key}: {outcome.text[:50]}...")
+                elif outcome.status in ("skipped", "deferred", "error"):
+                    # Do not add key to generated_alt_by_key
+                    alt_status_by_key[key] = {
+                        "status": outcome.status,
+                        "provider": outcome.provider or "",
+                        "reason": outcome.reason,
+                        "timestamp": time.time(),
+                        "next_steps": outcome.next_steps,
+                        "breaker_state": outcome.breaker_state,
+                    }
+                    if outcome.status == "error":
+                        generation_errors.append(f"{key}: {outcome.reason}")
             except Exception as e:
-                error_msg = f"Generation failed for {key}: {e}"
-                generation_errors.append(error_msg)
-                logger.warning(error_msg)
-        
-        # Save generated ALT text
+                generation_errors.append(f"Generation failed for {key}: {e}")
+                logger.warning("Generation failed for %s: %s", key, e)
+                # fail_fast propagates; other modes may not reach here for same key
+
+        # Save generated ALT text (validates Dict[str,str] before write)
         artifacts.save_generated_alt_by_key(generated_alt_by_key)
+
+        # Write alt_status_by_key only when non-ok entries or write_status_artifact
+        if alt_status_by_key or write_status_artifact:
+            if not alt_status_by_key and write_status_artifact:
+                alt_status_by_key = {}
+            artifacts.save_alt_status_by_key(alt_status_by_key)
         
         result = {
             'success': True,

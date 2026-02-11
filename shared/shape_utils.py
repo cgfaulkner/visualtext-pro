@@ -12,7 +12,10 @@ logger = logging.getLogger(__name__)
 # --- XML tag helper functions for robust shape type detection ---
 def _element_of(shape):
     """Extract the underlying XML element from a shape object."""
-    return getattr(shape, "_element", None) or getattr(shape, "element", None)
+    el = getattr(shape, "_element", None)
+    if el is None:
+        el = getattr(shape, "element", None)
+    return el
 
 
 def is_connector(shape):

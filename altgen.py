@@ -307,10 +307,53 @@ def create_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument('path', help='File or folder to analyze')
 
     # process
-    process_parser = subparsers.add_parser('process', help='Process files and make alt text decisions')
+    process_parser = subparsers.add_parser(
+        'process',
+        help='Process files and make alt text decisions',
+        description=(
+            'Process PPTX files for ALT text. Exit codes: 0 = success (or degraded with '
+            '--allow-degraded-exit0); 1 = failed processing or degraded run (placeholders applied); '
+            '2 = provider offline and offline-mode=abort (no processing).'
+        )
+    )
     process_parser.add_argument('path', help='File or folder to process')
     process_parser.add_argument('--no-artifacts', action='store_true',
                                help='Disable artifact directory creation (no intermediate files saved)')
+    process_parser.add_argument(
+        '--offline-mode',
+        choices=['abort', 'fill-missing', 'overwrite-all'],
+        default='abort',
+        help='When ALT provider is offline: abort (default), or inject placeholders only for '
+             'missing ALT (fill-missing), or overwrite all ALT with placeholders (overwrite-all)'
+    )
+    process_parser.add_argument(
+        '--allow-degraded-exit0',
+        action='store_true',
+        help='When using fill-missing or overwrite-all and placeholders were applied, exit 0 '
+             'instead of 1 (only applies when provider was offline)'
+    )
+    process_parser.add_argument(
+        '--non-interactive',
+        action='store_true',
+        help='Never prompt; obey --offline-mode directly when provider is offline'
+    )
+    process_parser.add_argument(
+        '--yes',
+        action='store_true',
+        help='When provider offline and offline-mode is not abort, auto-confirm (no prompt)'
+    )
+    process_parser.add_argument(
+        '--debug-offline-placeholders',
+        action='store_true',
+        help='In placeholder mode, print per-target decisions (slide, shape_name, grouped?, '
+             'alt_present?, action)'
+    )
+    process_parser.add_argument(
+        '--placeholder-scope',
+        choices=['images', 'visuals'],
+        default='images',
+        help='Placeholder injection scope: images (pictures only) or visuals (shapes too, excl. text)'
+    )
 
     # inject
     inject_parser = subparsers.add_parser('inject', help='Inject alt text into files')
@@ -359,6 +402,62 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# --- Offline-mode preflight and abort output (no AI calls) ---
+
+def _format_abort_output(
+    provider_name: str,
+    base_url: str,
+    model: str,
+    classification: Optional[str],
+    next_steps: Optional[List[str]],
+) -> str:
+    """Format structured error for exit-2 abort (provider offline)."""
+    lines = [
+        f"Provider OFFLINE: {provider_name} (base_url={base_url}, model={model}) "
+        f"classification={classification or 'UNKNOWN'}"
+    ]
+    if next_steps:
+        lines.append("Next steps: " + "; ".join(next_steps))
+    return "\n".join(lines)
+
+
+def _run_provider_preflight(config_path: str):
+    """
+    Run preflight for the configured ALT provider (LLaVA from config).
+    Returns (health_result, provider_config, provider_name).
+    """
+    from shared.config_manager import ConfigManager
+    from shared.llava_connectivity import LLaVAConnectivityManager, HealthResult
+
+    config_manager = ConfigManager(config_path)
+    config = config_manager.config
+    fallback_chain = config.get("ai_providers", {}).get("fallback_chain", ["llava"])
+    providers = config.get("ai_providers", {}).get("providers", {})
+
+    # Preflight first provider in chain (currently LLaVA)
+    provider_name = fallback_chain[0] if fallback_chain else "llava"
+    provider_config = providers.get(provider_name, {})
+    if not provider_config and provider_name == "llava":
+        provider_config = {"base_url": "http://127.0.0.1:11434", "model": "llava"}
+
+    resilience_config = provider_config.get("resilience", {})
+    connectivity_config = {
+        "providers": {provider_name: provider_config},
+        "max_retries": provider_config.get("retry_attempts", 3),
+        "retry_base_delay": 1.0,
+        "retry_max_delay": 60.0,
+        "background_monitoring": False,
+        "health_cache_ttl": 30.0,
+    }
+    manager = LLaVAConnectivityManager(connectivity_config)
+    health_result = manager.validate_connectivity_for_job(
+        job_id=None,
+        provider_config=provider_config,
+        resilience_config=resilience_config,
+    )
+    return health_result, provider_config, provider_name
+
+
 def main():
     try:
         parser = create_parser()
@@ -388,9 +487,130 @@ def main():
                     print(f"  {file_path}")
                 return 0
 
+            # Preflight before any processing or file writes
+            health_result, provider_config, provider_name = _run_provider_preflight(args.config)
+            base_url = provider_config.get("base_url", "http://127.0.0.1:11434")
+            model = provider_config.get("model", "llava")
+            abort_msg = _format_abort_output(
+                provider_name, base_url, model,
+                health_result.classification, health_result.next_steps,
+            )
+
+            if not health_result.is_healthy and getattr(args, 'offline_mode', 'abort') == 'abort':
+                print(f"Discovered {len(files)} files; provider offline; aborting.")
+                print(abort_msg)
+                return 2
+
+            if not health_result.is_healthy and getattr(args, 'offline_mode', 'abort') != 'abort':
+                offline_mode = getattr(args, 'offline_mode', 'fill-missing')
+                non_interactive = getattr(args, 'non_interactive', False)
+                yes = getattr(args, 'yes', False)
+                if not sys.stdin.isatty() and not non_interactive and not yes:
+                    print(abort_msg)
+                    print("Non-interactive session; pass --non-interactive or --yes to proceed.")
+                    return 2
+                if sys.stdin.isatty() and not non_interactive and not yes:
+                    try:
+                        reply = input(
+                            f"Provider offline. Continue with {offline_mode}? (y/N) "
+                        ).strip().lower()
+                        if reply not in ('y', 'yes'):
+                            print(abort_msg)
+                            return 2
+                    except (EOFError, KeyboardInterrupt):
+                        print(abort_msg)
+                        return 2
+                # Run placeholder-only path (no AI calls)
+                from offline_placeholders import run_placeholder_injection
+
+                placeholder_scope = getattr(args, 'placeholder_scope', 'images')
+                total_targets_found = 0
+                total_targets_missing_alt = 0
+                total_placeholders = 0
+                total_preserved = 0
+                total_injection_attempted = 0
+                total_injection_failed = 0
+                files_written = 0
+                files_written_paths = []
+                errors_list = []
+                debug_placeholders = getattr(args, 'debug_offline_placeholders', False)
+                for file_path in files:
+                    out = run_placeholder_injection(
+                        str(file_path),
+                        offline_mode,
+                        args.config,
+                        debug_offline_placeholders=debug_placeholders,
+                        treat_pending_as_missing=False,
+                        placeholder_scope=placeholder_scope,
+                    )
+                    if out["success"]:
+                        total_targets_found += out.get("targets_found", 0)
+                        total_targets_missing_alt += out.get("targets_missing_alt_found", 0)
+                        total_placeholders += out["placeholders_applied"]
+                        total_preserved += out["existing_alt_preserved"]
+                        total_injection_attempted += out.get("injection_attempted", 0)
+                        total_injection_failed += out.get("injection_failed", 0)
+                        files_written += 1
+                        files_written_paths.append(str(file_path))
+                    else:
+                        errors_list.append({"file": str(file_path), "error": out["error"]})
+
+                print("\n" + "=" * 60)
+                if total_targets_found == 0:
+                    print(
+                        "DEGRADED RUN: Provider was offline. No targets were found for "
+                        "placeholder injection."
+                    )
+                elif (
+                    total_targets_missing_alt > 0
+                    and total_placeholders == 0
+                    and total_injection_failed > 0
+                ):
+                    print(
+                        "DEGRADED RUN: Provider was offline. Placeholder injection failed "
+                        "(writes did not persist)."
+                    )
+                elif total_placeholders == 0:
+                    print(
+                        "DEGRADED RUN: Provider was offline. No placeholders were applied "
+                        "(no missing ALT found among targets)."
+                    )
+                else:
+                    print("DEGRADED RUN: Provider was offline. Placeholders were applied.")
+                    print("Run with provider online for real ALT generation.")
+                print("=" * 60)
+                print("\nBatch complete (placeholder mode)")
+                print(f"Provider status: OFFLINE ({health_result.classification or 'unknown'})")
+                print(f"offline-mode: {offline_mode}")
+                print(f"scope: {placeholder_scope}")
+                print(f"targets_found: {total_targets_found}")
+                print(f"targets_missing_alt_found: {total_targets_missing_alt}")
+                print(f"injection_attempted: {total_injection_attempted}")
+                print(f"injection_failed: {total_injection_failed}")
+                print(f"placeholders_applied: {total_placeholders}")
+                print(f"existing_alt_preserved: {total_preserved}")
+                print(f"files_written: {files_written}")
+                if files_written_paths:
+                    print("Output files:")
+                    for p in files_written_paths:
+                        print(f"  {p}")
+                print(f"Total: {len(files)}")
+                print(f"Succeeded: {files_written}")
+                print(f"Failed: {len(errors_list)}")
+                if errors_list:
+                    print("\nErrors:")
+                    for err in errors_list:
+                        print(f"  {err['file']}: {err['error']}")
+                allow_degraded = getattr(args, 'allow_degraded_exit0', False)
+                if total_placeholders == 0:
+                    return 0
+                return 0 if allow_degraded else 1
+
+            # Provider online: normal batch processing
             result = processor.process_batch(files)
 
             print("\nBatch complete")
+            print(f"Provider status: ONLINE")
             print(f"Total: {result['total']}")
             print(f"Succeeded: {result['succeeded']}")
             print(f"Failed: {result['failed']}")
