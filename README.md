@@ -104,6 +104,8 @@ Runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnai
    ollama serve  # Runs on http://127.0.0.1:11434 by default
    ```
 
+   VisualText Pro communicates with Ollama via its local HTTP API (default: http://127.0.0.1:11434). It does not invoke the Ollama CLI directly and does not require an Ollama Python package. Any method of running Ollama (Ollama.app, `ollama serve`, system service, etc.) is supported as long as the API endpoint is reachable.
+
 ## Command-Line Tools
 
 ### altgen.py (Unified CLI - Recommended)
@@ -263,6 +265,31 @@ python pptx_manifest_processor.py process presentation.pptx --review-only
 # Validate existing manifest
 python pptx_manifest_processor.py validate cache.jsonl
 ```
+
+## Provider Availability & Offline Modes
+
+When you run `process` on a batch (folder or glob), the tool checks provider (e.g. LLaVA/Ollama) availability before processing. When the provider is **online**, behavior is unchanged: ALT text is generated via the API and injected as usual.
+
+**Default when provider is offline:** The run **aborts** with no files processed and **exit code 2**. This avoids writing presentations with missing or placeholder-only ALT text unless you opt in.
+
+**Offline options** (batch `process` only):
+
+- **`--offline-mode abort`** (default): Abort when provider is offline; exit 2.
+- **`--offline-mode fill-missing`**: Inject placeholder ALT only where ALT is missing or empty.
+- **`--offline-mode overwrite-all`**: Overwrite all target ALT with placeholders.
+
+**`--placeholder-scope`** controls which elements get placeholders when using `fill-missing` or `overwrite-all`:
+
+- **`images`** (default): Pictures only.
+- **`visuals`**: All visual elements (e.g. shapes), excluding text-only placeholders.
+
+**Exit codes for `process`:**
+
+- **0**: Success; or degraded run (placeholders applied) if you used `--allow-degraded-exit0`.
+- **1**: Processing failed, or degraded run (placeholders applied) without `--allow-degraded-exit0`.
+- **2**: Provider offline and `--offline-mode=abort` (no processing).
+
+Use `python altgen.py process --help` for related flags (`--non-interactive`, `--yes`, `--debug-offline-placeholders`).
 
 ## Configuration
 
