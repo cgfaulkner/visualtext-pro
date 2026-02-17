@@ -6,7 +6,7 @@ requests==2.32.5
 numpy>=1.26.4,<2
 tqdm==4.67.2
 pytictoc==1.5.3
-opencv-python==4.10.0.84
+opencv-python==4.13.0.92
 psutil>=5.9.0
 reportlab>=4.0.0
 PyMuPDF>=1.23.0
