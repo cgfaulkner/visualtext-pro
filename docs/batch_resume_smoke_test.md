@@ -1,46 +1,51 @@
 # Batch resume / checkpoint smoke-test checklist
 
-Manual end-to-end checks for batch resume and checkpointing. Manifest path: **current working directory** → `batch_manifest.json` (i.e. `Path.cwd() / "batch_manifest.json"`). Run all commands from the **project root** unless a step says otherwise; use a dedicated test directory so the manifest is isolated.
+Manual end-to-end checks for batch resume and checkpointing. **Manifest location:** Manifests are in the **current working directory (CWD)**; default filename is `batch_<timestamp>_<id>_manifest.json`. Running from a different folder uses a different manifest. Resume only with `--resume-manifest <path>`. Run all commands from the **project root** unless a step says otherwise; use a dedicated test directory so the manifest is isolated.
 
 **Prerequisites:** Config with a working ALT provider for online runs (e.g. `config.yaml`). Two or three small `.pptx` files in a test folder (e.g. `documents_to_review/` or a temp dir).
 
+**To force a full reprocess (no manifest read or written):** Use `--force` or `--reprocess` (e.g. `python altgen.py process "documents_to_review" --force`). See [batch_manifest_skip_explained.md](batch_manifest_skip_explained.md).
+
 ---
 
-## (1) Normal run then restart — skips COMPLETE
+## (1) Normal run then restart — skips COMPLETE (resume)
 
-**Goal:** First run processes all files; second run skips them with status=COMPLETE/complete, unchanged.
+**Goal:** First run processes all files; second run **with `--resume-manifest`** skips them with status=COMPLETE/complete, unchanged.
 
-1. From project root, remove any existing checkpoint:  
-   `rm -f batch_manifest.json`
-2. Run batch (provider must be online):  
-   `python altgen.py batch documents_to_review`  
-   (or `python altgen.py process <path_to_folder_with_pptx>`)
-3. **Expected:**  
+1. From project root, run batch once (provider must be online):  
+   `python altgen.py process documents_to_review`  
+   (or `python altgen.py batch documents_to_review`)
+2. **Expected:**  
+   - Startup prints e.g. `Manifest strategy: new manifest at <cwd>/batch_<timestamp>_<id>_manifest.json`  
    - `Discovered N PPTX file(s).`  
-   - `Processing 1 of N: <file>.pptx` … for each file  
+   - `Processing 1 of N: <file>.pptx` for each file  
    - `Batch complete` with `Succeeded: N`, `Failed: 0`  
-   - `batch_manifest.json` exists in project root (cwd)
-4. Run the same command again (same cwd).
-5. **Expected:**  
-   - Manifest is loaded (there may or may not be an explicit “Resumed…” log line).  
+   - A new manifest file exists in cwd: `batch_<timestamp>_<id>_manifest.json`
+3. Run again **with resume**, using the manifest path from step 1:  
+   `python altgen.py process documents_to_review --resume-manifest batch_<timestamp>_<id>_manifest.json`  
+   (substitute the actual filename from your cwd).
+4. **Expected:**  
+   - Startup prints e.g. `Manifest strategy: resume from manifest at <path>`  
    - `Skipping 1 of N: <file>.pptx (status=COMPLETE/complete, unchanged)` for each file  
    - `Skipped (unchanged): N`  
-   - No “Processing” lines for already-complete files
+   - No "Processing" lines for already-complete files
 
 ---
 
-## (2) Interrupted run — PROCESSING → PENDING then processed
+## (2) Interrupted run — PROCESSING → PENDING then processed (resume)
 
-**Goal:** Run is interrupted (e.g. Ctrl+C) while a file is PROCESSING; on next run that item is reset to PENDING and processed.
+**Goal:** Run is interrupted (e.g. Ctrl+C) while a file is PROCESSING; on next run **with `--resume-manifest`** that item is reset to PENDING and processed.
 
-1. Start with a clean manifest:  
-   `rm -f batch_manifest.json`
-2. Run batch with at least 2 files; interrupt (Ctrl+C) shortly after the first “Processing 2 of N” appears (so file 1 is COMPLETE, file 2 was PROCESSING).
+1. Run batch with at least 2 files:  
+   `python altgen.py process <path_to_folder_with_pptx>`  
+   Note the manifest path printed at start.
+2. Interrupt (Ctrl+C) shortly after the first "Processing 2 of N" appears (so file 1 is COMPLETE, file 2 was PROCESSING).
 3. **Expected:**  
-   - `batch_manifest.json` exists. One file COMPLETE, and the next is either PROCESSING or left retryable (PENDING) depending on interruption timing; next run should process it.
-4. Run the same batch command again from the same cwd.
+   - A manifest file exists in cwd (`batch_<timestamp>_<id>_manifest.json`). One file COMPLETE, the next PROCESSING or PENDING; next run should process it when resuming.
+4. Run again with that manifest:  
+   `python altgen.py process <path> --resume-manifest batch_<timestamp>_<id>_manifest.json`
 5. **Expected:**  
-   - Load resets PROCESSING → PENDING (no “stale processing” left)  
+   - Load resets PROCESSING → PENDING (no "stale processing" left)  
    - First file skipped: `Skipping 1 of N: ... (status=COMPLETE/complete, unchanged)`  
    - Second file processed: `Processing 2 of N: ...`  
    - Batch completes with both files done
@@ -51,8 +56,7 @@ Manual end-to-end checks for batch resume and checkpointing. Manifest path: **cu
 
 **Goal:** If `<file>.pptx.lock` exists next to a file, run skips that file as LOCKED; after removing the lock, next run processes it. The lockfile must be in the **same directory** as the PPTX (lock check is file-adjacent).
 
-1. Start with a clean manifest and at least one file:  
-   `rm -f batch_manifest.json`
+1. Run batch once so a manifest exists in cwd (or use an existing one); note the manifest path.
 2. Create a lock file next to one of the PPTX files (same directory):  
    `touch documents_to_review/<one>.pptx.lock`
 3. Run batch:  
@@ -62,7 +66,8 @@ Manual end-to-end checks for batch resume and checkpointing. Manifest path: **cu
    - Batch may process other files; manifest has one item with status `locked`
 5. Remove the lock:  
    `rm documents_to_review/<one>.pptx.lock`
-6. Run the same batch again.
+6. Run again with the same manifest:  
+   `python altgen.py process documents_to_review --resume-manifest batch_<timestamp>_<id>_manifest.json`
 7. **Expected:**  
    - That file is retried (LOCKED is retryable): `Processing K of N: <one>.pptx`  
    - No “Skipping … (LOCKED)” for that file
@@ -73,12 +78,12 @@ Manual end-to-end checks for batch resume and checkpointing. Manifest path: **cu
 
 **Goal:** After a file is COMPLETE, changing the file (e.g. touch) changes its fingerprint; next run sets status to PENDING and reprocesses it.
 
-1. Ensure one file is already COMPLETE (e.g. run (1) once).
+1. Ensure one file is already COMPLETE (e.g. run (1) once) and note the manifest path.
 2. Touch (or slightly modify) that file:  
    `touch documents_to_review/<file>.pptx`  
    If touch doesn’t trigger a fingerprint change on your system, make a real edit (e.g. copy the pptx to a new filename, or modify and save).
-3. Run batch again from same cwd:  
-   `python altgen.py batch documents_to_review`
+3. Run again with that manifest:  
+   `python altgen.py process documents_to_review --resume-manifest batch_<timestamp>_<id>_manifest.json`
 4. **Expected:**  
    - Log line like `Input changed; reprocessing: <file>.pptx`  
    - Then `Processing K of N: <file>.pptx`  
@@ -126,16 +131,16 @@ Manual end-to-end checks for batch resume and checkpointing. Manifest path: **cu
 
 ## (7) Different working directory ⇒ different manifest
 
-**Goal:** Because the manifest path is `Path.cwd() / "batch_manifest.json"`, running from a different directory uses a different manifest. Resume state is per-cwd; this is expected behavior.
+**Goal:** The default manifest path is `Path.cwd() / "batch_<timestamp>_<id>_manifest.json"`, so running from a different directory creates a different manifest file there. Resume state is per-cwd; this is expected behavior.
 
-1. From project root, ensure a manifest exists (e.g. run (1) once so `batch_manifest.json` is in project root).
-2. **Expected:** `batch_manifest.json` exists in project root.
+1. From project root, run batch once (e.g. (1) step 1); note the manifest file created in project root.
+2. **Expected:** A file like `batch_<timestamp>_<id>_manifest.json` exists in project root.
 3. Change into a subfolder that contains (or can discover) PPTX files:  
    `cd documents_to_review`  
    (or another subdir that works with your batch target)
-4. Run the same batch command (e.g. `python altgen.py batch .` from that subdir, or point at the current dir).
+4. Run the same batch command (e.g. `python altgen.py process .` from that subdir).
 5. **Expected:**  
-   - A **new** `batch_manifest.json` is created in the **current** (sub)directory.  
+   - A **new** manifest file is created in the **current** (sub)directory.  
    - The manifest in project root is **untouched**.  
    - No bug — resume is scoped by working directory.
 
@@ -145,10 +150,10 @@ Manual end-to-end checks for batch resume and checkpointing. Manifest path: **cu
 
 | Scenario              | Manifest path        | Key check |
 |-----------------------|----------------------|-----------|
-| (1) Normal + restart   | cwd / batch_manifest.json | Second run: “Skipping … (status=COMPLETE/complete, unchanged)” |
-| (2) Interrupted        | same                 | After restart: PROCESSING → PENDING, then “Processing” for that file |
-| (3) Lockfile           | same (lockfile same dir as PPTX) | “Skipping … (LOCKED)”; after rm .lock, “Processing” for that file |
-| (4) Fingerprint       | same                 | “Input changed; reprocessing” then “Processing” |
-| (5) Exit 2 offline     | none created/updated | Exit code 2; no batch_manifest.json (or unchanged) |
-| (6) Placeholder path   | cwd / batch_manifest.json | Exit 1 unless --allow-degraded-exit0; next run “Skipping … (status=DEGRADED/degraded, unchanged)” |
-| (7) Different cwd      | per-cwd              | New manifest in subdir; root manifest untouched |
+| (1) Normal + restart   | cwd / batch_<timestamp>_<id>_manifest.json; use --resume-manifest on 2nd run | Second run: "Skipping … (status=COMPLETE/complete, unchanged)" |
+| (2) Interrupted        | same; use --resume-manifest on 2nd run | After restart: PROCESSING → PENDING, then "Processing" for that file |
+| (3) Lockfile           | same (lockfile same dir as PPTX) | "Skipping … (LOCKED)"; after rm .lock, "Processing" for that file |
+| (4) Fingerprint       | same; use --resume-manifest to see skip/reprocess | "Input changed; reprocessing" then "Processing" |
+| (5) Exit 2 offline     | none created/updated | Exit code 2; no new manifest (or unchanged) |
+| (6) Placeholder path   | cwd (offline path may differ) | Exit 1 unless --allow-degraded-exit0; next run "Skipping … (status=DEGRADED/degraded, unchanged)" |
+| (7) Different cwd      | per-cwd (new file per run in each cwd) | New manifest in subdir; root manifest untouched |

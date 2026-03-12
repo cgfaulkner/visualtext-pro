@@ -214,8 +214,24 @@ class PPTXBatchProcessor:
             # DONE + fingerprint match → skip
             if item.status in DONE_STATUSES:
                 if stored_fp and stored_fp == fp_current:
-                    print(f"Skipping {index} of {total}: {file_path.name} (status={item.status.value}, unchanged)")
-                    logger.info("Skipping %s (status=%s, unchanged)", file_path.name, item.status.value)
+                    manifest_loc = getattr(manifest, "manifest_path", None)
+                    manifest_hint = f" (manifest: {manifest_loc})" if manifest_loc else ""
+                    print(
+                        f"Skipping {index} of {total}: {file_path.name} "
+                        f"(status={item.status.value}, unchanged){manifest_hint}"
+                    )
+                    logger.info(
+                        "Skipping %s (status=%s, unchanged) manifest=%s",
+                        file_path.name,
+                        item.status.value,
+                        str(manifest_loc) if manifest_loc else "n/a",
+                    )
+                    logger.debug(
+                        "Fingerprint match for %s: current=%s stored=%s",
+                        file_path.name,
+                        fp_current,
+                        stored_fp,
+                    )
                     results["skipped"] += 1
                     continue
                 # Fingerprint differs: reprocess
