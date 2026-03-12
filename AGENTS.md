@@ -1,7 +1,8 @@
 # AGENTS Instructions for VisualText Pro
 
 This project provides tools to extract, clean, and rebuild presentations and PDFs with improved
-alternative text for accessibility.
+alternative text for accessibility. Processed PPTX outputs include a standard Disclosures slide
+at position 2 when not already present.
 
 ## Project Layout
 - `core/`: modules orchestrating PDF and PPTX processing.

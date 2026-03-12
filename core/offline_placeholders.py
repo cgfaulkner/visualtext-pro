@@ -205,6 +205,8 @@ def run_placeholder_injection(
         if placeholder_scope == "images":
             result["images_found"] = result["targets_found"]
             result["images_missing_alt_found"] = result["targets_missing_alt_found"]
+        from shared.disclosure_slide import ensure_disclosure_slide
+        ensure_disclosure_slide(presentation)
         presentation.save(str(path))
         result["success"] = True
     except Exception as e:
