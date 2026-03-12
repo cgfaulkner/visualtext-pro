@@ -34,6 +34,16 @@ def _safe_xpath(element, xpath_expr, namespaces=None):
         return el.xpath(xpath_expr, namespaces=ns)
 # --- end safe XPath helper ---
 
+# cNvPr xpath ladder: same order for write and read (first match wins).
+# Pictures, shapes, connectors, graphic frames; fallback any cNvPr.
+CNVPR_XPATH_LADDER = (
+    ".//p:nvPicPr/p:cNvPr",
+    ".//p:nvSpPr/p:cNvPr",
+    ".//p:nvCxnSpPr/p:cNvPr",
+    ".//p:nvGraphicFramePr/p:cNvPr",
+    ".//p:cNvPr",
+)
+
 
 import logging
 import os
@@ -42,7 +52,7 @@ import time
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, Iterator, List, Optional, Tuple, Union
 from hashlib import sha256
 import tempfile
 from collections import Counter
@@ -77,7 +87,10 @@ logger.info("LOG: injector_file=%s", __file__)
 # --- XML tag helper functions for robust shape type detection ---
 def _element_of(shape):
     """Extract the underlying XML element from a shape object."""
-    return getattr(shape, "_element", None) or getattr(shape, "element", None)
+    el = getattr(shape, "_element", None)
+    if el is None:
+        el = getattr(shape, "element", None)
+    return el
 
 
 def is_connector(shape):
@@ -734,33 +747,22 @@ class PPTXAltTextInjector:
             # The centralized gate here was blocking legitimate ALT text that passed the lenient gate
             logger.info(f"XML_FALLBACK: Proceeding with write (quality gates already applied upstream)")
             
-            element = getattr(shape, "_element", None) or getattr(shape, "element", None)
+            element = getattr(shape, "_element", None)
+            if element is None:
+                element = getattr(shape, "element", None)
             if element is None:
                 return
             ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
 
-            # Try specific shape types first, then a generic fallback.
-            paths = [
-                ".//p:nvPicPr/p:cNvPr",          # Picture
-                ".//p:nvSpPr/p:cNvPr",           # AutoShape
-                ".//p:nvCxnSpPr/p:cNvPr",        # Connector
-                ".//p:nvGraphicFramePr/p:cNvPr", # Chart/Table/SmartArt frame
-                ".//p:nvGrpSpPr/p:cNvPr",        # Group parent
-                ".//p:cNvPr"                     # Last resort
-            ]
-
-            wrote_any = False
             logger.info(f"XML_WRITE: Attempting write to shape {type(shape).__name__}")
-            for xp in paths:
+            for xp in CNVPR_XPATH_LADDER:
                 found_nodes = _safe_xpath(element, xp, ns)
                 logger.info(f"XML_WRITE: XPath '{xp}' found {len(found_nodes)} nodes")
                 for cnvpr in found_nodes:
-                    # Only set 'descr' – leave 'title' empty to avoid duplicate reading in UI/AT.
                     cnvpr.set('descr', text)
                     logger.info(f"XML_WRITE: Successfully wrote '{text[:50]}...' to cNvPr node")
-                    wrote_any = True
-            if not wrote_any:
-                logger.info(f"XML_WRITE: ❌ FAILED - No cNvPr nodes found for {type(shape).__name__} shape")
+                    return
+            logger.info(f"XML_WRITE: ❌ FAILED - No cNvPr nodes found for {type(shape).__name__} shape")
         except Exception as e:
             logger.debug(f"XML fallback failed: {e}")
     
@@ -1199,7 +1201,9 @@ class PPTXAltTextInjector:
         ns = {'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
         for slide in presentation.slides:
             for shp in slide.shapes:
-                el = getattr(shp, "_element", None) or getattr(shp, "element", None)
+                el = getattr(shp, "_element", None)
+                if el is None:
+                    el = getattr(shp, "element", None)
                 if el is None:
                     continue
                 for xp in (".//p:nvPicPr/p:cNvPr", ".//p:nvSpPr/p:cNvPr",
@@ -1577,7 +1581,11 @@ class PPTXAltTextInjector:
             
             # Clean up any pre-existing duplicate title/descr pairs
             self._dedupe_titles(presentation)
-            
+
+            # Ensure disclosure slide at position 2 (or 1 if deck was empty)
+            from shared.disclosure_slide import ensure_disclosure_slide
+            ensure_disclosure_slide(presentation)
+
             # Save presentation
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1761,7 +1769,29 @@ class PPTXAltTextInjector:
                 continue
         
         return shape_mappings
-    
+
+    def iter_shapes_flattened(self, presentation: Presentation) -> Iterator[Tuple[int, Any, bool]]:
+        """
+        Yield every non-group shape in the presentation with same recursion as
+        _extract_shapes_flattened (single source of truth for shape traversal).
+        Group containers are not yielded; their children are yielded with in_group=True.
+
+        Yields:
+            (slide_idx, shape, in_group)
+        """
+        for slide_idx, slide in enumerate(presentation.slides):
+            yield from self._iter_shapes_recurse(slide.shapes, slide_idx, False)
+
+    def _iter_shapes_recurse(
+        self, shapes: Any, slide_idx: int, in_group: bool
+    ) -> Iterator[Tuple[int, Any, bool]]:
+        """Recurse into shape list; same structure as _extract_shapes_flattened."""
+        for shape in shapes:
+            if hasattr(shape, "shapes"):
+                yield from self._iter_shapes_recurse(shape.shapes, slide_idx, True)
+            else:
+                yield (slide_idx, shape, in_group)
+
     def _update_identifier_for_nested_shape(self, identifier: PPTXImageIdentifier, shape_id) -> PPTXImageIdentifier:
         """
         Update identifier for nested shapes to handle complex hierarchical IDs.
@@ -2640,17 +2670,44 @@ class PPTXAltTextInjector:
             # Unknown mode, default to inject
             return True, f"Unknown mode '{self.mode}' - defaulting to inject"
     
+    def _set_cnvpr_alt(self, shape, text: str) -> bool:
+        """
+        Set ALT text by writing to cNvPr@descr in the shape XML (no gate).
+        Uses CNVPR_XPATH_LADDER so pictures, shapes, connectors, and graphic
+        frames all get the correct cNvPr. First match wins. Title left untouched.
+        Returns True if at least one cNvPr was found and updated.
+        """
+        element = getattr(shape, "_element", None)
+        if element is None:
+            element = getattr(shape, "element", None)
+        if element is None:
+            return False
+        ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+        finalized = (self._finalize_alt(text) or "").strip() or ""
+        for xp in CNVPR_XPATH_LADDER:
+            for cnvpr in _safe_xpath(element, xp, ns):
+                cnvpr.set("descr", finalized)
+                return True
+        return False
+
     def _inject_alt_text_robust(self, shape, alt_text: str) -> bool:
         """
         Inject ALT text using multiple fallback methods for maximum compatibility.
-        
+        Tries forced cNvPr write first for all shapes (pictures, shapes, connectors).
+
         Args:
-            shape: Picture shape
+            shape: Picture or other visual shape
             alt_text: ALT text to inject
-            
+
         Returns:
             bool: True if any method succeeded
         """
+        # Forced cNvPr path first for all shapes (uses CNVPR_XPATH_LADDER)
+        try:
+            if self._set_cnvpr_alt(shape, alt_text):
+                return True
+        except Exception:
+            pass
         # List of injection methods in order of preference
         injection_methods = [
             ('modern_property', self._inject_via_modern_property),
@@ -2963,7 +3020,42 @@ class PPTXAltTextInjector:
         
         logger.debug(f"   No ALT text found via any method")
         return ""
-    
+
+    def _get_existing_descr_and_title(self, shape) -> Tuple[str, str]:
+        """
+        Return (descr, title) for the shape (same fields the injector writes).
+        Used by offline placeholder mode to define \"ALT present\".
+        Uses same CNVPR_XPATH_LADDER as _set_cnvpr_alt so read/write are symmetric.
+        """
+        descr = ""
+        title = ""
+        element = getattr(shape, "_element", None)
+        if element is None:
+            element = getattr(shape, "element", None)
+        if element is not None:
+            ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+            for xp in CNVPR_XPATH_LADDER:
+                for cnvpr in _safe_xpath(element, xp, ns):
+                    descr = (cnvpr.get("descr") or "").strip()
+                    title = (cnvpr.get("title") or "").strip()
+                    return (descr, title)
+        try:
+            if hasattr(shape, "descr"):
+                descr = (shape.descr or "").strip()
+            if hasattr(shape, "title"):
+                title = (shape.title or "").strip()
+        except Exception:
+            pass
+        if descr or title:
+            return (descr, title)
+        try:
+            cNvPr = shape._element._nvXxPr.cNvPr
+            descr = (cNvPr.get("descr") or "").strip()
+            title = (cNvPr.get("title") or "").strip()
+        except Exception:
+            pass
+        return (descr, title)
+
     def _validate_alt_text_injection(self, shape, expected_alt_text: str) -> bool:
         """
         Validate that ALT text was successfully injected.

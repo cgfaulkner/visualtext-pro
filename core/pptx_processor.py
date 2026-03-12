@@ -377,7 +377,8 @@ class PPTXAccessibilityProcessor:
         start_time = time.time()
         pptx_path = Path(pptx_path)
         debug = debug or self.debug
-        
+        self._run_job_id = f"pptx_{pptx_path.stem}_{int(start_time * 1000)}"
+
         # Initialize result structure
         result = {
             'success': False,
@@ -4617,10 +4618,12 @@ class PPTXAccessibilityProcessor:
                 prompt_type = self._determine_prompt_type(image_info)
                 
                 # Generate ALT text using the configured generator
+                job_id = getattr(self, '_run_job_id', None)
                 alt_text = self.alt_generator.generate_alt_text(
                     image_path=temp_image_path,
                     prompt_type=prompt_type,
-                    context=context
+                    context=context,
+                    job_id=job_id,
                 )
                 
                 return alt_text
@@ -5536,10 +5539,12 @@ class PPTXAccessibilityProcessor:
                     logger.info(f"🔍 DEBUG: Using prompt type '{prompt_type}' with context: {context[:100]}...")
                 
                 # Generate ALT text using the configured generator
+                job_id = getattr(self, '_run_job_id', None)
                 alt_text = self.alt_generator.generate_alt_text(
                     image_path=temp_image_path,
                     prompt_type=prompt_type,
-                    context=context
+                    context=context,
+                    job_id=job_id,
                 )
                 
                 # Comprehensive validation of the generated ALT text
@@ -6004,7 +6009,10 @@ class PPTXAccessibilityProcessor:
                 except Exception as e:
                     logger.error(f"Failed to set ALT text for {image_key}: {e}")
                     continue
-            
+
+            from shared.disclosure_slide import ensure_disclosure_slide
+            ensure_disclosure_slide(presentation)
+
             # Save the modified presentation
             presentation.save(output_path)
             logger.info(f"Saved PPTX with ALT text to: {output_path}")
