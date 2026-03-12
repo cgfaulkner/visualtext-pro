@@ -4,10 +4,12 @@ batch_queue.py
 --------------
 Batch processing queue with persistence and resume capability.
 
+Batch completion criteria: see docs/batch_completion_criteria.md.
+
 Features:
 - Queue management for batch processing
 - Persistence to disk for resume capability
-- Status tracking (pending, processing, complete, failed, skipped)
+- Status tracking (PENDING, PROCESSING, COMPLETE, FAILED, SKIPPED, DEGRADED, TIMED_OUT, LOCKED)
 - Statistics and progress reporting
 """
 
@@ -15,25 +17,37 @@ import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 
 
 class QueueStatus(str, Enum):
-    """Status values for queue items."""
+    """Status values for queue items. See docs/batch_completion_criteria.md."""
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETE = "complete"
     FAILED = "failed"
     SKIPPED = "skipped"
+    DEGRADED = "degraded"
+    TIMED_OUT = "timed_out"
+    LOCKED = "locked"
+
+
+# Statuses that mean "no further processing on resume" (skip if fingerprint matches)
+DONE_STATUSES = (
+    QueueStatus.COMPLETE,
+    QueueStatus.DEGRADED,
+    QueueStatus.FAILED,
+    QueueStatus.SKIPPED,
+)
 
 
 @dataclass
 class QueueItem:
-    """Single item in batch processing queue."""
+    """Single item in batch processing queue. status is QueueStatus (normalized on load)."""
 
     path: str  # Store as string for JSON serialization
-    status: str = QueueStatus.PENDING
+    status: Union[str, QueueStatus] = QueueStatus.PENDING
     added_at: str = field(default_factory=lambda: datetime.now().isoformat())
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -70,12 +84,22 @@ class QueueItem:
         self.skip_reason = reason
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return asdict(self)
+        """Convert to dictionary for serialization (status as string value)."""
+        d = asdict(self)
+        if "status" in d and hasattr(d["status"], "value"):
+            d["status"] = d["status"].value
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'QueueItem':
-        """Create from dictionary."""
+        """Create from dictionary. Normalizes status from string to QueueStatus."""
+        data = dict(data)
+        status = data.get("status", QueueStatus.PENDING)
+        if isinstance(status, str):
+            try:
+                data["status"] = QueueStatus(status)
+            except ValueError:
+                data["status"] = QueueStatus.PENDING
         return cls(**data)
 
 
@@ -104,15 +128,24 @@ class BatchQueue:
             if not any(item.path == str(file_path) for item in self.items):
                 self.items.append(QueueItem(path=str(file_path)))
 
+    def find_item(self, path: Path) -> Optional[QueueItem]:
+        """Return queue item for path, or None."""
+        path_str = str(path)
+        for item in self.items:
+            if item.path == path_str or (hasattr(item.path_obj, 'resolve') and str(item.path_obj.resolve()) == str(Path(path_str).resolve())):
+                return item
+        return None
+
     def get_next(self) -> Optional[QueueItem]:
         """
-        Get next unprocessed item from queue.
+        Get next item to process (PENDING, or retryable TIMED_OUT/LOCKED).
 
         Returns:
-            Next pending item, or None if queue is complete
+            Next item to process, or None if none left
         """
+        retryable = (QueueStatus.PENDING, QueueStatus.TIMED_OUT, QueueStatus.LOCKED)
         for item in self.items:
-            if item.status == QueueStatus.PENDING:
+            if item.status in retryable:
                 return item
         return None
 
@@ -149,6 +182,32 @@ class BatchQueue:
             reason: Reason for skipping
         """
         item.mark_skipped(reason)
+        if self.manifest_path:
+            self.save()
+
+    def mark_degraded(self, item: QueueItem, result: Optional[Dict[str, Any]] = None) -> None:
+        """Mark item as DEGRADED (placeholder-only run)."""
+        item.status = QueueStatus.DEGRADED
+        item.completed_at = datetime.now().isoformat()
+        item.result = result or {}
+        if self.manifest_path:
+            self.save()
+
+    def mark_timed_out(self, item: QueueItem, error: str, result: Optional[Dict[str, Any]] = None) -> None:
+        """Mark item as TIMED_OUT."""
+        item.status = QueueStatus.TIMED_OUT
+        item.completed_at = datetime.now().isoformat()
+        item.error = error
+        item.result = result or {}
+        if self.manifest_path:
+            self.save()
+
+    def mark_locked(self, item: QueueItem, reason: str, result: Optional[Dict[str, Any]] = None) -> None:
+        """Mark item as LOCKED (reliable lock check before run)."""
+        item.status = QueueStatus.LOCKED
+        item.completed_at = datetime.now().isoformat()
+        item.skip_reason = reason
+        item.result = result or {}
         if self.manifest_path:
             self.save()
 
@@ -200,11 +259,15 @@ class BatchQueue:
             Dictionary with queue statistics
         """
         total = len(self.items)
-        pending = sum(1 for item in self.items if item.status == QueueStatus.PENDING)
-        processing = sum(1 for item in self.items if item.status == QueueStatus.PROCESSING)
-        complete = sum(1 for item in self.items if item.status == QueueStatus.COMPLETE)
-        failed = sum(1 for item in self.items if item.status == QueueStatus.FAILED)
-        skipped = sum(1 for item in self.items if item.status == QueueStatus.SKIPPED)
+        pending = sum(1 for i in self.items if i.status == QueueStatus.PENDING)
+        processing = sum(1 for i in self.items if i.status == QueueStatus.PROCESSING)
+        complete = sum(1 for i in self.items if i.status == QueueStatus.COMPLETE)
+        failed = sum(1 for i in self.items if i.status == QueueStatus.FAILED)
+        skipped = sum(1 for i in self.items if i.status == QueueStatus.SKIPPED)
+        degraded = sum(1 for i in self.items if i.status == QueueStatus.DEGRADED)
+        timed_out = sum(1 for i in self.items if i.status == QueueStatus.TIMED_OUT)
+        locked = sum(1 for i in self.items if i.status == QueueStatus.LOCKED)
+        finished = complete + failed + skipped + degraded + timed_out + locked
 
         return {
             'total': total,
@@ -213,7 +276,10 @@ class BatchQueue:
             'complete': complete,
             'failed': failed,
             'skipped': skipped,
-            'finished': complete + failed + skipped,
+            'degraded': degraded,
+            'timed_out': timed_out,
+            'locked': locked,
+            'finished': finished,
             'success_rate': (complete / total * 100) if total > 0 else 0.0,
             'failure_rate': (failed / total * 100) if total > 0 else 0.0
         }
@@ -231,20 +297,20 @@ class BatchQueue:
         return [item for item in self.items if item.status == QueueStatus.COMPLETE]
 
     def is_complete(self) -> bool:
-        """Check if all items are processed."""
-        return all(item.status != QueueStatus.PENDING for item in self.items)
+        """Check if no items are PENDING or PROCESSING (all decided)."""
+        return not any(
+            item.status == QueueStatus.PENDING or item.status == QueueStatus.PROCESSING
+            for item in self.items
+        )
 
     def reset_processing_items(self) -> None:
         """
-        Reset items stuck in 'processing' state to 'pending'.
-
-        Useful for resuming after a crash.
+        Reset items stuck in PROCESSING state to PENDING (crash recovery).
         """
         for item in self.items:
             if item.status == QueueStatus.PROCESSING:
                 item.status = QueueStatus.PENDING
                 item.started_at = None
-
         if self.manifest_path:
             self.save()
 

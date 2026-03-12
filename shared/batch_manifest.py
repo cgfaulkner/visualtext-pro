@@ -4,8 +4,11 @@ batch_manifest.py
 -----------------
 Batch processing manifest with resume capability.
 
+Batch completion criteria: see docs/batch_completion_criteria.md (statuses,
+DONE vs retryable, file_fingerprint, provider offline abort).
+
 Features:
-- Batch-level tracking and metadata
+- Batch-level tracking and metadata (including criteria_version)
 - Resume from partial completion
 - Summary statistics and reporting
 - Integration with BatchQueue for persistence
@@ -40,10 +43,12 @@ class BatchManifest:
         self.output_dir = Path(output_dir)
         self.input_root = Path(input_root) if input_root else None
         self.manifest_path = self.output_dir / f"batch_{batch_id}_manifest.json"
-        self.queue = BatchQueue(manifest_path=self.manifest_path)
+        # Queue never writes; only BatchManifest.save() persists (full schema).
+        self.queue = BatchQueue(manifest_path=None)
         self.start_time: Optional[datetime] = None
         self.end_time: Optional[datetime] = None
         self.metadata: Dict[str, Any] = {}
+        self.criteria_version: str = "1.0"
 
     def add_files(self, files: List[Path]) -> None:
         """
@@ -73,6 +78,7 @@ class BatchManifest:
         # Build manifest data
         data = {
             'version': '1.0',
+            'criteria_version': self.criteria_version,
             'batch_id': self.batch_id,
             'output_dir': str(self.output_dir),
             'input_root': str(self.input_root) if self.input_root else None,
@@ -119,8 +125,9 @@ class BatchManifest:
         if data.get('end_time'):
             manifest.end_time = datetime.fromisoformat(data['end_time'])
 
-        # Load metadata
+        # Load metadata and criteria_version
         manifest.metadata = data.get('metadata', {})
+        manifest.criteria_version = data.get('criteria_version', '1.0')
 
         # Load queue items
         queue_data = data.get('queue', {})
@@ -135,7 +142,13 @@ class BatchManifest:
         return manifest
 
     @classmethod
-    def create_new(cls, output_dir: Path, input_root: Optional[Path] = None, files: Optional[List[Path]] = None) -> 'BatchManifest':
+    def create_new(
+        cls,
+        output_dir: Path,
+        input_root: Optional[Path] = None,
+        files: Optional[List[Path]] = None,
+        manifest_path: Optional[Path] = None,
+    ) -> 'BatchManifest':
         """
         Create new batch manifest with auto-generated ID.
 
@@ -143,16 +156,18 @@ class BatchManifest:
             output_dir: Directory for output files and manifest
             input_root: Root input directory (for structure preservation)
             files: Optional list of files to add immediately
+            manifest_path: If set, use this path for the manifest file (for resume)
 
         Returns:
             New BatchManifest instance
         """
-        # Generate batch ID: batch_YYYYMMDD_HHMMSS_<short-uuid>
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         short_uuid = str(uuid.uuid4())[:8]
         batch_id = f"{timestamp}_{short_uuid}"
 
         manifest = cls(batch_id=batch_id, output_dir=output_dir, input_root=input_root)
+        if manifest_path is not None:
+            manifest.manifest_path = Path(manifest_path)
 
         if files:
             manifest.add_files(files)
