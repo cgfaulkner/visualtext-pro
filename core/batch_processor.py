@@ -15,15 +15,102 @@ import logging
 import subprocess
 import sys
 import yaml
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Add project root for shared imports when executed directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.path_validator import SecurityError, sanitize_input_path
+from shared.batch_queue import DONE_STATUSES, QueueStatus
+from shared.file_fingerprint import file_fingerprint as get_file_fingerprint
 
 logger = logging.getLogger(__name__)
+
+
+def _find_item(queue: Any, file_path: Path) -> Optional[Any]:
+    """Return queue item for file path (match by path string or resolve)."""
+    path_str = str(file_path)
+    try:
+        resolved = file_path.resolve()
+    except OSError:
+        resolved = None
+    for i in queue.items:
+        p = getattr(i, "path", None)
+        if p == path_str:
+            return i
+        if resolved and p:
+            try:
+                if Path(p).resolve() == resolved:
+                    return i
+            except OSError:
+                pass
+    return None
+
+
+def _mark_started(queue: Any, item: Any) -> None:
+    """Mark item as PROCESSING and save."""
+    item.mark_started()
+    if queue.manifest_path:
+        queue.save()
+
+
+def _record_failed(
+    queue: Any,
+    item: Any,
+    error: str,
+    file_path: Path,
+    fp: str,
+    provider_offline: bool,
+) -> None:
+    """Record FAILED and persist result metadata."""
+    item.status = QueueStatus.FAILED
+    item.completed_at = datetime.now().isoformat()
+    item.error = error
+    item.result = dict(item.result) if item.result else {}
+    item.result["file_fingerprint"] = fp
+    item.result["exit_code"] = -1
+    item.result["error_summary"] = error
+    item.result["provider_offline"] = provider_offline
+    item.result["output_path"] = str(file_path)
+    if queue.manifest_path:
+        queue.save()
+
+
+def _apply_result(
+    queue: Any,
+    item: Any,
+    result: Dict[str, Any],
+    file_path: Path,
+    fp: str,
+    provider_offline: bool,
+) -> None:
+    """Apply _process_single result to item and persist (COMPLETE, FAILED, TIMED_OUT)."""
+    base = {
+        "file_fingerprint": fp,
+        "provider_offline": provider_offline,
+        "output_path": str(file_path),
+        "exit_code": result.get("returncode", 0),
+        "error_summary": result.get("error", ""),
+    }
+    if result.get("timed_out"):
+        queue.mark_timed_out(
+            item,
+            result.get("error", "Timed out"),
+            result={**base, **result},
+        )
+        return
+    if result.get("success"):
+        queue.mark_complete(item, result={**base, **result})
+        return
+    # Subprocess failed: classify as FAILED (no LOCKED here; we did not do pre-check or we would have skipped)
+    queue.mark_failed(item, result.get("error", "Unknown error"))
+    if item.result is None:
+        item.result = {}
+    item.result.update(base)
+    if queue.manifest_path:
+        queue.save()
 
 
 class PPTXBatchProcessor:
@@ -74,15 +161,121 @@ class PPTXBatchProcessor:
 
         return sorted(files)
 
-    def process_batch(self, files: Sequence[Path]) -> Dict[str, object]:
-        """Process PPTX files sequentially.
+    def process_batch(
+        self,
+        files: Sequence[Path],
+        manifest_path: Optional[Path] = None,
+    ) -> Dict[str, object]:
+        """Process PPTX files sequentially, with optional checkpoint/resume via manifest.
 
-        Args:
-            files: Iterable of PPTX file paths.
-
-        Returns:
-            Summary dictionary with counts and per-file errors.
+        When manifest_path is set: load or create manifest, skip DONE+unchanged files,
+        reprocess on fingerprint mismatch, retry TIMED_OUT/LOCKED/PENDING. Persist after
+        each file. When manifest_path is None, behavior is unchanged (no manifest).
         """
+        if manifest_path is None:
+            return self._process_batch_no_manifest(files)
+
+        # Resume/checkpoint path: use shared batch_manifest
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shared"))
+        from batch_manifest import BatchManifest  # noqa: E402
+
+        manifest_path = Path(manifest_path)
+        if manifest_path.exists():
+            manifest = BatchManifest.load(manifest_path)
+            manifest.queue.reset_processing_items()
+            logger.info("Resumed batch from %s", manifest_path)
+        else:
+            manifest = BatchManifest.create_new(
+                manifest_path.parent,
+                files=list(files),
+                manifest_path=manifest_path,
+            )
+            manifest.start()
+
+        # Ensure all discovered files are in the queue
+        manifest.add_files(list(files))
+
+        total = len(files)
+        results: Dict[str, Any] = {
+            "total": total,
+            "succeeded": 0,
+            "failed": 0,
+            "errors": [],
+            "skipped": 0,
+        }
+
+        for index, file_path in enumerate(files, start=1):
+            item = _find_item(manifest.queue, file_path)
+            if item is None:
+                continue
+            fp_current = get_file_fingerprint(file_path)
+            stored_fp = (item.result or {}).get("file_fingerprint", "")
+
+            # DONE + fingerprint match → skip
+            if item.status in DONE_STATUSES:
+                if stored_fp and stored_fp == fp_current:
+                    print(f"Skipping {index} of {total}: {file_path.name} (status={item.status.value}, unchanged)")
+                    logger.info("Skipping %s (status=%s, unchanged)", file_path.name, item.status.value)
+                    results["skipped"] += 1
+                    continue
+                # Fingerprint differs: reprocess
+                item.status = QueueStatus.PENDING
+                item.result = dict(item.result) if item.result else {}
+                item.result["file_fingerprint"] = fp_current
+                item.completed_at = None
+                item.error = None
+                item.started_at = None
+                print(f"Input changed; reprocessing: {file_path.name}")
+                logger.info("input changed; reprocessing %s", file_path.name)
+                manifest.save()
+
+            # Conservative lock: if lockfile exists, treat as LOCKED (no stale check)
+            lock_file = file_path.parent / (file_path.name + ".lock")
+            if lock_file.exists():
+                manifest.queue.mark_locked(
+                    item, "lock file present",
+                    result={
+                        "file_fingerprint": fp_current,
+                        "provider_offline": False,
+                        "output_path": str(file_path),
+                    },
+                )
+                manifest.save()
+                print(f"Skipping {index} of {total}: {file_path.name} (LOCKED)")
+                logger.info("Skipping %s (LOCKED)", file_path.name)
+                continue
+
+            # Retryable or PENDING: process
+            item.mark_started()
+            manifest.save()
+
+            print(f"Processing {index} of {total}: {file_path.name}")
+            try:
+                result = self._process_single(file_path)
+            except Exception as exc:
+                logger.error("Unexpected error for %s: %s", file_path, exc)
+                _record_failed(manifest.queue, item, str(exc), file_path, fp_current, False)
+                manifest.save()
+                results["failed"] += 1
+                results["errors"].append({"file": str(file_path), "error": str(exc)})
+                continue
+
+            _apply_result(manifest.queue, item, result, file_path, fp_current, False)
+            manifest.save()
+            if result.get("success"):
+                results["succeeded"] += 1
+            else:
+                results["failed"] += 1
+                results["errors"].append({
+                    "file": str(file_path),
+                    "error": result.get("error", "Unknown error"),
+                })
+
+        manifest.finish()
+        return results
+
+    def _process_batch_no_manifest(self, files: Sequence[Path]) -> Dict[str, object]:
+        """Original process_batch behavior (no manifest)."""
         total = len(files)
         results: Dict[str, object] = {
             "total": total,
@@ -95,7 +288,7 @@ class PPTXBatchProcessor:
             print(f"Processing {index} of {total}: {file_path.name}")
             try:
                 result = self._process_single(file_path)
-            except Exception as exc:  # Catch-all so one file does not stop the batch
+            except Exception as exc:
                 logger.error("Unexpected error for %s: %s", file_path, exc)
                 results["failed"] += 1
                 results["errors"].append({"file": str(file_path), "error": str(exc)})
@@ -153,6 +346,8 @@ class PPTXBatchProcessor:
                 "error": f"Processing timed out after {self._timeout} seconds",
                 "stdout": stdout,
                 "stderr": stderr,
+                "returncode": -1,
+                "timed_out": True,
             }
         except Exception as exc:
             logger.error(
@@ -160,16 +355,22 @@ class PPTXBatchProcessor:
             )
             logger.error("Command: %s", " ".join(cmd))
             logger.error("Exception type: %s", type(exc).__name__)
-            
             return {
                 "success": False,
                 "error": f"Subprocess exception: {str(exc)}",
                 "stdout": "",
                 "stderr": "",
+                "returncode": -1,
+                "timed_out": False,
             }
 
         if result.returncode == 0:
-            return {"success": True, "output": result.stdout}
+            return {
+                "success": True,
+                "output": result.stdout,
+                "returncode": 0,
+                "timed_out": False,
+            }
 
         # Non-zero return code - log full output
         logger.error(
@@ -186,6 +387,8 @@ class PPTXBatchProcessor:
             "error": result.stderr or result.stdout or "Processing failed",
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "returncode": result.returncode,
+            "timed_out": False,
         }
 
     @staticmethod
