@@ -37,6 +37,17 @@ DISCLOSURE_BODY_HINTS = (
     "federal accessibility requirements",
 )
 
+# Placeholder types that represent the main content area for bullet text (BODY and
+# OBJECT are common in "Title and Content" layouts; vertical variants for completeness)
+def _content_placeholder_types():
+    from pptx.enum.shapes import PP_PLACEHOLDER
+    return (
+        PP_PLACEHOLDER.BODY,
+        PP_PLACEHOLDER.OBJECT,
+        PP_PLACEHOLDER.VERTICAL_BODY,
+        PP_PLACEHOLDER.VERTICAL_OBJECT,
+    )
+
 
 def _get_all_slide_text(slide: Any) -> str:
     """Extract all text from a slide by concatenating text from every shape."""
@@ -80,10 +91,11 @@ def _has_disclosure_slide_position_aware(presentation: Any) -> bool:
 
 
 def _layout_has_title_and_body(layout: Any) -> bool:
-    """Return True if layout has both title and body placeholders."""
+    """Return True if layout has both title and content (body/object) placeholders."""
     try:
         from pptx.enum.shapes import PP_PLACEHOLDER
 
+        content_types = _content_placeholder_types()
         has_title = False
         has_body = False
         for shape in layout.placeholders:
@@ -97,7 +109,7 @@ def _layout_has_title_and_body(layout: Any) -> bool:
                 continue
             if ph_type == PP_PLACEHOLDER.TITLE:
                 has_title = True
-            elif ph_type == PP_PLACEHOLDER.BODY:
+            elif ph_type in content_types:
                 has_body = True
             if has_title and has_body:
                 return True
@@ -153,10 +165,13 @@ def _move_slide_to_index(presentation: Any, from_index: int, to_index: int) -> N
 
 
 def _set_disclosure_content(slide: Any) -> None:
-    """Set title and body placeholders on the disclosure slide."""
+    """Set title and body placeholders on the disclosure slide (each at most once)."""
     try:
         from pptx.enum.shapes import PP_PLACEHOLDER
 
+        content_types = _content_placeholder_types()
+        title_set = False
+        body_set = False
         for shape in slide.shapes:
             if not getattr(shape, "is_placeholder", True):
                 continue
@@ -164,9 +179,12 @@ def _set_disclosure_content(slide: Any) -> None:
             if ph is None:
                 continue
             ph_type = getattr(ph, "type", None)
-            if ph_type == PP_PLACEHOLDER.TITLE:
+            if ph_type is None:
+                continue
+            if ph_type == PP_PLACEHOLDER.TITLE and not title_set:
                 shape.text = DISCLOSURE_TITLE
-            elif ph_type == PP_PLACEHOLDER.BODY:
+                title_set = True
+            elif ph_type in content_types and not body_set:
                 tf = getattr(shape, "text_frame", None)
                 if tf is not None:
                     paras = tf.paragraphs
@@ -177,6 +195,8 @@ def _set_disclosure_content(slide: Any) -> None:
                             p = tf.add_paragraph()
                         p.text = line
                         p.level = level
+                    body_set = True
+            if title_set and body_set:
                 break
     except Exception as e:
         logger.warning("Error setting disclosure content: %s", e)
