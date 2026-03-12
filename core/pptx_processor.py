@@ -6009,7 +6009,10 @@ class PPTXAccessibilityProcessor:
                 except Exception as e:
                     logger.error(f"Failed to set ALT text for {image_key}: {e}")
                     continue
-            
+
+            from shared.disclosure_slide import ensure_disclosure_slide
+            ensure_disclosure_slide(presentation)
+
             # Save the modified presentation
             presentation.save(output_path)
             logger.info(f"Saved PPTX with ALT text to: {output_path}")

@@ -1581,7 +1581,11 @@ class PPTXAltTextInjector:
             
             # Clean up any pre-existing duplicate title/descr pairs
             self._dedupe_titles(presentation)
-            
+
+            # Ensure disclosure slide at position 2 (or 1 if deck was empty)
+            from shared.disclosure_slide import ensure_disclosure_slide
+            ensure_disclosure_slide(presentation)
+
             # Save presentation
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
