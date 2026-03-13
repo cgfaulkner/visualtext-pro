@@ -6,9 +6,11 @@ Unified CLI that dispatches to existing proven processors
 
 import argparse
 import glob
-import sys
 import os
 import subprocess
+import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -311,9 +313,12 @@ def create_parser() -> argparse.ArgumentParser:
         'process',
         help='Process files and make alt text decisions',
         description=(
-            'Process PPTX files for ALT text. Exit codes: 0 = success (or degraded with '
-            '--allow-degraded-exit0); 1 = failed processing or degraded run (placeholders applied); '
-            '2 = provider offline and offline-mode=abort (no processing).'
+            'Process PPTX files for ALT text. Batch manifest: by default a new manifest file is '
+            'created per run in the current working directory (batch_<timestamp>_<id>_manifest.json). '
+            'Resume only when you pass --resume-manifest. Use --force to ignore any manifest and '
+            'process all files (no manifest is read or written). Exit codes: 0 = success (or '
+            'degraded with --allow-degraded-exit0); 1 = failed or degraded run; '
+            '2 = provider offline and offline-mode=abort.'
         )
     )
     process_parser.add_argument('path', help='File or folder to process')
@@ -353,6 +358,22 @@ def create_parser() -> argparse.ArgumentParser:
         choices=['images', 'visuals'],
         default='images',
         help='Placeholder injection scope: images (pictures only) or visuals (shapes too, excl. text)'
+    )
+    process_parser.add_argument(
+        '--resume-manifest',
+        metavar='PATH',
+        dest='resume_manifest',
+        default=None,
+        help='Resume from an existing batch manifest at PATH (skips completed/unchanged files; '
+             'reprocesses when file fingerprint changed). Without this, each run uses a new manifest.'
+    )
+    process_parser.add_argument(
+        '--force',
+        '--reprocess',
+        dest='force_reprocess',
+        action='store_true',
+        help='Ignore any batch manifest for this run: do not read or write a manifest; process all '
+             'discovered files (no skip as unchanged). Use when you want a one-off full run.'
     )
 
     # inject
@@ -465,6 +486,10 @@ def main():
 
         def run_batch(target: str, dry_run: bool) -> int:
             """Discover and optionally process PPTX files in batch."""
+            import logging
+            if getattr(args, 'verbose', False):
+                logging.getLogger().setLevel(logging.DEBUG)
+                logging.getLogger("batch_processor").setLevel(logging.DEBUG)
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
             from batch_processor import PPTXBatchProcessor
             from shared.path_validator import SecurityError
@@ -520,8 +545,24 @@ def main():
                     except (EOFError, KeyboardInterrupt):
                         print(abort_msg)
                         return 2
-                # Run placeholder-only path (no AI calls)
+                # Run placeholder-only path (no AI calls); use manifest for resume
                 from offline_placeholders import run_placeholder_injection
+                from shared.batch_manifest import BatchManifest
+                from shared.batch_queue import DONE_STATUSES, QueueStatus
+                from shared.file_fingerprint import file_fingerprint as get_file_fingerprint
+
+                manifest_path = Path.cwd() / "batch_manifest.json"
+                if manifest_path.exists():
+                    manifest = BatchManifest.load(manifest_path)
+                    manifest.queue.reset_processing_items()
+                else:
+                    manifest = BatchManifest.create_new(
+                        manifest_path.parent,
+                        files=list(files),
+                        manifest_path=manifest_path,
+                    )
+                    manifest.start()
+                manifest.add_files(list(files))
 
                 placeholder_scope = getattr(args, 'placeholder_scope', 'images')
                 total_targets_found = 0
@@ -534,7 +575,29 @@ def main():
                 files_written_paths = []
                 errors_list = []
                 debug_placeholders = getattr(args, 'debug_offline_placeholders', False)
-                for file_path in files:
+
+                for idx, file_path in enumerate(files, start=1):
+                    file_path = Path(file_path)
+                    item = manifest.queue.find_item(file_path) or next(
+                        (i for i in manifest.queue.items if i.path == str(file_path)), None
+                    )
+                    if item is None:
+                        continue
+                    fp_current = get_file_fingerprint(file_path)
+                    stored_fp = (item.result or {}).get("file_fingerprint", "")
+                    if item.status in DONE_STATUSES and stored_fp and stored_fp == fp_current:
+                        print(f"Skipping {idx} of {len(files)}: {file_path.name} (status={item.status.value}, unchanged)")
+                        continue
+                    if item.status in DONE_STATUSES and stored_fp and stored_fp != fp_current:
+                        item.status = QueueStatus.PENDING
+                        item.result = dict(item.result) if item.result else {}
+                        item.completed_at = None
+                        item.error = None
+                        item.started_at = None
+                        print(f"Input changed; reprocessing: {file_path.name}")
+                    item.mark_started()
+                    manifest.save()
+
                     out = run_placeholder_injection(
                         str(file_path),
                         offline_mode,
@@ -543,7 +606,15 @@ def main():
                         treat_pending_as_missing=False,
                         placeholder_scope=placeholder_scope,
                     )
+                    result = {
+                        "file_fingerprint": fp_current,
+                        "provider_offline": True,
+                        "output_path": str(file_path),
+                        "placeholders_applied": out.get("placeholders_applied", 0),
+                    }
                     if out["success"]:
+                        manifest.queue.mark_degraded(item, result)
+                        manifest.save()
                         total_targets_found += out.get("targets_found", 0)
                         total_targets_missing_alt += out.get("targets_missing_alt_found", 0)
                         total_placeholders += out["placeholders_applied"]
@@ -553,7 +624,12 @@ def main():
                         files_written += 1
                         files_written_paths.append(str(file_path))
                     else:
+                        manifest.queue.mark_failed(item, out.get("error", "Unknown error"))
+                        item.result = (item.result or {}) | result
+                        manifest.save()
                         errors_list.append({"file": str(file_path), "error": out["error"]})
+
+                manifest.finish()
 
                 print("\n" + "=" * 60)
                 if total_targets_found == 0:
@@ -606,14 +682,27 @@ def main():
                     return 0
                 return 0 if allow_degraded else 1
 
-            # Provider online: normal batch processing
-            result = processor.process_batch(files)
+            # Provider online: normal batch processing (manifest: new per run, or resume, or none)
+            if getattr(args, 'force_reprocess', False):
+                manifest_path = None
+                print("Manifest strategy: ignored (--force); no manifest read or written.")
+            elif getattr(args, 'resume_manifest', None):
+                manifest_path = Path(args.resume_manifest).resolve()
+                print(f"Manifest strategy: resume from manifest at {manifest_path}")
+            else:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                uid = uuid.uuid4().hex[:8]
+                manifest_path = Path.cwd() / f"batch_{ts}_{uid}_manifest.json"
+                print(f"Manifest strategy: new manifest at {manifest_path}")
+            result = processor.process_batch(files, manifest_path=manifest_path)
 
             print("\nBatch complete")
             print(f"Provider status: ONLINE")
             print(f"Total: {result['total']}")
             print(f"Succeeded: {result['succeeded']}")
             print(f"Failed: {result['failed']}")
+            if result.get('skipped', 0):
+                print(f"Skipped (unchanged): {result['skipped']}")
 
             if result['errors']:
                 print("\nErrors:")
@@ -704,7 +793,6 @@ def main():
             # Import cleanup utilities
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
             from artifact_cleaner import cleanup_old_artifacts, print_usage_report, format_bytes
-            from pathlib import Path
 
             base_dir = Path(args.base_dir).resolve()
 
@@ -745,7 +833,6 @@ def main():
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
             from lock_monitor import print_lock_status
             from artifact_cleaner import cleanup_stale_locks
-            from pathlib import Path
 
             directory = Path(args.directory).resolve()
 
