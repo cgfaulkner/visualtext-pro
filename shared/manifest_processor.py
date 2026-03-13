@@ -958,6 +958,12 @@ class ManifestProcessor:
                             entry.duration_ms = metadata.get("generation_time", 0) * 1000
                             entry.provider = metadata.get("successful_provider", "unknown")
                             entry.model_used = metadata.get("successful_model", "unknown")
+                            entry.llava_image_path = metadata.get("llava_image_path", "") or ""
+                            entry.llava_image_source = metadata.get("llava_image_source", "") or ""
+                            entry.llava_normalized_path = metadata.get("llava_normalized_path", "") or ""
+                            entry.llava_image_width = metadata.get("llava_image_width")
+                            entry.llava_image_height = metadata.get("llava_image_height")
+                            entry.llava_image_size_bytes = metadata.get("llava_image_size_bytes")
                         
                         # Update legacy compatibility
                         entry.suggested_alt = entry.final_alt
@@ -1404,25 +1410,43 @@ class ManifestProcessor:
 
                 # Check if this shape type should have ALT text generated via LLaVA
                 if manifest.should_generate_for_shape_type(entry.shape_type):
-                    # Generate ALT text using LLaVA with thumbnail
-                    if entry.thumbnail_path and Path(entry.thumbnail_path).exists():
-                        alt_text = self.alt_generator.generate_alt_text(
-                            entry.thumbnail_path,
-                            manifest=manifest,
-                            entry_key=entry.key,
-                            job_id=job_id,
+                    # Prefer crop_path (normalized); fallback to thumbnail_path (gate will convert or reject)
+                    image_path = None
+                    if entry.crop_path and Path(entry.crop_path).exists():
+                        image_path = entry.crop_path
+                    elif entry.thumbnail_path and Path(entry.thumbnail_path).exists():
+                        image_path = entry.thumbnail_path
+                    if not image_path:
+                        logger.warning(
+                            "No crop_path or thumbnail_path for %s, skipping LLaVA generation",
+                            entry.key,
                         )
-                        
-                        if alt_text and alt_text.strip():
-                            generated_count += 1
-                            logger.debug(f"Generated ALT for {entry.key}: {alt_text[:50]}...")
-                        else:
-                            error_msg = f"Empty ALT text generated for {entry.key}"
-                            generation_errors.append(error_msg)
-                            logger.warning(error_msg)
-                    else:
-                        logger.warning(f"No thumbnail available for {entry.key}, skipping LLaVA generation")
                         continue
+                    result = self.alt_generator.generate_alt_text(
+                        image_path,
+                        manifest=manifest,
+                        entry_key=entry.key,
+                        job_id=job_id,
+                        return_metadata=True,
+                    )
+                    if isinstance(result, tuple):
+                        alt_text, meta = result
+                    else:
+                        alt_text, meta = result, {}
+                    if alt_text and alt_text.strip():
+                        generated_count += 1
+                        entry.llava_image_path = meta.get("llava_image_path", "") or ""
+                        entry.llava_image_source = meta.get("llava_image_source", "") or ""
+                        entry.llava_normalized_path = meta.get("llava_normalized_path", "") or ""
+                        entry.llava_image_width = meta.get("llava_image_width")
+                        entry.llava_image_height = meta.get("llava_image_height")
+                        entry.llava_image_size_bytes = meta.get("llava_image_size_bytes")
+                        manifest.add_entry(entry)
+                        logger.debug(f"Generated ALT for {entry.key}: {alt_text[:50]}...")
+                    else:
+                        error_msg = f"Empty ALT text generated for {entry.key}"
+                        generation_errors.append(error_msg)
+                        logger.warning(error_msg)
                 else:
                     # Use shape fallback for non-picture elements
                     fallback_alt = manifest.get_shape_fallback_alt(

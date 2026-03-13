@@ -294,6 +294,20 @@ class ConfigManager:
         """Get the configured temp folder path."""
         return self.config['paths'].get('temp_folder', 'temp')
 
+    def get_strict_llava_gate(self, override: Optional[bool] = None) -> bool:
+        """If True, reject thumbnail paths at LLaVA entrypoint; if False, convert then proceed."""
+        if override is not None:
+            return override
+        return self.config.get('paths', {}).get('strict_llava_gate', False)
+
+    def get_llava_min_normalized_width(self) -> int:
+        """Minimum width in px for normalized image (logged and asserted). Default 512."""
+        return int(self.config.get('llava', {}).get('min_normalized_width', 512))
+
+    def get_require_min_normalized_width(self) -> bool:
+        """If True, conversion fails when PIL is missing (readability required). Default False."""
+        return bool(self.config.get('llava', {}).get('require_min_normalized_width', False))
+
     def get_alt_cache_path(self) -> str:
         """Get the configured ALT text cache file path."""
         return self.config['paths'].get('alt_cache', 'alt_cache.json')

@@ -11,9 +11,15 @@ alt_text_handling:
 paths:
   input_folder: documents_to_review
   output_folder: reviewed_reports
-  thumbnail_folder: slide_thumbnails
-  temp_folder: temp
+  thumbnail_folder: slide_thumbnails   # review/DOCX only; never use for LLaVA input
+  temp_folder: temp                    # allowed for LLaVA temp/converted images
+  strict_llava_gate: false             # if true, reject thumbnail paths; if false, convert then proceed
   alt_cache: alt_cache.json
+# Minimum width (px) for normalized image used by LLaVA; logged and asserted
+# require_min_normalized_width: if true, conversion fails when PIL is missing
+llava:
+  min_normalized_width: 512
+  require_min_normalized_width: false
 conversion:
   wmf_to_png: true
 tools:

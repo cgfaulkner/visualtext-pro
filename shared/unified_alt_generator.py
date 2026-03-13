@@ -24,6 +24,14 @@ except Exception:
 # Absolute imports for pytest-safe collection
 from shared.config_manager import ConfigManager
 try:
+    from shared.llava_image_paths import (
+        validate_llava_image_path,
+        convert_thumbnail_to_normalized,
+    )
+except ImportError:
+    validate_llava_image_path = None  # type: ignore
+    convert_thumbnail_to_normalized = None  # type: ignore
+try:
     from shared.llava_connectivity import (
         LLaVAConnectivityManager,
         ServiceState,
@@ -69,6 +77,15 @@ class AltGenerationOutcome:
     next_steps: Optional[List[str]] = None
     provider: str = ""
     breaker_state: Optional[str] = None
+    # LLaVA gate metadata (optional; for manifest/observability)
+    llava_image_path: str = ""
+    llava_image_source: str = ""
+    llava_normalized_path: str = ""
+    llava_image_width: Optional[int] = None
+    llava_image_height: Optional[int] = None
+    llava_image_size_bytes: Optional[int] = None
+    conversion_performed: bool = False
+    normalized_width_enforced: bool = True
 
 
 # Helper functions for Ollama request handling
@@ -762,6 +779,40 @@ class FlexibleAltGenerator:
         for provider in self.providers.values():
             provider.set_prompt_type(prompt_type)
 
+    def _get_image_dimensions_and_size(self, path: Path) -> Tuple[int, int, int]:
+        """Return (width, height, size_bytes) for path; (0, 0, 0) on error."""
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                w, h = img.size
+                return (w, h, size_bytes)
+        except Exception:
+            return (0, 0, size_bytes)
+
+    def _apply_gate_metadata(self, outcome: AltGenerationOutcome) -> AltGenerationOutcome:
+        """Attach last gate metadata to outcome for manifest/observability."""
+        meta = getattr(self, "_last_gate_metadata", None) or {}
+        return AltGenerationOutcome(
+            status=outcome.status,
+            text=outcome.text,
+            reason=outcome.reason,
+            next_steps=outcome.next_steps,
+            provider=outcome.provider,
+            breaker_state=outcome.breaker_state,
+            llava_image_path=meta.get("llava_image_path", ""),
+            llava_image_source=meta.get("llava_image_source", ""),
+            llava_normalized_path=meta.get("llava_normalized_path", ""),
+            llava_image_width=meta.get("llava_image_width"),
+            llava_image_height=meta.get("llava_image_height"),
+            llava_image_size_bytes=meta.get("llava_image_size_bytes"),
+            conversion_performed=meta.get("conversion_performed", False),
+            normalized_width_enforced=meta.get("normalized_width_enforced", True),
+        )
+
     def generate_alt_outcome(self, image_path: str,
                              prompt_type: Optional[str] = None,
                              context: Optional[str] = None,
@@ -770,6 +821,8 @@ class FlexibleAltGenerator:
                              job_id: Optional[str] = None) -> AltGenerationOutcome:
         """
         Generate ALT and return structured outcome. Use this for artifact-writing paths.
+        Gate: default = convert thumbnail to normalized and proceed; strict = reject thumbnail.
+        Provider is never given a thumbnail path.
         """
         if custom_prompt:
             prompt = custom_prompt
@@ -790,50 +843,181 @@ class FlexibleAltGenerator:
             providers_to_try = [force_provider]
         else:
             providers_to_try = [p for p in self.fallback_chain if p in self.providers]
+
+        path_to_use = Path(image_path) if image_path else None
+        image_source = "normalized"
+        conversion_performed = False
+        original_image_path = image_path or ""
+
+        if validate_llava_image_path and convert_thumbnail_to_normalized and image_path and str(image_path).strip():
+            allowed, source_label = validate_llava_image_path(
+                image_path, self.config_manager, allowed_extra_dirs=None
+            )
+            strict = self.config_manager.get_strict_llava_gate()
+            if not allowed and source_label == "thumbnail":
+                if strict:
+                    self._last_gate_metadata = {
+                        "llava_image_path": original_image_path,
+                        "llava_image_source": "thumbnail",
+                        "llava_normalized_path": "",
+                        "llava_image_width": None,
+                        "llava_image_height": None,
+                        "llava_image_size_bytes": None,
+                        "conversion_performed": False,
+                        "normalized_width_enforced": True,
+                    }
+                    logger.warning(
+                        "LLaVA gate (strict): rejecting thumbnail path (use normalized/crop path)"
+                    )
+                    return self._apply_gate_metadata(AltGenerationOutcome(
+                        status="error",
+                        text=None,
+                        reason="LLaVA input must be a normalized image path, not a thumbnail path",
+                        next_steps=["Use crop_path or disable strict_llava_gate to convert."],
+                        provider="",
+                        breaker_state=None,
+                    ))
+                require_min = self.config_manager.get_require_min_normalized_width()
+                normalized_path, err, width_enforced = convert_thumbnail_to_normalized(
+                    image_path,
+                    self.config_manager,
+                    min_normalized_width=self.config_manager.get_llava_min_normalized_width(),
+                    require_min_width=require_min,
+                )
+                if normalized_path is None:
+                    self._last_gate_metadata = {
+                        "llava_image_path": original_image_path,
+                        "llava_image_source": "thumbnail",
+                        "llava_normalized_path": "",
+                        "llava_image_width": None,
+                        "llava_image_height": None,
+                        "llava_image_size_bytes": None,
+                        "conversion_performed": False,
+                        "normalized_width_enforced": False,
+                    }
+                    return self._apply_gate_metadata(AltGenerationOutcome(
+                        status="error",
+                        text=None,
+                        reason=err or "Conversion failed",
+                        next_steps=["Check thumbnail file and temp_folder permissions."],
+                        provider="",
+                        breaker_state=None,
+                    ))
+                path_to_use = normalized_path
+                image_source = "thumbnail"
+                conversion_performed = True
+                self._conversion_width_enforced = width_enforced
+                if not width_enforced:
+                    logger.warning(
+                        "Normalized image width could not be enforced (PIL unavailable). "
+                        "Metadata flag normalized_width_enforced=false."
+                    )
+            elif allowed:
+                path_to_use = Path(image_path).resolve()
+                image_source = source_label
+            else:
+                self._last_gate_metadata = {
+                    "llava_image_path": original_image_path,
+                    "llava_image_source": source_label or "unknown",
+                    "llava_normalized_path": "",
+                    "llava_image_width": None,
+                    "llava_image_height": None,
+                    "llava_image_size_bytes": None,
+                    "conversion_performed": False,
+                    "normalized_width_enforced": True,
+                }
+                return self._apply_gate_metadata(AltGenerationOutcome(
+                    status="error",
+                    text=None,
+                    reason="Image path not in allowed directory (temp/crops)",
+                    next_steps=["Use a path under temp_folder or crops."],
+                    provider="",
+                    breaker_state=None,
+                ))
+
+        if path_to_use is None or not path_to_use.exists():
+            self._last_gate_metadata = {}
+            return AltGenerationOutcome(
+                status="error",
+                text=None,
+                reason="No image path or file not found",
+                next_steps=[],
+                provider="",
+                breaker_state=None,
+            )
+
+        width, height, size_bytes = self._get_image_dimensions_and_size(path_to_use)
+        min_w = self.config_manager.get_llava_min_normalized_width()
+        if min_w and width < min_w and width > 0:
+            logger.warning(
+                "Normalized image width %s below threshold %s (min_normalized_width)",
+                width, min_w,
+            )
+
+        width_enforced = True
+        if conversion_performed:
+            width_enforced = getattr(self, "_conversion_width_enforced", True)
+        self._last_gate_metadata = {
+            "llava_image_path": original_image_path,
+            "llava_image_source": image_source,
+            "llava_normalized_path": str(path_to_use),
+            "llava_image_width": width or None,
+            "llava_image_height": height or None,
+            "llava_image_size_bytes": size_bytes or None,
+            "conversion_performed": conversion_performed,
+            "normalized_width_enforced": width_enforced,
+        }
+        logger.info(
+            "event=llava_generation image_source=%s image_path=%s normalized_path=%s "
+            "conversion_performed=%s width=%s height=%s size_bytes=%s",
+            image_source, original_image_path, str(path_to_use),
+            str(conversion_performed).lower(), width, height, size_bytes,
+        )
+
+        path_str = str(path_to_use)
         for provider_name in providers_to_try:
             provider = self.providers[provider_name]
             if hasattr(provider, 'generate_alt_outcome') and provider.generate_alt_outcome is not BaseAltProvider.generate_alt_outcome:
-                outcome = provider.generate_alt_outcome(image_path, prompt, job_id=job_id)
+                outcome = provider.generate_alt_outcome(path_str, prompt, job_id=job_id)
                 if outcome is not None:
-                    return outcome
-            # Fallback: call generate_alt_text and build outcome
+                    return self._apply_gate_metadata(outcome)
             try:
-                gen_result, metadata = provider.generate_alt_text(image_path, prompt)
+                gen_result, metadata = provider.generate_alt_text(path_str, prompt)
                 if gen_result and gen_result.get("status") == "ok":
-                    return AltGenerationOutcome(
+                    return self._apply_gate_metadata(AltGenerationOutcome(
                         status="ok",
                         text=(gen_result.get("text") or "").strip() or None,
                         reason=None,
                         next_steps=None,
                         provider=provider_name,
                         breaker_state=None,
-                    )
+                    ))
                 if gen_result and gen_result.get("status") == "degraded":
-                    return AltGenerationOutcome(
+                    return self._apply_gate_metadata(AltGenerationOutcome(
                         status="skipped",
                         text=None,
                         reason=metadata.get("reason", "degraded"),
                         next_steps=None,
                         provider=provider_name,
                         breaker_state=None,
-                    )
+                    ))
             except Exception as e:
-                return AltGenerationOutcome(
+                return self._apply_gate_metadata(AltGenerationOutcome(
                     status="error",
                     text=None,
                     reason=str(e),
                     next_steps=["Check provider and retry."],
                     provider=provider_name,
                     breaker_state=None,
-                )
-        return AltGenerationOutcome(
+                ))
+        return self._apply_gate_metadata(AltGenerationOutcome(
             status="error",
             text=None,
             reason="No provider available",
             next_steps=[],
             provider="",
             breaker_state=None,
-        )
+        ))
 
     def generate_alt_text(self, image_path: str,
                          prompt_type: Optional[str] = None,
@@ -864,6 +1048,14 @@ class FlexibleAltGenerator:
             "successful_provider": outcome.provider,
             "status": outcome.status,
             "reason": outcome.reason,
+            "llava_image_path": getattr(outcome, "llava_image_path", "") or "",
+            "llava_image_source": getattr(outcome, "llava_image_source", "") or "",
+            "llava_normalized_path": getattr(outcome, "llava_normalized_path", "") or "",
+            "llava_image_width": getattr(outcome, "llava_image_width", None),
+            "llava_image_height": getattr(outcome, "llava_image_height", None),
+            "llava_image_size_bytes": getattr(outcome, "llava_image_size_bytes", None),
+            "conversion_performed": getattr(outcome, "conversion_performed", False),
+            "normalized_width_enforced": getattr(outcome, "normalized_width_enforced", True),
         }
         if outcome.status == "ok":
             self.usage_stats['successful_requests'] += 1
@@ -879,6 +1071,12 @@ class FlexibleAltGenerator:
                     entry.decision_reason = "generated"
                     entry.provider = outcome.provider
                     entry.prompt_type = prompt_type or "default"
+                    entry.llava_image_path = final_metadata.get("llava_image_path", "") or ""
+                    entry.llava_image_source = final_metadata.get("llava_image_source", "") or ""
+                    entry.llava_normalized_path = final_metadata.get("llava_normalized_path", "") or ""
+                    entry.llava_image_width = final_metadata.get("llava_image_width")
+                    entry.llava_image_height = final_metadata.get("llava_image_height")
+                    entry.llava_image_size_bytes = final_metadata.get("llava_image_size_bytes")
                     manifest.add_entry(entry)
                 result = normalized_result
             else:
