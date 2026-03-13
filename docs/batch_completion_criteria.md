@@ -4,7 +4,7 @@
 
 This document defines what marks a file as DONE vs NOT DONE in batch processing, and the metadata required for stable checkpoint/resume. Implementations must follow these rules so that restarting a batch skips only files that are DONE and unchanged.
 
-**Manifest file location:** The checkpoint manifest is stored by default in the current working directory as `batch_manifest.json` (i.e. `Path.cwd() / "batch_manifest.json"`). The batch runner creates this file on first run when processing with resume support. Only the manifest object writes the checkpoint; the queue does not persist directly.
+**Manifest file location:** The checkpoint manifest is stored under the input directory at `<staging_root>/<run_id>/manifest.json` (default `staged_runs`; config key `staged_batch.staging_root`). Use `--run-id` to resume or `--resume-manifest` for an explicit path. Manifest is written atomically to `manifest.json.tmp` then renamed to `manifest.json`; replace uses `os.replace` with retry and fallback.
 
 ---
 

@@ -253,6 +253,10 @@ batch_processing:
   output_timestamp_format: "%Y%m%d_%H%M%S"  # Timestamp format for folders
   preserve_folder_structure: true            # Keep nested folders in output
 
+# Staged batch runs: run folder under input root (visible, not hidden)
+staged_batch:
+  staging_root: staged_runs   # input_root/<staging_root>/<run_id>/ with inputs/, outputs/, manifest.json
+
 # --- Profiles ---
 profiles:
   scientific_strict:

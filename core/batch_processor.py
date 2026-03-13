@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import os
 import subprocess
 import sys
 import yaml
@@ -165,12 +166,16 @@ class PPTXBatchProcessor:
         self,
         files: Sequence[Path],
         manifest_path: Optional[Path] = None,
+        input_root: Optional[Path] = None,
+        run_dir: Optional[Path] = None,
     ) -> Dict[str, object]:
         """Process PPTX files sequentially, with optional checkpoint/resume via manifest.
 
         When manifest_path is set: load or create manifest, skip DONE+unchanged files,
         reprocess on fingerprint mismatch, retry TIMED_OUT/LOCKED/PENDING. Persist after
         each file. When manifest_path is None, behavior is unchanged (no manifest).
+        When input_root and run_dir are set, per-file artifacts are written under
+        run_dir/outputs/<relative_path>/ (artifact base passed to subprocess via env).
         """
         if manifest_path is None:
             return self._process_batch_no_manifest(files)
@@ -265,9 +270,25 @@ class PPTXBatchProcessor:
             item.mark_started()
             manifest.save()
 
+            artifact_base: Optional[Path] = None
+            if input_root is not None and run_dir is not None:
+                try:
+                    file_path.resolve().relative_to(input_root.resolve())
+                except ValueError:
+                    logger.warning(
+                        "File %s is not under input_root %s (symlink escape?); skipping artifact base",
+                        file_path,
+                        input_root,
+                    )
+                else:
+                    rel = file_path.relative_to(input_root).parent
+                    if str(rel) == ".":
+                        rel = Path(".")
+                    artifact_base = run_dir / "outputs" / rel
+
             print(f"Processing {index} of {total}: {file_path.name}")
             try:
-                result = self._process_single(file_path)
+                result = self._process_single(file_path, artifact_base=artifact_base)
             except Exception as exc:
                 logger.error("Unexpected error for %s: %s", file_path, exc)
                 _record_failed(manifest.queue, item, str(exc), file_path, fp_current, False)
@@ -320,8 +341,15 @@ class PPTXBatchProcessor:
 
         return results
 
-    def _process_single(self, file_path: Path) -> Dict[str, object]:
-        """Process a single PPTX file using the existing processor."""
+    def _process_single(
+        self, file_path: Path, artifact_base: Optional[Path] = None
+    ) -> Dict[str, object]:
+        """Process a single PPTX file using the existing processor.
+
+        When artifact_base is set, subprocess receives VISUALTEXT_ARTIFACT_BASE_DIR so
+        per-file artifacts are written under that directory. Set only for subprocess
+        lifetime (env passed to run(), not os.environ).
+        """
         validated_path = sanitize_input_path(str(file_path), allow_absolute=True)
 
         cmd = [
@@ -334,9 +362,19 @@ class PPTXBatchProcessor:
         if self.config_path and self.config_path != "config.yaml":
             cmd.extend(["--config", self.config_path])
 
+        env = os.environ.copy()
+        if artifact_base is not None:
+            env["VISUALTEXT_ARTIFACT_BASE_DIR"] = str(artifact_base)
+        else:
+            env.pop("VISUALTEXT_ARTIFACT_BASE_DIR", None)
+
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self._timeout
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             # Capture stdout/stderr from the TimeoutExpired exception if available

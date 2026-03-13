@@ -66,6 +66,8 @@ python altgen.py --dry-run process "documents_to_review"
 python altgen.py process "documents_to_review"
 ```
 
+Manifest and per-file artifacts live under the **input directory** at `staged_runs/<run_id>/` (config: `staged_batch.staging_root`). Coverage report JSONs are written under the same run output tree (`staged_runs/<run_id>/outputs/<relative_path>/`) with filename `{input_stem}_coverage_report.json`; when running without a run folder (e.g. `--force` or single-file), they are written next to the PPTX with the same naming. Resume with `--run-id <id>` or `--resume-manifest <path>`; use `--force` to reprocess all without a manifest.
+
 ### Approval document (Word review doc)
 
 To generate the Word approval/review document only (no ALT injection):
