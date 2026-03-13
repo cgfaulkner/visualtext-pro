@@ -555,22 +555,35 @@ class StagedBatchRunner:
 
         return True
 
+    @staticmethod
+    def _verify_artifact_dir(artifact_dir: Path) -> bool:
+        """Verify artifact dir per plan: scan/visual_index.json and resolve/final_alt_map.json."""
+        a = Path(artifact_dir)
+        return (
+            (a / "scan" / "visual_index.json").exists()
+            and (a / "resolve" / "final_alt_map.json").exists()
+        )
+
     def _commit_file(self, entry: StagedFileEntry, staged_output: Path, final_output: Path) -> str:
         final_output.parent.mkdir(parents=True, exist_ok=True)
 
         if self.on_existing_output not in {"skip", "version", "overwrite"}:
             self.on_existing_output = "version"
 
-        # Paired artifacts: only files that clearly belong to this PPTX (same stem + known patterns)
+        # Paired artifacts: coverage report and PDF by staged stem and by input stem
+        # (so we move input-stem report when staged output has a different name)
         staged_dir = staged_output.parent
         stem = staged_output.stem
-        paired_patterns = (
+        input_stem = Path(entry.input_path).stem
+        paired_names = {
             f"{stem}_coverage_report.json",
             f"{stem}.pdf",
-        )
+            f"{input_stem}_coverage_report.json",
+            f"{input_stem}.pdf",
+        }
         staged_artifacts: List[Path] = [
             p for p in staged_dir.iterdir()
-            if p.is_file() and p != staged_output and p.name in paired_patterns
+            if p.is_file() and p != staged_output and p.name in paired_names
         ]
 
         # Establish base targets (without versioning) for PPTX and artifacts
@@ -629,42 +642,106 @@ class StagedBatchRunner:
             pptx_target = pptx_base_target
             artifact_targets = artifact_base_targets
 
-        # Move staged PPTX and artifacts into place
+        # Pipeline artifact dir(s) in staged_dir (e.g. .alt_pipeline_*)
+        pipeline_artifact_dirs: List[Path] = [
+            p for p in staged_dir.iterdir()
+            if p.is_dir() and p.name.startswith(".alt_pipeline_")
+        ]
+
         try:
-            staged_output.rename(pptx_target)
+            final_dir_resolved = final_dir.resolve()
+            staged_dev = staged_output.stat().st_dev
+            final_dev = final_dir_resolved.stat().st_dev
+            same_fs = staged_dev == final_dev
+        except OSError:
+            same_fs = False
+
+        if same_fs:
+            # Same-FS: (1) rename pipeline artifact dir(s), (2) rename PPTX, (3) rename paired files
+            # Rollback pipeline dir(s) if PPTX rename fails
+            moved_pipeline_dirs: List[tuple] = []  # (src, dst)
+            for art_dir in pipeline_artifact_dirs:
+                dst_name = art_dir.name
+                if version_suffix is not None:
+                    dst_name = f"{art_dir.name} ({version_suffix})"
+                art_dst = final_dir / dst_name
+                try:
+                    art_dir.rename(art_dst)
+                    moved_pipeline_dirs.append((art_dst, art_dir))
+                    logger.info("Moving artifact dir %s to %s", art_dir, art_dst)
+                except Exception as exc:
+                    logger.debug("Rename artifact dir failed: %s", exc)
+                    for _dst, _src in reversed(moved_pipeline_dirs):
+                        try:
+                            _dst.rename(_src)
+                        except Exception as rollback_exc:
+                            logger.warning("Rollback artifact dir failed: %s", rollback_exc)
+                    entry.failure_reason = f"failed_to_move_artifact_dir: {exc}"
+                    return StagedBatchStatus.FAILED
+            try:
+                staged_output.rename(pptx_target)
+            except Exception as exc:
+                for art_dst, art_src in reversed(moved_pipeline_dirs):
+                    try:
+                        art_dst.rename(art_src)
+                        logger.debug("Rolled back artifact dir to %s", art_src)
+                    except Exception as rollback_exc:
+                        logger.warning("Rollback artifact dir failed: %s", rollback_exc)
+                entry.failure_reason = f"commit_failed_after_artifact_move: {exc}"
+                return StagedBatchStatus.FAILED
             for src, dst in zip(staged_artifacts, artifact_targets):
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 src.rename(dst)
-        except Exception as exc:
-            # Restore backups using correct mapping (.__backup__<run_id> or .__backup__<run_id>-N)
-            restore_error = None
-            for backup in backups:
-                try:
-                    original = self._backup_to_original_path(backup)
-                    if not original.exists() and backup.exists():
-                        backup.rename(original)
-                except Exception as restore_exc:
-                    restore_error = restore_exc
-            if restore_error:
-                entry.failure_reason = (
-                    f"commit_failed_and_restore_failed: commit={exc}, restore={restore_error}"
-                )
-            else:
-                entry.failure_reason = f"commit_failed_after_backup: {exc}"
-            return StagedBatchStatus.FAILED
+            if self.on_existing_output == "overwrite" and self.cleanup_backups:
+                for backup in backups:
+                    try:
+                        if backup.exists():
+                            backup.unlink()
+                    except Exception:
+                        pass
+            entry.final_output_path = str(pptx_target)
+            return StagedBatchStatus.COMMITTED
 
-        # Optionally clean up backups after successful overwrite
-        if self.on_existing_output == "overwrite" and self.cleanup_backups:
-            for backup in backups:
+        # Cross-FS: copy + verify (plan rule: scan/visual_index.json, resolve/final_alt_map.json; .pptx)
+        else:
+            for art_dir in pipeline_artifact_dirs:
+                art_dst = final_dir / art_dir.name
+                if version_suffix is not None:
+                    art_dst = final_dir / f"{art_dir.name} ({version_suffix})"
                 try:
-                    if backup.exists():
-                        backup.unlink()
-                except Exception:
-                    # Non-fatal; leave backup in place
-                    pass
-
-        entry.final_output_path = str(pptx_target)
-        return StagedBatchStatus.COMMITTED
+                    shutil.copytree(art_dir, art_dst, dirs_exist_ok=True)
+                except Exception as exc:
+                    logger.warning("Copy artifact dir failed: %s", exc)
+                    entry.failure_reason = f"cross_fs_copy_artifact_dir_failed: {exc}"
+                    return StagedBatchStatus.FAILED
+                if not self._verify_artifact_dir(art_dst):
+                    shutil.rmtree(art_dst, ignore_errors=True)
+                    entry.failure_reason = "cross_fs_verify_artifact_dir_failed"
+                    return StagedBatchStatus.FAILED
+                logger.info("Copied and verified artifact dir %s to %s", art_dir, art_dst)
+            try:
+                shutil.copy2(staged_output, pptx_target)
+            except Exception as exc:
+                entry.failure_reason = f"cross_fs_copy_pptx_failed: {exc}"
+                return StagedBatchStatus.FAILED
+            if not (pptx_target.exists() and pptx_target.suffix.lower() == ".pptx"):
+                pptx_target.unlink(missing_ok=True)
+                entry.failure_reason = "cross_fs_verify_pptx_failed"
+                return StagedBatchStatus.FAILED
+            for src, dst in zip(staged_artifacts, artifact_targets):
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+            # Remove sources only after both verified
+            try:
+                for art_dir in pipeline_artifact_dirs:
+                    shutil.rmtree(art_dir)
+                staged_output.unlink()
+                for src in staged_artifacts:
+                    src.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Cross-FS cleanup of sources failed (non-fatal): %s", exc)
+            entry.final_output_path = str(pptx_target)
+            return StagedBatchStatus.COMMITTED
 
     @staticmethod
     def _next_version_path(base: Path) -> Path:
@@ -885,8 +962,17 @@ class PPTXAltProcessor:
         recovery_manager = SmartRecoveryManager()
 
         # Wrap processing with RunArtifacts if enabled
+        # When VISUALTEXT_ARTIFACT_BASE_DIR is set (staged batch), artifacts go under that dir
+        artifact_base_dir = None
+        env_base = os.environ.get("VISUALTEXT_ARTIFACT_BASE_DIR")
+        if env_base:
+            artifact_base_dir = Path(env_base)
         if should_use_artifacts:
-            artifacts = RunArtifacts.create_for_run(input_path, cleanup_on_exit=cleanup_on_exit)
+            artifacts = RunArtifacts.create_for_run(
+                input_path,
+                base_dir=artifact_base_dir,
+                cleanup_on_exit=cleanup_on_exit,
+            )
             artifacts.__enter__()
             self._current_artifacts = artifacts
         else:
@@ -937,11 +1023,18 @@ class PPTXAltProcessor:
 
                             # Generate coverage report file if requested
                             if generate_coverage_report:
-                                self._save_coverage_report_file(coverage_report, input_path, output_path)
+                                self._save_coverage_report_file(
+                                    coverage_report,
+                                    input_path,
+                                    output_path,
+                                    report_dir=artifact_base_dir,
+                                )
 
                             # Optional PDF export
                             if export_pdf:
-                                pdf_result = self._export_to_pdf(output_path)
+                                pdf_result = self._export_to_pdf(
+                                    output_path, output_dir=artifact_base_dir
+                                )
                                 result_obj.processing_details['pdf_export'] = pdf_result
                                 if not pdf_result['success']:
                                     result_obj.add_warning(f"PDF export failed: {pdf_result.get('error', 'Unknown error')}")
@@ -1391,27 +1484,33 @@ class PPTXAltProcessor:
                 'errors': [error_msg]
             }
     
-    def _export_to_pdf(self, pptx_file: Path) -> dict:
+    def _export_to_pdf(
+        self, pptx_file: Path, output_dir: Optional[Path] = None
+    ) -> dict:
         """
         Export PPTX to PDF with multiple fallback methods.
-        
+
         Args:
             pptx_file: Path to PPTX file
-            
+            output_dir: If set, write PDF here; otherwise use pptx_file.parent
+
         Returns:
             Dictionary with export results
         """
-        pdf_path = pptx_file.with_suffix('.pdf')
-        
+        pdf_dir = output_dir if output_dir is not None else pptx_file.parent
+        pdf_path = pdf_dir / f"{pptx_file.stem}.pdf"
+        if output_dir is not None:
+            pdf_dir.mkdir(parents=True, exist_ok=True)
+
         # Try LibreOffice first (cross-platform)
         try:
             import subprocess
-            
+
             cmd = [
                 "libreoffice",
-                "--headless", 
+                "--headless",
                 "--convert-to", "pdf",
-                "--outdir", str(pptx_file.parent),
+                "--outdir", str(pdf_dir),
                 str(pptx_file)
             ]
             
@@ -1630,14 +1729,24 @@ class PPTXAltProcessor:
         if coverage_report['failed_generations_count'] > 0:
             logger.warning(f"   🔍 Failed generation attempts: {coverage_report['failed_generations_count']} (see coverage report file)")
     
-    def _save_coverage_report_file(self, coverage_report: dict, input_path: Path, output_path: Path):
+    def _save_coverage_report_file(
+        self,
+        coverage_report: dict,
+        input_path: Path,
+        output_path: Path,
+        report_dir: Optional[Path] = None,
+    ) -> None:
         """
         Save detailed coverage report to JSON file.
-        
+
+        Report filename is always {input_path.stem}_coverage_report.json so the
+        report stays tied to the source file when output has a different name.
+
         Args:
             coverage_report: Coverage report dictionary
-            input_path: Input file path
+            input_path: Input file path (stem used for report filename)
             output_path: Output file path
+            report_dir: If set, write report here; otherwise use output_path.parent
         """
         try:
             # Create detailed report
@@ -1648,9 +1757,11 @@ class PPTXAltProcessor:
                 'coverage_summary': coverage_report,
                 'failed_generations': self.failed_generations
             }
-            
-            # Save to file
-            report_path = output_path.parent / f"{output_path.stem}_coverage_report.json"
+
+            base_dir = report_dir if report_dir is not None else output_path.parent
+            report_path = base_dir / f"{input_path.stem}_coverage_report.json"
+            if report_dir is not None:
+                report_path.parent.mkdir(parents=True, exist_ok=True)
             with open(report_path, 'w', encoding='utf-8') as f:
                 json.dump(detailed_report, f, indent=2, ensure_ascii=False)
             
@@ -1867,8 +1978,8 @@ Examples:
                                help='Shape inclusion strategy: off=pictures only, smart=shapes above threshold, all=all shapes (default: smart)')
     process_parser.add_argument('--max-shapes-per-slide', type=int, default=5,
                                help='Maximum shapes to process per slide (default: 5)')
-    process_parser.add_argument('--min-shape-area', default='1%', 
-                               help='Minimum shape area threshold, as percentage (e.g., "1%") or pixels (e.g., "100px") (default: 1%%)')
+    process_parser.add_argument('--min-shape-area', default='1%',
+                               help='Minimum shape area threshold, as percentage (e.g., "1%%") or pixels (e.g., "100px") (default: 1%%)')
     
     # Pipeline control flags  
     process_parser.add_argument('--skip-injection', action='store_true', 

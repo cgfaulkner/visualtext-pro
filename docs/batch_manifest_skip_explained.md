@@ -12,8 +12,7 @@ Skipped (unchanged): N
 
 ## Manifest location and default behaviour
 
-- **Default (no flags):** Each run creates a **new** manifest file in the **current working directory (CWD)** with a unique name: `batch_<timestamp>_<id>_manifest.json` (e.g. `batch_20260312_120017_a1b2c3d4_manifest.json`). No resume; every run starts fresh.
-- **Running from different folders:** The manifest is always in CWD. So if you run from project root you get a manifest in the project root; if you run from another folder you get a manifest there. Different working directories therefore use different manifests—which is intended so runs from different places don’t share state.
+- **Default (no flags):** Each run creates a **new** run folder under the **input directory** at `<staging_root>/<run_id>/manifest.json` (default `staged_runs`). Run_id is UTC (e.g. `20260313_153000`). Per-file artifacts go under `staged_runs/<run_id>/outputs/<relative_path>/`.- **Running from different folders:** The manifest is always in CWD. So if you run from project root you get a manifest in the project root; if you run from another folder you get a manifest there. Different working directories therefore use different manifests—which is intended so runs from different places don’t share state.
 - **Resume:** Skipping as “complete, unchanged” only happens when you **explicitly** pass `--resume-manifest <path>`. Then the tool loads that manifest and skips completed/unchanged files.
 
 ## Root cause (when using --resume-manifest)
@@ -38,11 +37,13 @@ Skipped (unchanged): N
 
 ### 1. Default: fresh run (no resume)
 
-Do not pass `--resume-manifest`. Each run gets a new manifest file in CWD and processes all files:
+Each run gets a new run folder under the input directory and processes all files:
 
 ```bash
 python altgen.py process "documents_to_review"
 ```
+
+Manifest and artifacts live under `documents_to_review/staged_runs/<run_id>/`.
 
 ### 2. Force reprocess (no manifest at all)
 

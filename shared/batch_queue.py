@@ -13,12 +13,21 @@ Features:
 - Statistics and progress reporting
 """
 
+import errno
 import json
+import os
+import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
 from enum import Enum
+
+try:
+    from manifest_constants import MANIFEST_REPLACE_RETRIES, MANIFEST_RETRY_DELAYS_S
+except ImportError:
+    MANIFEST_REPLACE_RETRIES = 3
+    MANIFEST_RETRY_DELAYS_S = (0.1, 0.2, 0.4)
 
 
 class QueueStatus(str, Enum):
@@ -212,7 +221,7 @@ class BatchQueue:
             self.save()
 
     def save(self) -> None:
-        """Persist queue state to disk."""
+        """Persist queue state to disk (atomic write to manifest.json.tmp then replace)."""
         if not self.manifest_path:
             return
 
@@ -221,14 +230,54 @@ class BatchQueue:
             'items': [item.to_dict() for item in self.items]
         }
 
-        # Ensure parent directory exists
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write atomically
-        temp_path = self.manifest_path.with_suffix('.tmp')
+        temp_path = self.manifest_path.parent / (self.manifest_path.name + ".tmp")
         with open(temp_path, 'w') as f:
             json.dump(data, f, indent=2)
-        temp_path.replace(self.manifest_path)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                pass
+
+        last_error = None
+        for attempt in range(MANIFEST_REPLACE_RETRIES):
+            try:
+                os.replace(temp_path, self.manifest_path)
+                return
+            except OSError as e:
+                last_error = e
+                if e.errno == errno.EXDEV:
+                    raise RuntimeError(
+                        "Manifest atomic replace failed: temp and manifest must be on the same "
+                        "volume (EXDEV). Ensure manifest.json.tmp is in the same directory as "
+                        "manifest.json."
+                    ) from e
+                if attempt < MANIFEST_REPLACE_RETRIES - 1:
+                    delay = MANIFEST_RETRY_DELAYS_S[attempt]
+                    time.sleep(delay)
+                continue
+
+        try:
+            temp_path2 = self.manifest_path.parent / (self.manifest_path.name + ".tmp2")
+            with open(temp_path, 'rb') as src:
+                with open(temp_path2, 'wb') as dst:
+                    dst.write(src.read())
+                    try:
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    except (OSError, AttributeError):
+                        pass
+            os.replace(temp_path2, self.manifest_path)
+            temp_path.unlink(missing_ok=True)
+            return
+        except OSError:
+            pass
+
+        raise RuntimeError(
+            f"Manifest atomic replace failed: {last_error!s} "
+            "(close other processes holding the file?)"
+        ) from last_error
 
     @classmethod
     def load(cls, manifest_path: Path) -> 'BatchQueue':

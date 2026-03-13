@@ -313,12 +313,11 @@ def create_parser() -> argparse.ArgumentParser:
         'process',
         help='Process files and make alt text decisions',
         description=(
-            'Process PPTX files for ALT text. Batch manifest: by default a new manifest file is '
-            'created per run in the current working directory (batch_<timestamp>_<id>_manifest.json). '
-            'Resume only when you pass --resume-manifest. Use --force to ignore any manifest and '
-            'process all files (no manifest is read or written). Exit codes: 0 = success (or '
-            'degraded with --allow-degraded-exit0); 1 = failed or degraded run; '
-            '2 = provider offline and offline-mode=abort.'
+            'Process PPTX files for ALT text. Manifest is under input_root/<staging_root>/<run_id>/'
+            'manifest.json (default staging_root: staged_runs). Use --run-id to resume or '
+            '--resume-manifest for an explicit path. Use --force to ignore any manifest and process '
+            'all files. Exit codes: 0 = success (or degraded with --allow-degraded-exit0); '
+            '1 = failed or degraded run; 2 = provider offline and offline-mode=abort.'
         )
     )
     process_parser.add_argument('path', help='File or folder to process')
@@ -360,12 +359,35 @@ def create_parser() -> argparse.ArgumentParser:
         help='Placeholder injection scope: images (pictures only) or visuals (shapes too, excl. text)'
     )
     process_parser.add_argument(
+        '--run-id',
+        metavar='ID',
+        dest='run_id',
+        default=None,
+        help='Resume or create run folder under input root: input_root/<staging_root>/<id>/; '
+             'manifest at .../manifest.json. Overridden by --resume-manifest if both given.'
+    )
+    process_parser.add_argument(
         '--resume-manifest',
         metavar='PATH',
         dest='resume_manifest',
         default=None,
-        help='Resume from an existing batch manifest at PATH (skips completed/unchanged files; '
-             'reprocesses when file fingerprint changed). Without this, each run uses a new manifest.'
+        help='Resume from an existing batch manifest at PATH (absolute). Takes precedence over '
+             '--run-id and --manifest-dir.'
+    )
+    process_parser.add_argument(
+        '--manifest-dir',
+        metavar='DIR',
+        dest='manifest_dir',
+        default=None,
+        help='Directory for manifest file; manifest path is <dir>/manifest.json. If DIR is '
+             'relative, resolved relative to input root; if absolute, used as-is.'
+    )
+    process_parser.add_argument(
+        '--staging-root',
+        metavar='NAME',
+        dest='staging_root',
+        default=None,
+        help='Override config staged_batch.staging_root for this run (default: staged_runs).'
     )
     process_parser.add_argument(
         '--force',
@@ -512,7 +534,7 @@ def main():
                     print(f"  {file_path}")
                 return 0
 
-            # Preflight before any processing or file writes
+            # Preflight immediately after discover/dry_run (before any staged-run setup)
             health_result, provider_config, provider_name = _run_provider_preflight(args.config)
             base_url = provider_config.get("base_url", "http://127.0.0.1:11434")
             model = provider_config.get("model", "llava")
@@ -521,11 +543,13 @@ def main():
                 health_result.classification, health_result.next_steps,
             )
 
+            # Early return: unhealthy + abort
             if not health_result.is_healthy and getattr(args, 'offline_mode', 'abort') == 'abort':
                 print(f"Discovered {len(files)} files; provider offline; aborting.")
                 print(abort_msg)
                 return 2
 
+            # Early return: unhealthy + placeholder path (no process_batch, no staged runs)
             if not health_result.is_healthy and getattr(args, 'offline_mode', 'abort') != 'abort':
                 offline_mode = getattr(args, 'offline_mode', 'fill-missing')
                 non_interactive = getattr(args, 'non_interactive', False)
@@ -545,24 +569,8 @@ def main():
                     except (EOFError, KeyboardInterrupt):
                         print(abort_msg)
                         return 2
-                # Run placeholder-only path (no AI calls); use manifest for resume
+                # Placeholder-only: no resolve_run_folder, no BatchManifest, no process_batch
                 from offline_placeholders import run_placeholder_injection
-                from shared.batch_manifest import BatchManifest
-                from shared.batch_queue import DONE_STATUSES, QueueStatus
-                from shared.file_fingerprint import file_fingerprint as get_file_fingerprint
-
-                manifest_path = Path.cwd() / "batch_manifest.json"
-                if manifest_path.exists():
-                    manifest = BatchManifest.load(manifest_path)
-                    manifest.queue.reset_processing_items()
-                else:
-                    manifest = BatchManifest.create_new(
-                        manifest_path.parent,
-                        files=list(files),
-                        manifest_path=manifest_path,
-                    )
-                    manifest.start()
-                manifest.add_files(list(files))
 
                 placeholder_scope = getattr(args, 'placeholder_scope', 'images')
                 total_targets_found = 0
@@ -578,26 +586,6 @@ def main():
 
                 for idx, file_path in enumerate(files, start=1):
                     file_path = Path(file_path)
-                    item = manifest.queue.find_item(file_path) or next(
-                        (i for i in manifest.queue.items if i.path == str(file_path)), None
-                    )
-                    if item is None:
-                        continue
-                    fp_current = get_file_fingerprint(file_path)
-                    stored_fp = (item.result or {}).get("file_fingerprint", "")
-                    if item.status in DONE_STATUSES and stored_fp and stored_fp == fp_current:
-                        print(f"Skipping {idx} of {len(files)}: {file_path.name} (status={item.status.value}, unchanged)")
-                        continue
-                    if item.status in DONE_STATUSES and stored_fp and stored_fp != fp_current:
-                        item.status = QueueStatus.PENDING
-                        item.result = dict(item.result) if item.result else {}
-                        item.completed_at = None
-                        item.error = None
-                        item.started_at = None
-                        print(f"Input changed; reprocessing: {file_path.name}")
-                    item.mark_started()
-                    manifest.save()
-
                     out = run_placeholder_injection(
                         str(file_path),
                         offline_mode,
@@ -606,15 +594,7 @@ def main():
                         treat_pending_as_missing=False,
                         placeholder_scope=placeholder_scope,
                     )
-                    result = {
-                        "file_fingerprint": fp_current,
-                        "provider_offline": True,
-                        "output_path": str(file_path),
-                        "placeholders_applied": out.get("placeholders_applied", 0),
-                    }
                     if out["success"]:
-                        manifest.queue.mark_degraded(item, result)
-                        manifest.save()
                         total_targets_found += out.get("targets_found", 0)
                         total_targets_missing_alt += out.get("targets_missing_alt_found", 0)
                         total_placeholders += out["placeholders_applied"]
@@ -624,12 +604,9 @@ def main():
                         files_written += 1
                         files_written_paths.append(str(file_path))
                     else:
-                        manifest.queue.mark_failed(item, out.get("error", "Unknown error"))
-                        item.result = (item.result or {}) | result
-                        manifest.save()
-                        errors_list.append({"file": str(file_path), "error": out["error"]})
-
-                manifest.finish()
+                        errors_list.append(
+                            {"file": str(file_path), "error": out.get("error", "Unknown error")}
+                        )
 
                 print("\n" + "=" * 60)
                 if total_targets_found == 0:
@@ -682,19 +659,64 @@ def main():
                     return 0
                 return 0 if allow_degraded else 1
 
-            # Provider online: normal batch processing (manifest: new per run, or resume, or none)
-            if getattr(args, 'force_reprocess', False):
-                manifest_path = None
-                print("Manifest strategy: ignored (--force); no manifest read or written.")
-            elif getattr(args, 'resume_manifest', None):
-                manifest_path = Path(args.resume_manifest).resolve()
-                print(f"Manifest strategy: resume from manifest at {manifest_path}")
+            # Provider online: staged-run setup then process_batch
+            if glob.has_magic(target):
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
+                from batch_processor import PPTXBatchProcessor as _BP
+                base_dir, _ = _BP._split_glob(target)
+                input_root = Path(base_dir).resolve()
+            elif len(files) == 1:
+                input_root = Path(files[0]).resolve().parent
             else:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                uid = uuid.uuid4().hex[:8]
-                manifest_path = Path.cwd() / f"batch_{ts}_{uid}_manifest.json"
-                print(f"Manifest strategy: new manifest at {manifest_path}")
-            result = processor.process_batch(files, manifest_path=manifest_path)
+                input_root = Path(os.path.commonpath([str(Path(f).resolve()) for f in files]))
+
+            staging_root = "staged_runs"
+            try:
+                import yaml
+                config_path = getattr(args, 'config', 'config.yaml')
+                cfg_path = Path(config_path)
+                if not cfg_path.is_absolute():
+                    cfg_path = Path(__file__).resolve().parent / cfg_path
+                if cfg_path.exists():
+                    with open(cfg_path) as f:
+                        cfg = yaml.safe_load(f) or {}
+                    staging_root = cfg.get("staged_batch", {}).get("staging_root", "staged_runs")
+            except Exception:
+                pass
+            if getattr(args, 'staging_root', None):
+                staging_root = args.staging_root
+
+            from shared.run_folder import resolve_run_folder_and_manifest, RunFolderResult
+            resolved = resolve_run_folder_and_manifest(
+                input_root=input_root,
+                staging_root=staging_root,
+                run_id=getattr(args, 'run_id', None),
+                resume_manifest=Path(args.resume_manifest).resolve() if getattr(args, 'resume_manifest', None) else None,
+                manifest_dir=Path(args.manifest_dir) if getattr(args, 'manifest_dir', None) else None,
+                force=getattr(args, 'force_reprocess', False),
+            )
+
+            if getattr(args, 'force_reprocess', False):
+                print("Manifest strategy: ignored (--force); no manifest read or written.")
+                result = processor.process_batch(files, manifest_path=None)
+            else:
+                if resolved.run_dir is not None:
+                    (resolved.run_dir / "inputs").mkdir(parents=True, exist_ok=True)
+                    (resolved.run_dir / "outputs").mkdir(parents=True, exist_ok=True)
+                import logging
+                logging.getLogger(__name__).info(
+                    "run_id=%s run_dir=%s manifest_path=%s",
+                    resolved.run_id,
+                    resolved.run_dir,
+                    resolved.manifest_path,
+                )
+                print(f"Manifest strategy: run_id={resolved.run_id} manifest={resolved.manifest_path}")
+                result = processor.process_batch(
+                    files,
+                    manifest_path=resolved.manifest_path,
+                    input_root=input_root,
+                    run_dir=resolved.run_dir,
+                )
 
             print("\nBatch complete")
             print(f"Provider status: ONLINE")
