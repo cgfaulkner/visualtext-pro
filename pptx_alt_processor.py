@@ -1986,6 +1986,8 @@ Examples:
                                help='Skip ALT text injection (generate only)')
     process_parser.add_argument('--dry-run', action='store_true',
                                help='Dry run mode - process and generate manifest but do not modify files')
+    process_parser.add_argument('--strict-llava-gate', action='store_true',
+                               help='Reject thumbnail paths at LLaVA entrypoint (do not convert).')
     
     # Batch process command
     batch_parser = subparsers.add_parser('batch-process', help='Process directory of PPTX files')
@@ -2069,6 +2071,9 @@ Examples:
             mode_override=args.mode,
             use_artifacts=not args.no_artifacts
         )
+
+        if getattr(args, 'strict_llava_gate', False):
+            processor.config_manager.config.setdefault('paths', {})['strict_llava_gate'] = True
 
         if args.command == 'process':
             # Validate input file path (allow absolute paths for batch processing)

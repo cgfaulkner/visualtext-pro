@@ -56,7 +56,15 @@ class AltManifestEntry:
     # File paths (NEW SCHEMA 2.0)
     thumb_path: str = ""                # Path to display thumbnail (for DOCX)
     crop_path: str = ""                 # Path to model input image (cropped from slide)
-    
+
+    # LLaVA gate metadata (optional; backwards compatible)
+    llava_image_path: str = ""
+    llava_image_source: str = ""
+    llava_normalized_path: str = ""
+    llava_image_width: Optional[int] = None
+    llava_image_height: Optional[int] = None
+    llava_image_size_bytes: Optional[int] = None
+
     # Rasterizer information (NEW SCHEMA 2.0)
     rasterizer_info: Dict[str, any] = None  # {"engine": "slide_render|native", "dpi": 150, "status": "success|error"}
     
