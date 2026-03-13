@@ -6,9 +6,11 @@ Unified CLI that dispatches to existing proven processors
 
 import argparse
 import glob
-import sys
 import os
 import subprocess
+import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -311,9 +313,12 @@ def create_parser() -> argparse.ArgumentParser:
         'process',
         help='Process files and make alt text decisions',
         description=(
-            'Process PPTX files for ALT text. Exit codes: 0 = success (or degraded with '
-            '--allow-degraded-exit0); 1 = failed processing or degraded run (placeholders applied); '
-            '2 = provider offline and offline-mode=abort (no processing).'
+            'Process PPTX files for ALT text. Batch manifest: by default a new manifest file is '
+            'created per run in the current working directory (batch_<timestamp>_<id>_manifest.json). '
+            'Resume only when you pass --resume-manifest. Use --force to ignore any manifest and '
+            'process all files (no manifest is read or written). Exit codes: 0 = success (or '
+            'degraded with --allow-degraded-exit0); 1 = failed or degraded run; '
+            '2 = provider offline and offline-mode=abort.'
         )
     )
     process_parser.add_argument('path', help='File or folder to process')
@@ -353,6 +358,22 @@ def create_parser() -> argparse.ArgumentParser:
         choices=['images', 'visuals'],
         default='images',
         help='Placeholder injection scope: images (pictures only) or visuals (shapes too, excl. text)'
+    )
+    process_parser.add_argument(
+        '--resume-manifest',
+        metavar='PATH',
+        dest='resume_manifest',
+        default=None,
+        help='Resume from an existing batch manifest at PATH (skips completed/unchanged files; '
+             'reprocesses when file fingerprint changed). Without this, each run uses a new manifest.'
+    )
+    process_parser.add_argument(
+        '--force',
+        '--reprocess',
+        dest='force_reprocess',
+        action='store_true',
+        help='Ignore any batch manifest for this run: do not read or write a manifest; process all '
+             'discovered files (no skip as unchanged). Use when you want a one-off full run.'
     )
 
     # inject
@@ -465,6 +486,10 @@ def main():
 
         def run_batch(target: str, dry_run: bool) -> int:
             """Discover and optionally process PPTX files in batch."""
+            import logging
+            if getattr(args, 'verbose', False):
+                logging.getLogger().setLevel(logging.DEBUG)
+                logging.getLogger("batch_processor").setLevel(logging.DEBUG)
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'core'))
             from batch_processor import PPTXBatchProcessor
             from shared.path_validator import SecurityError
@@ -657,8 +682,18 @@ def main():
                     return 0
                 return 0 if allow_degraded else 1
 
-            # Provider online: normal batch processing (with optional manifest for resume)
-            manifest_path = Path.cwd() / "batch_manifest.json"
+            # Provider online: normal batch processing (manifest: new per run, or resume, or none)
+            if getattr(args, 'force_reprocess', False):
+                manifest_path = None
+                print("Manifest strategy: ignored (--force); no manifest read or written.")
+            elif getattr(args, 'resume_manifest', None):
+                manifest_path = Path(args.resume_manifest).resolve()
+                print(f"Manifest strategy: resume from manifest at {manifest_path}")
+            else:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                uid = uuid.uuid4().hex[:8]
+                manifest_path = Path.cwd() / f"batch_{ts}_{uid}_manifest.json"
+                print(f"Manifest strategy: new manifest at {manifest_path}")
             result = processor.process_batch(files, manifest_path=manifest_path)
 
             print("\nBatch complete")
