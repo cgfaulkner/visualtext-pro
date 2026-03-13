@@ -242,6 +242,7 @@ class StagedBatchRunner:
                 rel_path = pptx_file.relative_to(input_root)
             except ValueError:
                 rel_path = Path(pptx_file.name)
+            key = str(Path(pptx_file).resolve())
             # Staging layout: preserve relative dir to avoid collisions; filename = final name
             staged_input_path = self.inputs_dir / rel_path
             staged_output_dir = (self.outputs_dir / rel_path).parent
