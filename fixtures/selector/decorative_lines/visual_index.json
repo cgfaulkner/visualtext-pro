@@ -1,0 +1,23 @@
+{
+  "slide_0_shape_10": {
+    "instance_key": "slide_0_shape_10",
+    "slide_idx": 0,
+    "shape_type": "LINE",
+    "bbox": {"left": 50, "top": 200, "width": 80, "height": 0.01},
+    "existing_alt": ""
+  },
+  "slide_0_shape_11": {
+    "instance_key": "slide_0_shape_11",
+    "slide_idx": 0,
+    "shape_type": "LINE",
+    "bbox": {"left": 250, "top": 200, "width": 80, "height": 0.01},
+    "existing_alt": ""
+  },
+  "slide_0_shape_12": {
+    "instance_key": "slide_0_shape_12",
+    "slide_idx": 0,
+    "shape_type": "LINE",
+    "bbox": {"left": 450, "top": 200, "width": 80, "height": 0.01},
+    "existing_alt": ""
+  }
+}

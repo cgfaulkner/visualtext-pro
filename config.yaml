@@ -154,13 +154,23 @@ pre_flight:
 
 # Smart Selector configuration (governs selection, escalation, and manifest validation)
 # ALT values matching these patterns or shorter than min_meaningful_alt_chars
-# are treated as non-meaningful placeholders
+# are treated as non-meaningful placeholders.
+# inclusion_policy: preserve | overwrite | smart (default from alt_text_handling.mode if unset)
+# hard_stop_overlay_types: list of overlay types that trigger defer_to_manual_review
 
 selector:
   enabled: true
   selector_version: "v1.0-rc"          # default until a production release bumps this
   schema_path: "schemas/selector_manifest.schema.json"
   allow_legacy: false                  # block if schema / selector_version mismatch
+  # inclusion_policy: preserve   # optional; falls back to alt_text_handling.mode
+  # hard_stop_overlay_types: ["error_dialog", "system_modal"]   # optional
+  # Shape-built diagram clustering: virtual_group only when (connector between members) OR (>=2 meaningful nearby labels)
+  synthetic_diagram:
+    enabled: true
+    proximity_px: 40
+    required_alignment_fraction: 0.6
+    confidence_threshold: 0.6
   placeholder_alt_patterns:
     - "(?i)click to add"
     - "(?i)image"

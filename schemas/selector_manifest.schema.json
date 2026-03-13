@@ -71,7 +71,10 @@
               "type": "array",
               "items": { "type": "string" }
             },
-            "detected_subtype": { "type": "string" }
+            "detected_subtype": { "type": "string" },
+            "confidence": { "type": "number" },
+            "tie_breaker_signals": { "type": "object" },
+            "selector_version_notes": { "type": "string" }
           },
           "additionalProperties": true
         }
@@ -79,7 +82,9 @@
       "additionalProperties": false,
       "if": {
         "properties": {
-          "selector_decision": { "const": "exclude_redundant" }
+          "selector_decision": {
+            "enum": ["exclude_redundant", "preserve_conflict"]
+          }
         }
       },
       "then": {

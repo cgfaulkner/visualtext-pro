@@ -1,0 +1,35 @@
+[
+  {
+    "selector_version": "1.0.0",
+    "element_id": "slide_0_shape_10",
+    "parent_group_id": null,
+    "selector_decision": "exclude_decorative",
+    "content_scope": "image",
+    "reason_code": "exclude_decorative_structure",
+    "human_reason": "Decorative element (structural)",
+    "escalation_strategy": "none",
+    "metadata": {"original_shape_type": "LINE"}
+  },
+  {
+    "selector_version": "1.0.0",
+    "element_id": "slide_0_shape_11",
+    "parent_group_id": null,
+    "selector_decision": "exclude_decorative",
+    "content_scope": "image",
+    "reason_code": "exclude_decorative_structure",
+    "human_reason": "Decorative element (structural)",
+    "escalation_strategy": "none",
+    "metadata": {"original_shape_type": "LINE"}
+  },
+  {
+    "selector_version": "1.0.0",
+    "element_id": "slide_0_shape_12",
+    "parent_group_id": null,
+    "selector_decision": "exclude_decorative",
+    "content_scope": "image",
+    "reason_code": "exclude_decorative_structure",
+    "human_reason": "Decorative element (structural)",
+    "escalation_strategy": "none",
+    "metadata": {"original_shape_type": "LINE"}
+  }
+]

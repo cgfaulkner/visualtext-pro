@@ -139,7 +139,7 @@ For each Candidate Visual Element, the Smart Selector **MUST** produce a single 
   "selector_version": "string",                // semantic version or commit/tag of selector
   "element_id": "string",                      // stable identifier for this element (required)
   "parent_group_id": "string|null",            // id of parent GROUP when applicable (required if suppressed as child)
-  "selector_decision": "include_atomic | include_group | exclude_decorative | exclude_redundant | escalate_manual_review",
+  "selector_decision": "include_atomic | include_group | exclude_decorative | exclude_redundant | escalate_manual_review | preserve_conflict",
   "content_scope": "image | group | slide_context",
   "reason_code": "machine_readable_string",
   "human_reason": "Short explanation for logs and review docs",
@@ -152,6 +152,7 @@ Normative rules for the shape above:
 
 * `element_id` is required for every record.
 * If `selector_decision == exclude_redundant` or a child is suppressed by a parent group selection then `parent_group_id` MUST be present and reference the `element_id` of the selected parent group.
+* `preserve_conflict` is used only for a child element when the group is selected for inclusion and the child has existing meaningful ALT under preserve policy; it documents the conflict for review (see Sections 6 and 9). When `selector_decision == preserve_conflict`, `parent_group_id` MUST be present.
 * `selector_decision` must include the value `escalate_manual_review` to represent deterministic deferral cases.
 * `escalation_strategy` must be set for every record. Mappings:
   * `escalate_manual_review` → `escalation_strategy = defer_to_manual_review` (required).
@@ -222,6 +223,8 @@ The Smart Selector **MUST**:
 * Multiple shapes + directional arrows
 * Decision: `include_group`
 * ALT describes the process, not each image
+
+The same composite semantics (one include_group anchor, members exclude_redundant) may be applied to **structural (synthetic) clusters** when the slide contains shape-built diagrams with connector or label evidence, per implementation plan (connector-or-label rule, proximity and confidence thresholds). Such clusters are not necessarily PowerPoint GROUP shapes.
 
 > ⚠️ Formal detection heuristics (e.g., label-arrow co-occurrence rules, relative bounding heuristics) are implementation details and must be recorded in selector_versioned releases.
 

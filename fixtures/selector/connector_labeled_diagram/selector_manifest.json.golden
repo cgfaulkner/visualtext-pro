@@ -1,0 +1,45 @@
+[
+  {
+    "selector_version": "1.0.0",
+    "element_id": "slide_0_shape_20",
+    "parent_group_id": null,
+    "selector_decision": "include_group",
+    "content_scope": "group",
+    "reason_code": "include_group_synthetic_diagram",
+    "human_reason": "Synthetic diagram: connector present",
+    "escalation_strategy": "none",
+    "metadata": {
+      "original_shape_type": "CONNECTOR",
+      "confidence": 0.6,
+      "tie_breaker_signals": {
+        "anchor": "slide_0_shape_20",
+        "connector_present": true,
+        "nearby_label_count": 0,
+        "member_count": 3
+      },
+      "selector_version_notes": "- Connector-or-label rule: virtual_group only when (connector between members) OR (>=2 meaningful nearby labels). Proximity 40px, alignment fraction 0.6. Confidence threshold 0.6; below triggers render_and_assist. Anchor selection: smallest element_id lexicographically."
+    }
+  },
+  {
+    "selector_version": "1.0.0",
+    "element_id": "slide_0_shape_21",
+    "parent_group_id": "slide_0_shape_20",
+    "selector_decision": "exclude_redundant",
+    "content_scope": "group",
+    "reason_code": "exclude_redundant_synthetic_diagram_member",
+    "human_reason": "Excluded as member of shape-built diagram",
+    "escalation_strategy": "none",
+    "metadata": {"original_shape_type": "AUTO_SHAPE"}
+  },
+  {
+    "selector_version": "1.0.0",
+    "element_id": "slide_0_shape_22",
+    "parent_group_id": "slide_0_shape_20",
+    "selector_decision": "exclude_redundant",
+    "content_scope": "group",
+    "reason_code": "exclude_redundant_synthetic_diagram_member",
+    "human_reason": "Excluded as member of shape-built diagram",
+    "escalation_strategy": "none",
+    "metadata": {"original_shape_type": "TEXT_BOX"}
+  }
+]

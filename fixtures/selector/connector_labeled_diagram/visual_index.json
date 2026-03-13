@@ -1,0 +1,24 @@
+{
+  "slide_0_shape_20": {
+    "instance_key": "slide_0_shape_20",
+    "slide_idx": 0,
+    "shape_type": "CONNECTOR",
+    "bbox": {"left": 200, "top": 150, "width": 40, "height": 8},
+    "existing_alt": ""
+  },
+  "slide_0_shape_21": {
+    "instance_key": "slide_0_shape_21",
+    "slide_idx": 0,
+    "shape_type": "AUTO_SHAPE",
+    "bbox": {"left": 205, "top": 145, "width": 30, "height": 20},
+    "existing_alt": ""
+  },
+  "slide_0_shape_22": {
+    "instance_key": "slide_0_shape_22",
+    "slide_idx": 0,
+    "shape_type": "TEXT_BOX",
+    "bbox": {"left": 210, "top": 148, "width": 25, "height": 10},
+    "text_content": "Single label only",
+    "existing_alt": ""
+  }
+}

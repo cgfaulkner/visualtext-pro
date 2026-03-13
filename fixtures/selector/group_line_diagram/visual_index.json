@@ -1,0 +1,39 @@
+{
+  "slide_0_shape_1": {
+    "instance_key": "slide_0_shape_1",
+    "slide_idx": 0,
+    "shape_type": "LINE",
+    "bbox": {"left": 100, "top": 100, "width": 20, "height": 10},
+    "existing_alt": ""
+  },
+  "slide_0_shape_2": {
+    "instance_key": "slide_0_shape_2",
+    "slide_idx": 0,
+    "shape_type": "CONNECTOR",
+    "bbox": {"left": 130, "top": 100, "width": 25, "height": 10},
+    "existing_alt": ""
+  },
+  "slide_0_shape_3": {
+    "instance_key": "slide_0_shape_3",
+    "slide_idx": 0,
+    "shape_type": "TEXT_BOX",
+    "bbox": {"left": 105, "top": 95, "width": 30, "height": 12},
+    "text_content": "Step one process flow",
+    "existing_alt": ""
+  },
+  "slide_0_shape_4": {
+    "instance_key": "slide_0_shape_4",
+    "slide_idx": 0,
+    "shape_type": "TEXT_BOX",
+    "bbox": {"left": 135, "top": 98, "width": 35, "height": 12},
+    "text_content": "Step two process flow",
+    "existing_alt": ""
+  },
+  "slide_0_shape_5": {
+    "instance_key": "slide_0_shape_5",
+    "slide_idx": 0,
+    "shape_type": "AUTO_SHAPE",
+    "bbox": {"left": 115, "top": 105, "width": 25, "height": 15},
+    "existing_alt": ""
+  }
+}
