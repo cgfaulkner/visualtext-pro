@@ -54,7 +54,7 @@ def get_allowed_base_dirs() -> list[Path]:
     project_root = get_project_root()
 
     # project_root allows any path under repo; canonical runtime folders listed explicitly.
-    # TODO: prefer loading allowed base dirs from config.yaml (see docs/cleanup-summary.md).
+    # TODO: prefer loading allowed base dirs from config.yaml (see README path configuration).
     allowed_dirs = [
         project_root,  # Allow entire project directory
         project_root / "documents_to_review",  # Canonical input folder

@@ -1,5 +1,7 @@
 # Implementation Plan: Conversion-First LLaVA Gate (Revised)
 
+**Status: Implemented.** Current behavior and config are documented in [artifacts_thumbs_vs_normalized.md](artifacts_thumbs_vs_normalized.md) and config.yaml (`paths.strict_llava_gate`, `llava.min_normalized_width`).
+
 **Goal:** Single unified gate at the LLaVA entrypoint with default convert-then-proceed, optional strict rejection, safe path validation, atomic conversion, structured logging, and backwards-compatible metadata. Minimal scope: no architecture rewrite.
 
 ---
