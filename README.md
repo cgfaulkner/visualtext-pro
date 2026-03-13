@@ -1,17 +1,24 @@
-# VisualText Pro - Multi-Format Accessibility Toolkit
+# VisualText Pro
 
-## Overview
+**Multi-format accessibility toolkit for PowerPoint presentations.** Extract visual elements, generate alternative text using local AI (LLaVA), and inject descriptions back into slides. Focuses on meaningful accessibility while filtering placeholders and handling grouped shapes intelligently.
 
-VisualText Pro is a comprehensive accessibility toolkit for extracting visual elements from PowerPoint presentations, generating high-quality alternative text using AI vision models, and injecting the descriptions back into slides. The toolkit focuses on meaningful accessibility improvements while filtering out placeholder content and handling complex grouped shapes intelligently.
+## Key Features
 
-**Key Features:**
 - AI-powered ALT text generation using local LLaVA models
 - Smart filtering of PowerPoint placeholder text boxes
 - Intelligent handling of grouped shapes with semantic roll-up
-- Multiple processing pipelines for different workflow needs
-- Preserve/replace/smart ALT text policies
-- Batch processing capabilities
+- Preserve / smart / overwrite ALT text policies
+- Batch processing with checkpoint and resume
 - Review document generation for human oversight
+
+## Start Here
+
+| You are… | Start with |
+|----------|------------|
+| **New user / operator** | [Quick Start](#quick-start) → [Common commands](#most-common-commands-copy-paste) → [batch_manifest_skip_explained](docs/batch_manifest_skip_explained.md) for resume and force reprocess |
+| **Developer / contributor** | [docs/README.md](docs/README.md) (docs index) → [entry-points-and-call-flow](docs/entry-points-and-call-flow.md) → [alt-text-generation-workflow](docs/alt-text-generation-workflow.md) |
+
+For a single-page pipeline overview in plain English, see [docs/system-overview.md](docs/system-overview.md).
 
 ## Repository Structure
 
@@ -34,7 +41,7 @@ From the repository root:
 
 The **archive/** directory holds legacy code and is not used for active development.
 
-**Runtime folders:** Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; place input presentations in **documents_to_review/**. Contents of these folders are ignored by git. See `.gitignore` and docs/cleanup-summary.md.
+**Runtime folders:** Required runtime folders (**documents_to_review**, **reviewed_reports**, **slide_thumbnails**, **temp**) are included in the repository with README stubs; place input presentations in **documents_to_review/**. Contents of these folders are ignored by git. See `.gitignore`.
 
 ## Quick Start
 
@@ -66,7 +73,7 @@ python altgen.py --dry-run process "documents_to_review"
 python altgen.py process "documents_to_review"
 ```
 
-Manifest and per-file artifacts live under the **input directory** at `staged_runs/<run_id>/` (config: `staged_batch.staging_root`). Coverage report JSONs are written under the same run output tree (`staged_runs/<run_id>/outputs/<relative_path>/`) with filename `{input_stem}_coverage_report.json`; when running without a run folder (e.g. `--force` or single-file), they are written next to the PPTX with the same naming. Resume with `--run-id <id>` or `--resume-manifest <path>`; use `--force` to reprocess all without a manifest.
+**Staged batch workflow:** Manifest and per-file artifacts live under the input directory at `<input_root>/staged_runs/<run_id>/`. Each run folder contains `manifest.json` and `outputs/<relative_path>/`. Resume with `--run-id <id>` or `--resume-manifest <path>`; use `--force` to reprocess all without a manifest. See [docs/batch_manifest_skip_explained.md](docs/batch_manifest_skip_explained.md).
 
 ### Approval document (Word review doc)
 
@@ -293,6 +300,27 @@ When you run `process` on a batch (folder or glob), the tool checks provider (e.
 
 Use `python altgen.py process --help` for related flags (`--non-interactive`, `--yes`, `--debug-offline-placeholders`).
 
+## Architecture Overview
+
+The pipeline: (1) extracts visual elements from PowerPoint slides; (2) runs the **Smart Selector** to decide which elements get ALT text and at what level; (3) generates **derivative images** — thumbnails for review docs only, normalized images for LLaVA only; (4) sends normalized images to LLaVA for ALT generation; (5) injects ALT text back into the PPTX; (6) ensures a **Disclosures** slide at position 2 when needed; (7) saves. Batch runs use a **staged workflow** with checkpoint/resume under `<input_root>/staged_runs/<run_id>/`. For detail, see [docs/system-overview.md](docs/system-overview.md) and the [docs index](docs/README.md).
+
+**User-visible behaviors:**
+- **Disclosure slide** — Processed PPTX files include a standard "Disclosures" slide at position 2 when needed to indicate AI-generated ALT text.
+- **Staged batch workflow** — Batch runs create `<input_root>/staged_runs/<run_id>/` with `manifest.json` and `outputs/<relative_path>/`. Resume with `--run-id` or `--resume-manifest`.
+- **Image derivative separation** — Thumbnails are for review documents only; normalized images are for LLaVA/model input only. See [docs/artifacts_thumbs_vs_normalized.md](docs/artifacts_thumbs_vs_normalized.md).
+
+## Documentation
+
+| Doc | Purpose |
+|-----|---------|
+| [docs/README.md](docs/README.md) | Docs index and navigation |
+| [docs/system-overview.md](docs/system-overview.md) | Single-page pipeline overview |
+| [docs/batch_completion_criteria.md](docs/batch_completion_criteria.md) | Batch statuses, resume, manifest location |
+| [docs/batch_manifest_skip_explained.md](docs/batch_manifest_skip_explained.md) | Why files are skipped; force reprocess |
+| [docs/artifacts_thumbs_vs_normalized.md](docs/artifacts_thumbs_vs_normalized.md) | Thumbnails vs normalized images |
+| [docs/entry-points-and-call-flow.md](docs/entry-points-and-call-flow.md) | Entry points and call flow |
+| [docs/alt-text-generation-workflow.md](docs/alt-text-generation-workflow.md) | End-to-end ALT workflow |
+
 ## Configuration
 
 You may want to customize decorative_rules in config.yaml to mark your institution's logos as decorative.
@@ -366,6 +394,11 @@ prompts:
 - Technical diagrams with relationship awareness
 - Photos and meaningful graphics
 
+### Output behavior
+
+- **Disclosure slide:** Every processed PPTX is saved with a standard "Disclosures" slide at position 2 (second slide) when not already present, indicating AI was used to create ALT text.
+- **Image derivatives:** Thumbnails are for review documents (DOCX) only; normalized images are used only as LLaVA/model input. See [docs/artifacts_thumbs_vs_normalized.md](docs/artifacts_thumbs_vs_normalized.md).
+
 ### Error Handling and Recovery
 
 - **LLaVA Connection Issues**: Automatic retry with exponential backoff
@@ -429,8 +462,11 @@ python altgen.py process "/presentations/*.pptx" --exclude "*template*" --exclud
 
 **Resume interrupted batch:**
 ```bash
-python altgen.py --resume batch_manifest.jsonl process /presentations/
+python altgen.py process "documents_to_review" --run-id <run_id>
+# or with explicit manifest path:
+python altgen.py process "documents_to_review" --resume-manifest path/to/staged_runs/<run_id>/manifest.json
 ```
+See [docs/batch_manifest_skip_explained.md](docs/batch_manifest_skip_explained.md) for why files are skipped and how to force reprocess.
 
 ### Integration with Document Management
 

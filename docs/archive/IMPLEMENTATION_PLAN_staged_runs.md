@@ -1,5 +1,7 @@
 # Implementation Plan: Staged Runs (Manifest & Per-File Artifacts)
 
+**Status: Implemented.** Current behavior is documented in [batch_completion_criteria.md](batch_completion_criteria.md) and the root README (batch/staged runs).
+
 **Goal:** Move batch manifests and per-file artifacts out of project CWD into a per-input-root staged run folder for directory inputs. Keep non-staged single-file behavior unchanged when `manifest_path` is None.
 
 **Reference:** Existing staged_runs plan; this document is the canonical implementation spec.

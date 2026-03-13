@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Shared constants for manifest atomic write (batch_manifest.py and batch_queue.py).
-Keep in sync with docs/IMPLEMENTATION_PLAN_staged_runs.md.
+Keep in sync with docs/batch_completion_criteria.md (atomic write).
 """
 
 # Retries for os.replace before fallback

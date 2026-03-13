@@ -12,8 +12,8 @@ Skipped (unchanged): N
 
 ## Manifest location and default behaviour
 
-- **Default (no flags):** Each run creates a **new** run folder under the **input directory** at `<staging_root>/<run_id>/manifest.json` (default `staged_runs`). Run_id is UTC (e.g. `20260313_153000`). Per-file artifacts go under `staged_runs/<run_id>/outputs/<relative_path>/`.- **Running from different folders:** The manifest is always in CWD. So if you run from project root you get a manifest in the project root; if you run from another folder you get a manifest there. Different working directories therefore use different manifests—which is intended so runs from different places don’t share state.
-- **Resume:** Skipping as “complete, unchanged” only happens when you **explicitly** pass `--resume-manifest <path>`. Then the tool loads that manifest and skips completed/unchanged files.
+- **Default (no flags):** Each run creates a **new** run folder under the **input directory** at `<input_root>/<staging_root>/<run_id>/` (config: `staged_batch.staging_root`, default `staged_runs`). The manifest file is `<run_id>/manifest.json`. Run_id is UTC (e.g. `20260313_153000`). Per-file artifacts go under `<run_id>/outputs/<relative_path>/`. Manifest is under the input directory, not in CWD.
+- **Resume:** Skipping as "complete, unchanged" only happens when you pass `--resume-manifest <path>` or `--run-id <id>`. With `--resume-manifest`, the tool loads that manifest file; with `--run-id`, it uses `<input_root>/<staging_root>/<run_id>/manifest.json`.
 
 ## Root cause (when using --resume-manifest)
 
@@ -66,7 +66,11 @@ No manifest is read or written; no files are skipped as “unchanged”.
 To reuse a previous run’s state (skip completed/unchanged, reprocess changed):
 
 ```bash
-python altgen.py process "documents_to_review" --resume-manifest path/to/batch_20260312_120017_a1b2c3d4_manifest.json
+# By run-id (manifest at input_root/staged_runs/<run_id>/manifest.json)
+python altgen.py process "documents_to_review" --run-id 20260312_120017
+
+# Or by explicit manifest path
+python altgen.py process "documents_to_review" --resume-manifest path/to/staged_runs/20260312_120017/manifest.json
 ```
 
 ### 4. Inspect why something was skipped (debug)
@@ -78,16 +82,16 @@ python altgen.py process "documents_to_review" --verbose
 ```
 
 When a file is skipped, the log will include:
-- The **manifest path** (e.g. `.../batch_<timestamp>_<id>_manifest.json`) in an info-level message.
+- The **manifest path** (e.g. `.../staged_runs/<run_id>/manifest.json`) in an info-level message.
 - At **debug** level: **current** and **stored** fingerprint for that file (mtime_ns and size), so you can confirm they match.
 
 ## Summary
 
 | Item              | Detail                                                                 |
 |-------------------|------------------------------------------------------------------------|
-| Default manifest  | New file per run: `batch_<timestamp>_<id>_manifest.json` in **CWD**   |
-| Manifest location | CWD = where you run the command; different folders → different manifests |
-| Resume            | Only when you pass `--resume-manifest PATH`                           |
+| Default manifest  | New run per batch: `<input_root>/<staging_root>/<run_id>/manifest.json` (default `staging_root`: `staged_runs`) |
+| Manifest location | Under input directory; not in CWD. Run folder holds manifest and `outputs/<rel_path>/` artifacts. |
+| Resume            | `--resume-manifest <path>` or `--run-id <id>` to resume that run       |
 | Entry keying      | File path (string + resolved absolute path for matching)              |
 | “Unchanged”       | Input file fingerprint (mtime_ns + size) equals stored fingerprint    |
 | Why skipped       | When resuming: manifest has COMPLETE + matching fingerprint           |
