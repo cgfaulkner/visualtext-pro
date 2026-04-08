@@ -4,7 +4,7 @@ python-docx==1.2.0
 PyYAML==6.0.3
 requests==2.32.5
 numpy>=1.26.4,<2
-tqdm==4.67.2
+tqdm==4.67.3
 pytictoc==1.5.3
 opencv-python==4.10.0.84
 psutil>=5.9.0
